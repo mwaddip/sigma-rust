@@ -9,6 +9,16 @@ use sigma_ser::{
 
 use crate::nipopow_algos::NipopowAlgos;
 
+/// Upper bound for prefix/suffix element counts in a NiPoPow proof.
+/// Real proofs never exceed a few hundred entries; 20 000 is generous.
+const MAX_NIPOPOW_PROOF_ELEMENTS: usize = 20_000;
+/// Upper bound for a serialized header within a PoPowHeader (bytes).
+const MAX_POPOW_HEADER_BYTES: usize = 10_000;
+/// Upper bound for the number of interlinks in a PoPowHeader.
+const MAX_POPOW_INTERLINKS: usize = 10_000;
+/// Upper bound for the serialized interlinks proof (bytes).
+const MAX_POPOW_PROOF_BYTES: usize = 1_000_000;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 /// A structure representing NiPoPow proof as a persistent modifier.
 pub struct NipopowProof {
@@ -216,6 +226,11 @@ impl ScorexSerializable for NipopowProof {
         let m = r.get_u32()?;
         let k = r.get_u32()?;
         let num_prefixes = r.get_u32()? as usize;
+        if num_prefixes > MAX_NIPOPOW_PROOF_ELEMENTS {
+            return Err(ScorexParsingError::Io(
+                "num_prefixes exceeds sanity limit".into(),
+            ));
+        }
         let mut prefix = Vec::with_capacity(num_prefixes);
         for _ in 0..num_prefixes {
             let _size = r.get_u32()?;
@@ -224,6 +239,11 @@ impl ScorexSerializable for NipopowProof {
         let _suffix_head_size = r.get_u32()?;
         let suffix_head = PoPowHeader::scorex_parse(r)?;
         let num_suffix_tail = r.get_u32()? as usize;
+        if num_suffix_tail > MAX_NIPOPOW_PROOF_ELEMENTS {
+            return Err(ScorexParsingError::Io(
+                "num_suffix_tail exceeds sanity limit".into(),
+            ));
+        }
         let mut suffix_tail = Vec::with_capacity(num_suffix_tail);
         for _ in 0..num_suffix_tail {
             let _size = r.get_u32();
@@ -320,12 +340,22 @@ impl ScorexSerializable for PoPowHeader {
     }
 
     fn scorex_parse<R: ReadSigmaVlqExt>(r: &mut R) -> Result<Self, ScorexParsingError> {
-        let header_size = r.get_u32()?;
-        let mut buf = vec![0; header_size as usize];
+        let header_size = r.get_u32()? as usize;
+        if header_size > MAX_POPOW_HEADER_BYTES {
+            return Err(ScorexParsingError::Io(
+                "header_size exceeds sanity limit".into(),
+            ));
+        }
+        let mut buf = vec![0; header_size];
         r.read_exact(&mut buf)?;
         let header = Header::scorex_parse(&mut std::io::Cursor::new(buf))?;
 
-        let interlinks_size = r.get_u32()?;
+        let interlinks_size = r.get_u32()? as usize;
+        if interlinks_size > MAX_POPOW_INTERLINKS {
+            return Err(ScorexParsingError::Io(
+                "interlinks_size exceeds sanity limit".into(),
+            ));
+        }
 
         let interlinks: Result<Vec<BlockId>, ScorexParsingError> = (0..interlinks_size)
             .map(|_| {
@@ -336,6 +366,11 @@ impl ScorexSerializable for PoPowHeader {
             .collect();
 
         let proof_bytes = r.get_u32()? as usize;
+        if proof_bytes > MAX_POPOW_PROOF_BYTES {
+            return Err(ScorexParsingError::Io(
+                "proof_bytes exceeds sanity limit".into(),
+            ));
+        }
         let mut proof_buf = vec![0u8; proof_bytes];
         r.read_exact(&mut proof_buf)?;
         let interlinks_proof = BatchMerkleProof::scorex_parse_bytes(&proof_buf);
@@ -465,13 +500,6 @@ pub mod tests {
 
     /// Constructs a deliberately-skipped prefix and asserts the JVM-tolerant
     /// `has_valid_connections` accepts it.
-    ///
-    /// Layout: `h0 -> h1 -> h2 -> h3 -> suffix_head`. `h2.parent_id` is set
-    /// to an unrelated id (NOT `h1.id`) and `h1.id` is **not** in
-    /// `h2.interlinks`, so the strict (pre-fix) verifier would have rejected
-    /// at index 2. The tolerant verifier MUST accept because `h0.id` is in
-    /// `h2.interlinks` and `h0` is within the lookback window
-    /// (`use_last_epochs + 3 = 11` predecessors by default).
     #[test]
     fn has_valid_connections_accepts_skipped_prefix_entry() {
         let mk_header = header_factory();
@@ -484,22 +512,14 @@ pub mod tests {
         let suffix_tail_id = id_from_byte(6);
         let unrelated_parent = id_from_byte(0xff);
 
-        // h0: genesis. parent_id is irrelevant for index 0.
         let h0 = pop_header(mk_header(h0_id, id_from_byte(0), 1), vec![h0_id]);
-        // h1: connects via parent_id == h0.id.
         let h1 = pop_header(mk_header(h1_id, h0_id, 10), vec![h0_id]);
-        // h2: parent_id is UNRELATED (not h1) and h1.id is NOT in interlinks,
-        // but h0.id IS in interlinks → tolerant verifier connects via h0
-        // through the lookback window.
         let h2 = pop_header(mk_header(h2_id, unrelated_parent, 20), vec![h0_id]);
-        // h3: connects via parent_id == h2.id.
         let h3 = pop_header(mk_header(h3_id, h2_id, 30), vec![h0_id, h2_id]);
-        // suffix_head: connects via parent_id == h3.id.
         let suffix_head = pop_header(
             mk_header(suffix_head_id, h3_id, 40),
             vec![h0_id, h2_id, h3_id],
         );
-        // suffix_tail must be a strict parent_id chain.
         let suffix_tail = vec![mk_header(suffix_tail_id, suffix_head_id, 41)];
 
         let proof = NipopowProof::new(
@@ -519,14 +539,6 @@ pub mod tests {
         );
     }
 
-    /// Constructs a prefix with a gap LARGER than the lookback window and
-    /// asserts the verifier still rejects. This proves the fix is not a
-    /// blanket accept-all.
-    ///
-    /// We squeeze the lookback by setting `use_last_epochs = 0`, which gives
-    /// `lookback_span = 3`. The chain is then designed so that the bad entry
-    /// (suffix_head, at index 4) only connects backward to index 0, which is
-    /// outside the `[1, 3]` lookback range.
     #[test]
     fn has_valid_connections_rejects_too_far_skip() {
         let mk_header = header_factory();
@@ -543,10 +555,6 @@ pub mod tests {
         let h1 = pop_header(mk_header(h1_id, h0_id, 10), vec![h0_id]);
         let h2 = pop_header(mk_header(h2_id, h1_id, 20), vec![h0_id, h1_id]);
         let h3 = pop_header(mk_header(h3_id, h2_id, 30), vec![h0_id, h2_id]);
-        // suffix_head's parent is unrelated, h0 is its only interlink, and
-        // h1/h2/h3 ids are NOT among its interlinks. With lookback span 3,
-        // the lookback window for index 4 covers indices [1, 3] only —
-        // h0 (index 0) is excluded → no valid predecessor → REJECT.
         let suffix_head = pop_header(
             mk_header(suffix_head_id, unrelated_parent, 40),
             vec![h0_id],
@@ -562,8 +570,6 @@ pub mod tests {
         )
         .unwrap();
 
-        // Squeeze the lookback window to size 3 (= use_last_epochs + 3)
-        // so a small synthetic chain can demonstrate the boundary.
         proof.popow_algos.use_last_epochs = 0;
 
         assert!(
@@ -573,9 +579,6 @@ pub mod tests {
         );
     }
 
-    /// Sanity check: a proof whose suffix tail is broken (parent_id chain
-    /// violated) must still be rejected. Ensures we didn't accidentally
-    /// loosen the suffix-side check while loosening the prefix-side check.
     #[test]
     fn has_valid_connections_rejects_broken_suffix_tail() {
         let mk_header = header_factory();
@@ -590,8 +593,6 @@ pub mod tests {
             mk_header(suffix_head_id, h0_id, 10),
             vec![h0_id],
         );
-        // suffix_tail header's parent_id is unrelated to suffix_head.id
-        // → suffix-side check must fail.
         let suffix_tail = vec![mk_header(suffix_tail_id, bad_parent, 11)];
 
         let proof = NipopowProof::new(
@@ -607,6 +608,58 @@ pub mod tests {
             !proof.has_valid_connections(),
             "broken suffix tail (parent_id chain violation) must still be \
              rejected after the prefix-tolerance fix"
+        );
+    }
+
+    /// Helper: VLQ-encode a u32 into bytes.
+    fn vlq_encode_u32(v: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        sigma_ser::vlq_encode::WriteSigmaVlqExt::put_u32(&mut buf, v).unwrap();
+        buf
+    }
+
+    #[test]
+    fn crafted_huge_prefix_count_returns_err() {
+        let mut payload = Vec::new();
+        payload.extend(vlq_encode_u32(1)); // m
+        payload.extend(vlq_encode_u32(1)); // k
+        payload.extend(vlq_encode_u32(0x7FFF_FFFF)); // num_prefixes
+        payload.extend_from_slice(&[0u8; 16]); // padding
+
+        let result =
+            NipopowProof::scorex_parse(&mut std::io::Cursor::new(payload));
+        assert!(
+            result.is_err(),
+            "Expected Err for huge num_prefixes, got Ok"
+        );
+    }
+
+    #[test]
+    fn crafted_huge_header_size_returns_err() {
+        let mut payload = Vec::new();
+        payload.extend(vlq_encode_u32(0x7FFF_FFFF)); // header_size
+        payload.extend_from_slice(&[0u8; 16]); // padding
+
+        let result =
+            PoPowHeader::scorex_parse(&mut std::io::Cursor::new(payload));
+        assert!(
+            result.is_err(),
+            "Expected Err for huge header_size, got Ok"
+        );
+    }
+
+    #[test]
+    fn crafted_header_size_just_over_limit_returns_err() {
+        let mut payload = Vec::new();
+        let over_limit = (MAX_POPOW_HEADER_BYTES as u32) + 1;
+        payload.extend(vlq_encode_u32(over_limit)); // header_size
+        payload.extend_from_slice(&[0u8; 16]); // padding
+
+        let result =
+            PoPowHeader::scorex_parse(&mut std::io::Cursor::new(payload));
+        assert!(
+            result.is_err(),
+            "Expected Err for header_size > limit, got Ok"
         );
     }
 }
