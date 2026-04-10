@@ -38,6 +38,12 @@ pub(crate) static SELF_BOX_INDEX_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| 
             obj
         )));
     }
+    // JVM bug compatibility: selfBoxIndex always returned -1 before JIT activation
+    // (v5.0, block version 3, activated_script_version >= 2).
+    // See: https://github.com/ScorexFoundation/sigmastate-interpreter/issues/603
+    if ctx.activated_script_version() < ergotree_ir::ergo_tree::ErgoTreeVersion::V2 {
+        return Ok(Value::Int(-1));
+    }
     let box_index = ctx
         .inputs
         .iter()
