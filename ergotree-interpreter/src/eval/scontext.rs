@@ -38,10 +38,10 @@ pub(crate) static SELF_BOX_INDEX_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| 
             obj
         )));
     }
-    // JVM bug compatibility: selfBoxIndex always returned -1 before JIT activation
-    // (v5.0, block version 3, activated_script_version >= 2).
+    // JVM bug compatibility: selfBoxIndex always returned -1 in the v4.x
+    // semantics that apply to pre-v2 ErgoTree scripts (versions V0/V1).
     // See: https://github.com/ScorexFoundation/sigmastate-interpreter/issues/603
-    if ctx.activated_script_version() < ergotree_ir::ergo_tree::ErgoTreeVersion::V2 {
+    if ctx.tree_version() < ergotree_ir::ergo_tree::ErgoTreeVersion::V2 {
         return Ok(Value::Int(-1));
     }
     let box_index = ctx
@@ -147,51 +147,56 @@ mod tests {
     use ergotree_ir::mir::method_call::MethodCall;
     use ergotree_ir::mir::property_call::PropertyCall;
     use ergotree_ir::mir::value::Value;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
     use ergotree_ir::serialization::SigmaSerializable;
     use ergotree_ir::types::scontext::{self, GET_VAR_FROM_INPUT_METHOD};
     use ergotree_ir::types::stype::LiftIntoSType;
     use ergotree_ir::types::stype_param::STypeVar;
     use sigma_test_util::force_any_val;
+    use core::cell::Cell;
 
-    fn make_ctx_inputs_includes_self_box(block_version: u8) -> Context<'static> {
+    fn make_ctx_inputs_includes_self_box(tree_version: ErgoTreeVersion) -> Context<'static> {
         let ctx = force_any_val::<Context>();
         let self_box = &*Box::leak(Box::new(force_any_val::<ErgoBox>()));
         let inputs = vec![&*Box::leak(Box::new(force_any_val::<ErgoBox>())), self_box]
             .try_into()
             .unwrap();
-        let pre_header = PreHeader {
-            version: block_version,
-            ..ctx.pre_header.clone()
-        };
         Context {
             height: 0u32,
             self_box,
             inputs,
-            pre_header,
+            tree_version: Cell::new(tree_version),
             ..ctx
         }
     }
 
     #[test]
-    fn eval_self_box_index_post_jit() {
+    fn eval_self_box_index_v2_tree() {
         let expr: Expr =
             PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
                 .unwrap()
                 .into();
-        // Block version 3 → activated_script_version = 2 (JIT active)
-        let context = make_ctx_inputs_includes_self_box(3);
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V2);
         assert_eq!(eval_out::<i32>(&expr, &context), 1);
     }
 
     #[test]
-    fn eval_self_box_index_pre_jit() {
+    fn eval_self_box_index_v0_tree() {
         let expr: Expr =
             PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
                 .unwrap()
                 .into();
-        // Block version 1 → activated_script_version = 0 (pre-JIT)
-        // JVM bug #603: selfBoxIndex always returned -1
-        let context = make_ctx_inputs_includes_self_box(1);
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V0);
+        assert_eq!(eval_out::<i32>(&expr, &context), -1);
+    }
+
+    #[test]
+    fn eval_self_box_index_v1_tree() {
+        let expr: Expr =
+            PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
+                .unwrap()
+                .into();
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V1);
         assert_eq!(eval_out::<i32>(&expr, &context), -1);
     }
 
