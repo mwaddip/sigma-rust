@@ -38,6 +38,16 @@ pub(crate) static SELF_BOX_INDEX_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| 
             obj
         )));
     }
+    // JVM bug compatibility: selfBoxIndex always returned -1 in the v4.x
+    // semantics that apply to pre-v2 ErgoTree scripts (versions V0/V1).
+    // The gate is on the SCRIPT's ErgoTree header version, not the block's
+    // activated version: a v0 tree spent in a v3+ block still gets the
+    // lenient path, because the leniency is a property of how the old
+    // script was written and validated.
+    // See: https://github.com/ScorexFoundation/sigmastate-interpreter/issues/603
+    if ctx.tree_version() < ergotree_ir::ergo_tree::ErgoTreeVersion::V2 {
+        return Ok(Value::Int(-1));
+    }
     let box_index = ctx
         .inputs
         .iter()
@@ -132,9 +142,11 @@ pub(crate) static GET_VAR_FROM_INPUT_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, arg
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::eval::test_util::eval_out;
+    use core::cell::Cell;
     use ergo_chain_types::{Header, PreHeader};
     use ergotree_ir::chain::context::Context;
     use ergotree_ir::chain::ergo_box::ErgoBox;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
     use ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
     use ergotree_ir::mir::constant::TryExtractFrom;
     use ergotree_ir::mir::expr::Expr;
@@ -147,7 +159,7 @@ mod tests {
     use ergotree_ir::types::stype_param::STypeVar;
     use sigma_test_util::force_any_val;
 
-    fn make_ctx_inputs_includes_self_box() -> Context<'static> {
+    fn make_ctx_inputs_includes_self_box(tree_version: ErgoTreeVersion) -> Context<'static> {
         let ctx = force_any_val::<Context>();
         let self_box = &*Box::leak(Box::new(force_any_val::<ErgoBox>()));
         let inputs = vec![&*Box::leak(Box::new(force_any_val::<ErgoBox>())), self_box]
@@ -157,18 +169,42 @@ mod tests {
             height: 0u32,
             self_box,
             inputs,
+            tree_version: Cell::new(tree_version),
             ..ctx
         }
     }
 
     #[test]
-    fn eval_self_box_index() {
+    fn eval_self_box_index_v2_tree() {
         let expr: Expr =
             PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
                 .unwrap()
                 .into();
-        let context = make_ctx_inputs_includes_self_box();
+        // Tree version V2 (JIT/post-v5 script): returns real input index.
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V2);
         assert_eq!(eval_out::<i32>(&expr, &context), 1);
+    }
+
+    #[test]
+    fn eval_self_box_index_v0_tree() {
+        let expr: Expr =
+            PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
+                .unwrap()
+                .into();
+        // Tree version V0 (pre-JIT script): JVM bug #603 always returned -1.
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V0);
+        assert_eq!(eval_out::<i32>(&expr, &context), -1);
+    }
+
+    #[test]
+    fn eval_self_box_index_v1_tree() {
+        let expr: Expr =
+            PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
+                .unwrap()
+                .into();
+        // Tree version V1 (also pre-JIT): same lenient -1 path as V0.
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V1);
+        assert_eq!(eval_out::<i32>(&expr, &context), -1);
     }
 
     #[test]
