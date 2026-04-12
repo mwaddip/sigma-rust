@@ -114,6 +114,7 @@ pub fn make_context<'ctx, T: ErgoTransaction>(
         extension_provider: &tx_ctx.spending_tx,
         jit_cost: core::cell::Cell::new(0),
         jit_cost_limit: None,
+        constants: None,
     })
 }
 // Updates a Context, changing its self box and context extension to transaction.inputs[i]

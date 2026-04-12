@@ -3,6 +3,7 @@ use core::cell::Cell;
 use core::fmt;
 
 use crate::chain::ergo_box::ErgoBox;
+use crate::mir::constant::Constant;
 use crate::{chain::context_extension::ContextExtension, ergo_tree::ErgoTreeVersion};
 use bounded_vec::BoundedVec;
 use ergo_chain_types::{Header, PreHeader};
@@ -48,6 +49,9 @@ pub struct Context<'ctx> {
     pub jit_cost: Cell<u64>,
     /// JIT cost limit (None = unlimited, e.g. during signing)
     pub jit_cost_limit: Option<u64>,
+    /// Constants from ErgoTree for lazy ConstPlaceholder resolution during evaluation.
+    /// None when constants were already substituted (e.g. via proposition()).
+    pub constants: Option<&'ctx [Constant]>,
 }
 
 impl<'ctx> Context<'ctx> {
@@ -100,6 +104,19 @@ impl<'ctx> Context<'ctx> {
     /// Reset JIT cost accumulator (used between input evaluations)
     pub fn reset_jit_cost(&self) {
         self.jit_cost.set(0);
+    }
+
+    /// Create a copy of this context with constants set for lazy ConstPlaceholder resolution.
+    /// The returned Context may have a shorter lifetime 'a to accommodate
+    /// the constants reference alongside the existing borrowed fields.
+    pub fn with_constants<'a>(&self, constants: &'a [Constant]) -> Context<'a>
+    where
+        'ctx: 'a,
+    {
+        Context {
+            constants: Some(constants),
+            ..self.clone()
+        }
     }
 }
 
@@ -178,6 +195,7 @@ pub mod arbitrary {
                             ),
                             jit_cost: Cell::new(0),
                             jit_cost_limit: None,
+                            constants: None,
                         }
                     },
                 )
