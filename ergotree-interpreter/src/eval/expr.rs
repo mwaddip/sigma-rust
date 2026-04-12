@@ -50,6 +50,7 @@ impl Evaluable for Expr {
             Expr::SelectField(op) => op.eval(env, ctx),
             Expr::ExtractAmount(op) => op.eval(env, ctx),
             Expr::ConstPlaceholder(cp) => {
+                ctx.add_jit_cost(5)?; // Same cost as Expr::Const
                 let constant = ctx
                     .constants
                     .and_then(|cs| cs.get(cp.id as usize))
