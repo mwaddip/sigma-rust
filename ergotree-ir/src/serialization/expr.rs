@@ -350,11 +350,9 @@ mod tests {
         use crate::ergo_tree::ErgoTree;
         let hex = "00ea02d193b4cbe3010e040004300e183092aafc2966e1c791f619b14b084b26d41825661c6c040bd40801";
         let bytes = base16::decode(hex).unwrap();
-        let tree = ErgoTree::sigma_parse_bytes(&bytes)
-            .expect("output[0] of block 1,711,120 tx[1] must parse");
-        let reser = tree
-            .sigma_serialize_bytes()
-            .expect("output[0] must reserialize");
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        // Round-trip: serialized bytes must match the input exactly.
+        let reser = tree.sigma_serialize_bytes().unwrap();
         assert_eq!(reser, bytes, "round-trip bytes must be identical");
     }
 
@@ -367,11 +365,8 @@ mod tests {
         use crate::ergo_tree::ErgoTree;
         let hex = "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304";
         let bytes = base16::decode(hex).unwrap();
-        let tree = ErgoTree::sigma_parse_bytes(&bytes)
-            .expect("output[2] of block 1,711,120 tx[1] must parse");
-        let reser = tree
-            .sigma_serialize_bytes()
-            .expect("output[2] must reserialize");
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        let reser = tree.sigma_serialize_bytes().unwrap();
         assert_eq!(reser, bytes, "round-trip bytes must be identical");
     }
 
