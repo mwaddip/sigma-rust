@@ -12,6 +12,7 @@ use ergotree_ir::mir::value::Value;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaBoolean;
 
 use ergotree_ir::types::smethod::SMethod;
+use ergotree_ir::types::stype::SType;
 
 use self::env::Env;
 use ergotree_ir::chain::context::Context;
@@ -127,6 +128,33 @@ pub struct ReductionResult {
     pub diag: ReductionDiagnosticInfo,
 }
 
+/// JIT cost for a script that trivially reduces to a SigmaProp constant (e.g.
+/// bare P2PK). Scala's `EvalSigmaPropConstant` charges 50 JitCost; pre-fix we
+/// only paid the generic `Expr::Const` cost of 5 JitCost.
+const EVAL_SIGMA_PROP_CONSTANT: u32 = 50;
+
+/// Short-circuit for trees whose proposition is a plain SigmaProp constant.
+/// Returns `Some(sigma_bool)` for such trees (e.g. bare P2PK); returns `None`
+/// when full evaluation is required.
+///
+/// Handles both the non-segregated form (`Expr::Const(SSigmaProp)` — produced
+/// by `ErgoTree::proposition()` after placeholder substitution) and the
+/// segregated form (`Expr::ConstPlaceholder` resolving to a SigmaProp via
+/// `ctx.constants` on the lazy-constants common path).
+fn trivial_reduce<'ctx>(expr: &Expr, ctx: &Context<'ctx>) -> Option<SigmaBoolean> {
+    let constant = match expr {
+        Expr::Const(c) if c.tpe == SType::SSigmaProp => c.clone(),
+        Expr::ConstPlaceholder(cp) if cp.tpe == SType::SSigmaProp => {
+            ctx.constants.and_then(|cs| cs.get(cp.id as usize)).cloned()?
+        }
+        _ => return None,
+    };
+    constant
+        .try_extract_into::<SigmaProp>()
+        .ok()
+        .map(|sp| sp.into())
+}
+
 /// Evaluate the given expression by reducing it to SigmaBoolean value.
 pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResult, EvalError> {
     // Track cost as a delta from the caller's accumulator state so the per-call cost
@@ -175,6 +203,22 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
     if tree.has_deserialize() {
         let expr = tree.proposition()?;
         let expr = expr.substitute_deserialize(ctx)?;
+        // Trivial short-circuit: plain SigmaProp constants (e.g. P2PK) are
+        // priced at a flat 50 JitCost via EvalSigmaPropConstant. `expr` here
+        // has placeholders already substituted, so only the Expr::Const arm
+        // can fire — the placeholder arm needs `ctx.constants`, which this
+        // path does not set up.
+        if let Some(sigma_bool) = trivial_reduce(&expr, ctx) {
+            ctx.add_jit_cost(EVAL_SIGMA_PROP_CONSTANT)?;
+            return Ok(ReductionResult {
+                sigma_prop: sigma_bool,
+                cost: (ctx.jit_cost_value() - cost_before) / 10,
+                diag: ReductionDiagnosticInfo {
+                    env: Env::empty().to_static(),
+                    pretty_printed_expr: None,
+                },
+            });
+        }
         let res = inner(&expr, ctx, cost_before);
         return match res {
             Ok(reduction) if reduction.sigma_prop == SigmaBoolean::TrivialProp(false) => {
@@ -213,6 +257,23 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
     let root = tree.root_expr()?;
     let constants = tree.constants()?;
     let ctx_with_c = ctx.with_constants(constants);
+    // Trivial short-circuit: plain SigmaProp constants (bare P2PK, both the
+    // non-segregated Expr::Const(SSigmaProp) form and the segregated
+    // Expr::ConstPlaceholder resolving to a SigmaProp via ctx.constants) are
+    // priced at a flat 50 JitCost, matching Scala's EvalSigmaPropConstant.
+    // Without this path, segregated P2PK pays only the 5 JitCost
+    // ConstPlaceholder cost — a 10× undercharge on every P2PK input.
+    if let Some(sigma_bool) = trivial_reduce(root, &ctx_with_c) {
+        ctx.add_jit_cost(EVAL_SIGMA_PROP_CONSTANT)?;
+        return Ok(ReductionResult {
+            sigma_prop: sigma_bool,
+            cost: (ctx.jit_cost_value() - cost_before) / 10,
+            diag: ReductionDiagnosticInfo {
+                env: Env::empty().to_static(),
+                pretty_printed_expr: None,
+            },
+        });
+    }
     let res = inner(root, &ctx_with_c, cost_before);
     ctx.jit_cost.set(ctx_with_c.jit_cost_value());
     match res {
@@ -551,7 +612,7 @@ mod test {
             val_def::ValDef,
             val_use::ValUse,
         },
-        sigma_protocol::sigma_boolean::SigmaBoolean,
+        sigma_protocol::sigma_boolean::{SigmaBoolean, SigmaProp},
         types::stype::SType,
     };
     use expect_test::expect;
@@ -694,5 +755,38 @@ mod test {
         let ctx = force_any_val::<Context>();
         let res = reduce_to_crypto(&tree, &ctx).unwrap();
         assert_eq!(res.sigma_prop, SigmaBoolean::TrivialProp(true));
+    }
+
+    // Bug 2 regression: a tree whose proposition is a plain SigmaProp constant
+    // (e.g. bare P2PK) must be priced at Scala's EvalSigmaPropConstant = 50
+    // JitCost via the trivial_reduce short-circuit. Pre-fix, it went through
+    // the generic Expr::Const arm and paid only 5 JitCost — 10× undercharge
+    // on every P2PK input.
+    #[test]
+    fn p2pk_trivial_reduce_charges_50() {
+        use ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+
+        let pd = force_any_val::<ProveDlog>();
+        let sp = SigmaProp::from(pd.clone());
+        let expr: Expr = Expr::Const(sp.into());
+        let tree = ErgoTree::try_from(expr).unwrap();
+        let ctx = force_any_val::<Context>();
+        let before = ctx.jit_cost_value();
+
+        let res = reduce_to_crypto(&tree, &ctx).unwrap();
+
+        // JitCost delta must be exactly 50 (EvalSigmaPropConstant), not 5
+        // (the Expr::Const generic cost that the pre-fix path would pay).
+        assert_eq!(
+            ctx.jit_cost_value() - before,
+            50,
+            "P2PK trivial reduce must charge JitCost(50), not the generic \
+             Expr::Const(5). Got JitCost delta {}.",
+            ctx.jit_cost_value() - before,
+        );
+        // Returned block cost = 50 / 10 = 5.
+        assert_eq!(res.cost, 5);
+        // SigmaProp round-trips back out through reduction.
+        assert_eq!(res.sigma_prop, SigmaBoolean::from(pd));
     }
 }
