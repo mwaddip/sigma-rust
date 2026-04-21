@@ -128,12 +128,19 @@ pub struct ReductionResult {
 
 /// Evaluate the given expression by reducing it to SigmaBoolean value.
 pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResult, EvalError> {
-    fn inner<'ctx>(expr: &'ctx Expr, ctx: &Context<'ctx>) -> Result<ReductionResult, EvalError> {
+    // Track cost as a delta from the caller's accumulator state so the per-call cost
+    // reported in ReductionResult stays meaningful while the ctx accumulator grows
+    // cumulatively across repeated reduce_to_crypto invocations on the same Context
+    // (required for per-tx jit_cost_limit enforcement — see tx_context::validate).
+    fn inner<'ctx>(
+        expr: &'ctx Expr,
+        ctx: &Context<'ctx>,
+        cost_before: u64,
+    ) -> Result<ReductionResult, EvalError> {
         let mut env_mut = Env::empty();
-        ctx.reset_jit_cost();
         expr.eval(&mut env_mut, ctx)
             .and_then(|v| -> Result<ReductionResult, EvalError> {
-                let cost = ctx.jit_cost_value() / 10; // convert JitCost to block cost
+                let cost = (ctx.jit_cost_value() - cost_before) / 10; // convert JitCost to block cost
                 match v {
                     Value::Boolean(b) => Ok(ReductionResult {
                         sigma_prop: SigmaBoolean::TrivialProp(b),
@@ -156,12 +163,18 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
             })
     }
 
+    // Snapshot the caller's accumulator so the per-call cost returned in
+    // ReductionResult stays a delta even as the outer ctx.jit_cost grows
+    // cumulatively across repeated reduce_to_crypto invocations (required
+    // for per-tx jit_cost_limit enforcement — see tx_context::validate).
+    let cost_before = ctx.jit_cost_value();
+
     // Deserialize trees need an owned Expr for substitute_deserialize.
     // This is the rare path — most scripts don't have deserialize nodes.
     if tree.has_deserialize() {
         let expr = tree.proposition()?;
         let expr = expr.substitute_deserialize(ctx)?;
-        let res = inner(&expr, ctx);
+        let res = inner(&expr, ctx, cost_before);
         return match res {
             Ok(reduction) if reduction.sigma_prop == SigmaBoolean::TrivialProp(false) => {
                 let (_, printed_expr_str) = expr
@@ -182,7 +195,8 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
                 let (spanned_expr, printed_expr_str) = expr
                     .pretty_print()
                     .map_err(|e| EvalError::Misc(e.to_string()))?;
-                inner(&spanned_expr, ctx)
+                ctx.jit_cost.set(cost_before);
+                inner(&spanned_expr, ctx, cost_before)
                     .map_err(|e| e.wrap_spanned_with_src(printed_expr_str.to_string()))
             }
         };
@@ -191,10 +205,15 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
     // Common path: lazy constant resolution — no clone, no tree walk.
     // ConstPlaceholder nodes are resolved on-demand during evaluation
     // by looking up ctx.constants[placeholder.id].
+    // NB: with_constants clones the Cell<u64> accumulator, so the cost
+    // charged inside `inner` lives on `ctx_with_c` — we sync it back to
+    // the caller's ctx after `inner` returns so the per-tx limit in
+    // tx_context::validate sees the right running total.
     let root = tree.root_expr()?;
     let constants = tree.constants()?;
-    let ctx = ctx.with_constants(constants);
-    let res = inner(root, &ctx);
+    let ctx_with_c = ctx.with_constants(constants);
+    let res = inner(root, &ctx_with_c, cost_before);
+    ctx.jit_cost.set(ctx_with_c.jit_cost_value());
     match res {
         Ok(reduction) if reduction.sigma_prop == SigmaBoolean::TrivialProp(false) => {
             // Diagnostic path: use proposition() for fully-resolved pretty-printing.
@@ -220,7 +239,10 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
             let (spanned_expr, printed_expr_str) = resolved
                 .pretty_print()
                 .map_err(|e| EvalError::Misc(e.to_string()))?;
-            inner(&spanned_expr, &ctx)
+            // Roll the accumulator back to the pre-reduce state so the diagnostic
+            // retry doesn't double-count and can't spuriously trip jit_cost_limit.
+            ctx.jit_cost.set(cost_before);
+            inner(&spanned_expr, ctx, cost_before)
                 .map_err(|e| e.wrap_spanned_with_src(printed_expr_str.to_string()))
         }
     }
