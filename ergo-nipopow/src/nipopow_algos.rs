@@ -591,3 +591,45 @@ fn prove_prefix<R: PopowHeaderReader + ?Sized>(
 
     Ok(collected.into_values().collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blockid(byte: u8) -> BlockId {
+        BlockId(Digest32::from([byte; 32]))
+    }
+
+    #[test]
+    fn pack_interlinks_keys_are_first_occurrence_positions() {
+        // JVM Ergo encodes ExtensionKV keys as [INTERLINK_VECTOR_PREFIX, pos_of_first_occurrence]
+        // where pos is the index of the first interlink in each duplicate-run within the input
+        // vector. Verified against mainnet block 1784124 (11/11 leaf hashes match with this
+        // encoding; 2/11 with the prior sequential distinct_ix counter).
+        let a = blockid(0xa0);
+        let b = blockid(0xb0);
+        let c = blockid(0xc0);
+        let d = blockid(0xd0);
+        // [A, B, B, B, B, C, D] — positions 0, 1..4 (run), 5, 6
+        let interlinks = vec![a, b, b, b, b, c, d];
+
+        let packed = NipopowAlgos::pack_interlinks(interlinks);
+
+        assert_eq!(packed.len(), 4);
+        assert_eq!(packed[0].0, [INTERLINK_VECTOR_PREFIX, 0]);
+        assert_eq!(packed[1].0, [INTERLINK_VECTOR_PREFIX, 1]);
+        assert_eq!(packed[2].0, [INTERLINK_VECTOR_PREFIX, 5]);
+        assert_eq!(packed[3].0, [INTERLINK_VECTOR_PREFIX, 6]);
+
+        assert_eq!(packed[0].1[0], 1);
+        assert_eq!(packed[1].1[0], 4);
+        assert_eq!(packed[2].1[0], 1);
+        assert_eq!(packed[3].1[0], 1);
+    }
+
+    #[test]
+    fn pack_interlinks_empty_returns_empty() {
+        let packed = NipopowAlgos::pack_interlinks(vec![]);
+        assert!(packed.is_empty());
+    }
+}
