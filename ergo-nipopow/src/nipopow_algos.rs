@@ -323,36 +323,48 @@ impl NipopowAlgos {
     }
 
     /// Packs interlinks into key-value format of the block extension.
+    ///
+    /// Each duplicate-run of `BlockId`s in the input is packed into a single
+    /// `([INTERLINK_VECTOR_PREFIX, first_pos], [qty, blockid_bytes...])` entry,
+    /// where `first_pos` is the input-vector index of the run's first element.
+    /// This matches JVM Ergo's `org.ergoplatform.modifiers.history.popow.NipopowAlgos`
+    /// encoding — the Merkle-leaf hash of each entry depends on `first_pos`, so a
+    /// sequential distinct-group counter (used here pre-fix) produces leaves that
+    /// hash differently and break `check_interlinks_proof` against JVM-generated
+    /// proofs.
     pub fn pack_interlinks(interlinks: Vec<BlockId>) -> Vec<([u8; 2], Vec<u8>)> {
+        if interlinks.is_empty() {
+            return vec![];
+        }
         let mut res = vec![];
-        let mut ix_distinct_block_ids = 0;
-        let mut curr_block_id_count = 1;
+        let mut curr_block_id_count: u8 = 1;
         let mut curr_block_id = interlinks[0];
-        for id in interlinks.into_iter().skip(1) {
-            if id == curr_block_id {
+        let mut curr_first_pos: usize = 0;
+        for (i, id) in interlinks.iter().enumerate().skip(1) {
+            if *id == curr_block_id {
                 curr_block_id_count += 1;
             } else {
                 let block_id_bytes: Vec<u8> = curr_block_id.0.into();
                 let packed_value = std::iter::once(curr_block_id_count)
                     .chain(block_id_bytes)
                     .collect();
-                res.push((
-                    [INTERLINK_VECTOR_PREFIX, ix_distinct_block_ids],
-                    packed_value,
-                ));
-                curr_block_id = id;
+                let ix_byte: u8 = curr_first_pos
+                    .try_into()
+                    .expect("interlinks first-position byte index > 255");
+                res.push(([INTERLINK_VECTOR_PREFIX, ix_byte], packed_value));
+                curr_block_id = *id;
                 curr_block_id_count = 1;
-                ix_distinct_block_ids += 1;
+                curr_first_pos = i;
             }
         }
         let block_id_bytes: Vec<u8> = curr_block_id.0.into();
         let packed_value = std::iter::once(curr_block_id_count)
             .chain(block_id_bytes)
             .collect();
-        res.push((
-            [INTERLINK_VECTOR_PREFIX, ix_distinct_block_ids],
-            packed_value,
-        ));
+        let ix_byte: u8 = curr_first_pos
+            .try_into()
+            .expect("interlinks first-position byte index > 255");
+        res.push(([INTERLINK_VECTOR_PREFIX, ix_byte], packed_value));
         res
     }
     /// Unpacks interlinks from key-value format of block extension.
