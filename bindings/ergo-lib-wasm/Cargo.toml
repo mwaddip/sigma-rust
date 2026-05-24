@@ -14,6 +14,13 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 rest = ["ergo-lib/rest"]
 compiler = ["ergo-lib/compiler"]
+# Test-only helpers for the cost_oracle module (trivial_sigma_prop_tree,
+# ergo_box_with_tree, one_input_one_output_tx, synthetic_state_context).
+# Production builds (npm run build-nodejs) leave this OFF — the harness's
+# only cost-oracle surface is `compute_tx_oracle_costs` + the `parameters_new`
+# constructor. mocha smoke tests enable the feature via
+# `wasm-pack build --features cost-oracle-tests`.
+cost-oracle-tests = []
 
 [dependencies]
 base16 = { workspace = true }

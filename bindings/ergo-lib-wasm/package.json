@@ -5,7 +5,7 @@
     "scripts": {
         "build": "webpack",
         "serve": "cross-env WASM_BINDGEN_WEAKREF=1 wasm-pack build --target browser && webpack-dev-server",
-        "test": "cross-env WASM_BINDGEN_WEAKREF=1 wasm-pack build --target nodejs --dev && mocha --require @babel/register --require @babel/polyfill 'tests/test*.js'",
+        "test": "cross-env WASM_BINDGEN_WEAKREF=1 wasm-pack build --target nodejs --dev --features cost-oracle-tests && mocha --require @babel/register --require @babel/polyfill 'tests/test*.js'",
         "test-browser": "rm -rf ./pkg && npm run build-browser && mv ./pkg-browser ./pkg && ./node_modules/.bin/karma start",
         "doc": "jsdoc -c jsdoc.json pkg/ergo_wallet_wasm.js README.md -d docs",
         "build-nodejs": "rm -rf ./pkg-nodejs && cross-env WASM_BINDGEN_WEAKREF=1 wasm-pack build --target nodejs --out-dir pkg-nodejs && cd pkg-nodejs && node ../scripts/publish_helper -nodejs",

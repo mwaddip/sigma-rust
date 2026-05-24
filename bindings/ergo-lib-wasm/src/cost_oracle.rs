@@ -43,8 +43,10 @@ use ergo_lib::wallet::tx_context::TransactionContext;
 use wasm_bindgen::prelude::*;
 
 use crate::box_coll::ErgoBoxes;
+#[cfg(feature = "cost-oracle-tests")]
 use crate::ergo_box::ErgoBox;
 use crate::ergo_state_ctx::ErgoStateContext;
+#[cfg(feature = "cost-oracle-tests")]
 use crate::ergo_tree::ErgoTree;
 use crate::parameters::Parameters;
 use crate::transaction::Transaction;
@@ -106,10 +108,10 @@ pub fn compute_tx_oracle_costs(
     // verify_tx_input_proof in transaction.rs:419-429).
     let rs_spent: Vec<RsErgoBox> = spent_boxes.clone().into();
     let rs_data: Vec<RsErgoBox> = data_boxes.clone().into();
-    // Transaction's inner field is module-private; we use the
-    // `From<Transaction> for chain::transaction::Transaction` impl
-    // added to transaction.rs for this binding's needs.
-    let rs_tx: ergo_lib::chain::transaction::Transaction = tx.clone().into();
+    // Transaction's inner field is pub(crate) (mirrors the existing
+    // UnsignedTransaction pattern), so we read it directly. This
+    // avoids adding a Clone derive + From impl to transaction.rs.
+    let rs_tx: ergo_lib::chain::transaction::Transaction = tx.0.clone();
 
     let tx_ctx = TransactionContext::new(rs_tx, rs_spent, rs_data)
         .map_err(|e| JsValue::from_str(&format!("TransactionContext::new: {e}")))?;
@@ -201,26 +203,22 @@ pub fn compute_tx_oracle_costs(
 }
 
 // =============================================================================
-// Test helpers (Step 5 of PLAN-2j-rest Task 1).
+// Test helpers + production Parameters constructor.
 //
-// Every helper below is prefixed `_test_only_` to signal — at the JS API
-// surface — that they are NOT part of the production cost-oracle interface.
-// Downstream consumers must NOT depend on them; they exist solely to let
-// the smoke tests in `tests/test_cost_oracle.js` reproduce shim's
-// cost_oracle.rs tests bit-equivalently through the WASM API. The
-// harness's real-world use of this module is via
-// `compute_tx_oracle_costs(tx, spent, data, state)` only, with all
-// tx/box/state values fetched from the node REST API.
+// Four `_test_only_*` helpers below (trivial_sigma_prop_tree,
+// ergo_box_with_tree, one_input_one_output_tx, synthetic_state_context)
+// are gated behind `#[cfg(feature = "cost-oracle-tests")]`. They exist
+// solely to let the smoke tests in `tests/test_cost_oracle.js`
+// reproduce shim's cost_oracle.rs tests bit-equivalently. Production
+// builds (npm run build-nodejs) skip the feature; these helpers are
+// NOT in the shipped pkg-nodejs/.
 //
-// They live alongside the binding (rather than gated behind #[cfg(test)])
-// because wasm-bindgen exposes only public items at compile time, and the
-// JS smoke tests run against the production WASM artifact built by
-// `npm run build-nodejs`. The `_test_only_` prefix is the lightest-weight
-// way to carry intent through the wasm-bindgen wall without needing a
-// Cargo-feature gate (wasm-bindgen-test for this crate is not currently
-// wired up). If a future refactor adds wasm-bindgen-test support so
-// JS-side tests can exercise gated items, these helpers should move there
-// and lose the prefix.
+// `parameters_new` (below, NOT feature-gated) is a production gap-filler:
+// the WASM Parameters wrapper only exposes `default_parameters()`. The
+// ergots harness needs per-field control (specifically `max_block_cost`
+// override) to derive `ctx.jit_cost_limit = max_block_cost * 10` per
+// the cost-oracle contract. Keeping this constructor in the production
+// surface is intentional.
 // =============================================================================
 
 /// Build a bare `Const(SigmaProp(TrivialProp(true|false)))` ergo-tree.
@@ -229,6 +227,7 @@ pub fn compute_tx_oracle_costs(
 /// mainnet shape (>90% of inputs are P2PK-or-similar trivial sigma-prop
 /// constants); sigma-rust short-circuits it via `trivial_reduce` at exactly
 /// 50 JitCost (`EVAL_SIGMA_PROP_CONSTANT`).
+#[cfg(feature = "cost-oracle-tests")]
 #[wasm_bindgen]
 pub fn _test_only_trivial_sigma_prop_tree(value: bool) -> Result<ErgoTree, JsValue> {
     use ergo_lib::ergotree_ir::ergo_tree::{ErgoTree as RsErgoTree, ErgoTreeHeader};
@@ -251,6 +250,7 @@ pub fn _test_only_trivial_sigma_prop_tree(value: bool) -> Result<ErgoTree, JsVal
 /// oracle, so the other fields are filler.
 ///
 /// Mirrors shim's `box_with_tree` helper (cost_oracle.rs:244-258).
+#[cfg(feature = "cost-oracle-tests")]
 #[wasm_bindgen]
 pub fn _test_only_ergo_box_with_tree(tree: &ErgoTree, value: u64) -> Result<ErgoBox, JsValue> {
     use ergo_lib::chain::transaction::TxId;
@@ -275,6 +275,7 @@ pub fn _test_only_ergo_box_with_tree(tree: &ErgoTree, value: u64) -> Result<Ergo
 /// Build a 1-input, 1-output Transaction spending `input_box`. The output
 /// is a self-spend (same value + tree). Mirrors shim's
 /// `one_input_one_output_tx` helper (cost_oracle.rs:261-282).
+#[cfg(feature = "cost-oracle-tests")]
 #[wasm_bindgen]
 pub fn _test_only_one_input_one_output_tx(input_box: &ErgoBox) -> Result<Transaction, JsValue> {
     use ergo_lib::chain::transaction::input::Input;
@@ -324,7 +325,7 @@ pub fn _test_only_one_input_one_output_tx(input_box: &ErgoBox) -> Result<Transac
 ///   8. `data_input_cost`      — per-data-input base cost
 ///   9. `output_cost`          — per-output base cost
 #[wasm_bindgen]
-pub fn _test_only_parameters_new(
+pub fn parameters_new(
     block_version: i32,
     storage_fee_factor: i32,
     min_value_per_byte: i32,
@@ -360,6 +361,7 @@ pub fn _test_only_parameters_new(
 /// and round-trip it into a `PreHeader`, replicating it ten times for the
 /// `Headers` array. This avoids needing the `arbitrary` feature in the
 /// production WASM build.
+#[cfg(feature = "cost-oracle-tests")]
 #[wasm_bindgen]
 pub fn _test_only_synthetic_state_context(
     parameters: &Parameters,
@@ -380,6 +382,7 @@ pub fn _test_only_synthetic_state_context(
 /// Construct a placeholder Header for tests. All zero-bytes for digest
 /// fields; height=1; version=1. The cost oracle does not read most of
 /// these fields (pre_header.height is what gets surfaced into Context).
+#[cfg(feature = "cost-oracle-tests")]
 fn synth_header() -> ergo_lib::ergo_chain_types::Header {
     use ergo_lib::ergo_chain_types::ec_point::generator;
     use ergo_lib::ergo_chain_types::{

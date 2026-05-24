@@ -189,8 +189,7 @@ impl TxId {
  * collected into a block.
  */
 #[wasm_bindgen]
-#[derive(Clone)]
-pub struct Transaction(chain::transaction::Transaction);
+pub struct Transaction(pub(crate) chain::transaction::Transaction);
 
 #[wasm_bindgen]
 impl Transaction {
@@ -307,11 +306,6 @@ impl From<chain::transaction::Transaction> for Transaction {
     }
 }
 
-impl From<Transaction> for chain::transaction::Transaction {
-    fn from(t: Transaction) -> Self {
-        t.0
-    }
-}
 
 /// Unsigned (inputs without proofs) transaction
 #[wasm_bindgen]

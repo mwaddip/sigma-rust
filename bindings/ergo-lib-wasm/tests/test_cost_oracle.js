@@ -108,7 +108,7 @@ describe("cost_oracle WASM binding", () => {
     //  max_block_size, max_block_cost, token_access_cost,
     //  input_cost, data_input_cost, output_cost).
     // Same as shim cost_oracle.rs:354-361.
-    const tight_params = ergo_wasm._test_only_parameters_new(
+    const tight_params = ergo_wasm.parameters_new(
       1,            // block_version
       1,            // storage_fee_factor
       360,          // min_value_per_byte
