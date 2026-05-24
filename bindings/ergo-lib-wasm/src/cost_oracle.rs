@@ -1,9 +1,14 @@
 //! Cost-oracle binding for the ergots mainnet-validate harness.
 //!
-//! Exposes a single function: given a parsed Transaction +
-//! per-input box list + data-input box list + state context, runs
-//! `reduce_to_crypto` for each input and returns raw `ctx.jit_cost_value()`
-//! (NOT `ReductionResult.cost`, which is `jit_cost / 10` per
+//! Exposes `compute_tx_oracle_costs` (the production cost-oracle entry
+//! point) plus a `CostOracleResult` wrapper and five `_test_only_*`
+//! constructors (see "Test helpers" section below for the rationale on
+//! why they live in the production module rather than behind cfg(test)).
+//!
+//! Given a parsed Transaction + per-input box list + data-input box list
+//! + state context, `compute_tx_oracle_costs` runs `reduce_to_crypto`
+//! for each input and returns raw `ctx.jit_cost_value()` (NOT
+//! `ReductionResult.cost`, which is `jit_cost / 10` per
 //! `ergotree-interpreter/src/eval.rs:174`). Mirrors
 //! `tools/mainnet-validate/shim/src/cost_oracle.rs` semantics exactly.
 //!
@@ -198,19 +203,24 @@ pub fn compute_tx_oracle_costs(
 // =============================================================================
 // Test helpers (Step 5 of PLAN-2j-rest Task 1).
 //
-// These constructors exist solely to enable the smoke tests in
-// `tests/test_cost_oracle.js` to reproduce shim's three cost_oracle.rs
-// tests bit-equivalently through the WASM API. They are NOT part of the
-// production cost-oracle surface — the harness's real-world use of this
-// module is via `compute_tx_oracle_costs(tx, spent, data, state)` only,
-// with all tx/box/state values fetched from the node REST API.
+// Every helper below is prefixed `_test_only_` to signal — at the JS API
+// surface — that they are NOT part of the production cost-oracle interface.
+// Downstream consumers must NOT depend on them; they exist solely to let
+// the smoke tests in `tests/test_cost_oracle.js` reproduce shim's
+// cost_oracle.rs tests bit-equivalently through the WASM API. The
+// harness's real-world use of this module is via
+// `compute_tx_oracle_costs(tx, spent, data, state)` only, with all
+// tx/box/state values fetched from the node REST API.
 //
 // They live alongside the binding (rather than gated behind #[cfg(test)])
 // because wasm-bindgen exposes only public items at compile time, and the
 // JS smoke tests run against the production WASM artifact built by
-// `npm run build-nodejs`. If a future refactor adds wasm-bindgen-test
-// support so JS-side tests can exercise gated items, these helpers
-// should move there.
+// `npm run build-nodejs`. The `_test_only_` prefix is the lightest-weight
+// way to carry intent through the wasm-bindgen wall without needing a
+// Cargo-feature gate (wasm-bindgen-test for this crate is not currently
+// wired up). If a future refactor adds wasm-bindgen-test support so
+// JS-side tests can exercise gated items, these helpers should move there
+// and lose the prefix.
 // =============================================================================
 
 /// Build a bare `Const(SigmaProp(TrivialProp(true|false)))` ergo-tree.
@@ -220,7 +230,7 @@ pub fn compute_tx_oracle_costs(
 /// constants); sigma-rust short-circuits it via `trivial_reduce` at exactly
 /// 50 JitCost (`EVAL_SIGMA_PROP_CONSTANT`).
 #[wasm_bindgen]
-pub fn trivial_sigma_prop_tree(value: bool) -> Result<ErgoTree, JsValue> {
+pub fn _test_only_trivial_sigma_prop_tree(value: bool) -> Result<ErgoTree, JsValue> {
     use ergo_lib::ergotree_ir::ergo_tree::{ErgoTree as RsErgoTree, ErgoTreeHeader};
     use ergo_lib::ergotree_ir::mir::constant::{Constant, Literal};
     use ergo_lib::ergotree_ir::mir::expr::Expr;
@@ -233,7 +243,7 @@ pub fn trivial_sigma_prop_tree(value: bool) -> Result<ErgoTree, JsValue> {
     });
     RsErgoTree::new(ErgoTreeHeader::v0(false), &expr)
         .map(ErgoTree::from)
-        .map_err(|e| JsValue::from_str(&format!("trivial_sigma_prop_tree: {e}")))
+        .map_err(|e| JsValue::from_str(&format!("_test_only_trivial_sigma_prop_tree: {e}")))
 }
 
 /// Build an ErgoBox holding `tree` as its proposition. tx_id is the
@@ -242,7 +252,7 @@ pub fn trivial_sigma_prop_tree(value: bool) -> Result<ErgoTree, JsValue> {
 ///
 /// Mirrors shim's `box_with_tree` helper (cost_oracle.rs:244-258).
 #[wasm_bindgen]
-pub fn ergo_box_with_tree(tree: &ErgoTree, value: u64) -> Result<ErgoBox, JsValue> {
+pub fn _test_only_ergo_box_with_tree(tree: &ErgoTree, value: u64) -> Result<ErgoBox, JsValue> {
     use ergo_lib::chain::transaction::TxId;
     use ergo_lib::ergotree_ir::chain::ergo_box::box_value::BoxValue;
     use ergo_lib::ergotree_ir::chain::ergo_box::{
@@ -259,14 +269,14 @@ pub fn ergo_box_with_tree(tree: &ErgoTree, value: u64) -> Result<ErgoBox, JsValu
     };
     RsErgoBox2::from_box_candidate(&candidate, TxId::zero(), 0)
         .map(ErgoBox::from)
-        .map_err(|e| JsValue::from_str(&format!("ergo_box_with_tree: {e}")))
+        .map_err(|e| JsValue::from_str(&format!("_test_only_ergo_box_with_tree: {e}")))
 }
 
 /// Build a 1-input, 1-output Transaction spending `input_box`. The output
 /// is a self-spend (same value + tree). Mirrors shim's
 /// `one_input_one_output_tx` helper (cost_oracle.rs:261-282).
 #[wasm_bindgen]
-pub fn one_input_one_output_tx(input_box: &ErgoBox) -> Result<Transaction, JsValue> {
+pub fn _test_only_one_input_one_output_tx(input_box: &ErgoBox) -> Result<Transaction, JsValue> {
     use ergo_lib::chain::transaction::input::Input;
     use ergo_lib::chain::transaction::prover_result::ProverResult;
     use ergo_lib::chain::transaction::{Transaction as RsTransaction, TxIoVec};
@@ -303,9 +313,18 @@ pub fn one_input_one_output_tx(input_box: &ErgoBox) -> Result<Transaction, JsVal
 /// `Parameters::default_parameters()`; we need fine-grained control to
 /// build tight-max-block-cost parameters for the cost-limit-exceeded test.
 ///
-/// Field order matches `ergo-lib/src/chain/parameters.rs:128-151`.
+/// Field order matches `ergo-lib/src/chain/parameters.rs:128-151`:
+///   1. `block_version`        — block protocol version
+///   2. `storage_fee_factor`   — fee per byte of long-lived storage
+///   3. `min_value_per_byte`   — minimum nanoErg per output byte
+///   4. `max_block_size`       — block-bytes ceiling
+///   5. `max_block_cost`       — block-cost ceiling (raw JitCost = this × 10)
+///   6. `token_access_cost`    — per-token-access cost
+///   7. `input_cost`           — per-input base cost
+///   8. `data_input_cost`      — per-data-input base cost
+///   9. `output_cost`          — per-output base cost
 #[wasm_bindgen]
-pub fn parameters_new(
+pub fn _test_only_parameters_new(
     block_version: i32,
     storage_fee_factor: i32,
     min_value_per_byte: i32,
@@ -337,31 +356,22 @@ pub fn parameters_new(
 /// only on `parameters.max_block_cost` and `pre_header.height` (latter is
 /// arbitrary for these tests).
 ///
-/// The function uses sigma-rust's proptest `arbitrary` feature to mint
-/// a synthetic state, then overrides `parameters`. This is gated to the
-/// dev/test build of ergo-lib (the `arbitrary` feature must be enabled
-/// in `[dev-dependencies]` for wasm tests).
+/// We build a hard-coded default-shape Header (`synth_header()` below)
+/// and round-trip it into a `PreHeader`, replicating it ten times for the
+/// `Headers` array. This avoids needing the `arbitrary` feature in the
+/// production WASM build.
 #[wasm_bindgen]
-pub fn synthetic_state_context(
+pub fn _test_only_synthetic_state_context(
     parameters: &Parameters,
 ) -> Result<ErgoStateContext, JsValue> {
     use ergo_lib::chain::ergo_state_context::{ErgoStateContext as RsErgoStateContext, Headers};
     use ergo_lib::ergo_chain_types::{Header, PreHeader};
 
-    // Build a minimal synthetic pre_header. We don't use `force_any_val`
-    // because that depends on the `arbitrary` feature being enabled in
-    // the production build — instead, we round-trip a hard-coded
-    // default-shape Header into a PreHeader.
-    //
-    // To avoid pulling in Header construction details here, we instead
-    // require the harness to call `synthetic_state_context` with a real
-    // PreHeader from the chain. For the smoke tests we construct a
-    // PreHeader from a placeholder Header below.
     let header = synth_header();
     let pre_header = PreHeader::from(header.clone());
     let headers_vec: Vec<Header> = (0..10).map(|_| header.clone()).collect();
     let headers: Headers = headers_vec.try_into().map_err(|_| {
-        JsValue::from_str("synthetic_state_context: failed to build [Header; 10]")
+        JsValue::from_str("_test_only_synthetic_state_context: failed to build [Header; 10]")
     })?;
     let rs_params: ergo_lib::chain::parameters::Parameters = parameters.clone().into();
     Ok(RsErgoStateContext::new(pre_header, headers, rs_params).into())
