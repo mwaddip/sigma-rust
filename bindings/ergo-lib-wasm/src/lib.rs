@@ -28,6 +28,7 @@ pub mod box_coll;
 pub mod box_selector;
 pub mod context_extension;
 pub mod contract;
+pub mod cost_oracle;
 pub mod data_input;
 pub mod ergo_box;
 pub mod ergo_state_ctx;

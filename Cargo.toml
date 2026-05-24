@@ -107,3 +107,21 @@ criterion = { version = "0.5.1", features = ["default", "cargo_bench_support"] }
 # Tell `rustc` to optimize for small code size.
 opt-level = "z"
 lto = true
+
+# Patch crates.io's `ergo_avltree_rust = "0.1.1"` (consumed by
+# `ergotree-interpreter`) over to the local fork at
+# `~/projects/ergo_avltree_rust/` (HEAD 879545c). The fork applies upstream
+# PRs #10/#11/#13 plus a Resolver API change (fn pointer → `Arc<dyn Fn>`)
+# that this sigma-rust HEAD (6ba9d524, integration/ergots branch) relies on.
+#
+# Without this patch, `cargo build` fails with E0308 across
+# `ergotree-interpreter/src/eval/savltree.rs` and `tree_lookup.rs` on the
+# `Resolver` type. Mirrors the patch in `tools/mainnet-validate/shim/Cargo.toml`
+# and `fixture-gen/Cargo.toml` (see project memory
+# `project_fixture_gen_cargo_gotchas`).
+#
+# Required by the ergots WASM cost-oracle binding
+# (`bindings/ergo-lib-wasm/src/cost_oracle.rs`) added 2026-05-24 per
+# PLAN-2j-rest.md Task 1.
+[patch.crates-io]
+ergo_avltree_rust = { path = "../../../ergo_avltree_rust" }

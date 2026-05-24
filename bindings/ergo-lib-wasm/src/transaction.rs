@@ -189,6 +189,7 @@ impl TxId {
  * collected into a block.
  */
 #[wasm_bindgen]
+#[derive(Clone)]
 pub struct Transaction(chain::transaction::Transaction);
 
 #[wasm_bindgen]
@@ -303,6 +304,12 @@ impl Transaction {
 impl From<chain::transaction::Transaction> for Transaction {
     fn from(t: chain::transaction::Transaction) -> Self {
         Transaction(t)
+    }
+}
+
+impl From<Transaction> for chain::transaction::Transaction {
+    fn from(t: Transaction) -> Self {
+        t.0
     }
 }
 
