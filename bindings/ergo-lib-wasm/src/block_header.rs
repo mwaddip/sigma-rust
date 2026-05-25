@@ -18,9 +18,39 @@ pub struct BlockHeader(Header);
 
 #[wasm_bindgen]
 impl BlockHeader {
-    /// Parse from JSON (Node API)
+    /// Parse from JSON (Node API).
+    ///
+    /// **Limitation:** the JSON binding cannot deserialize Autolykos v2+
+    /// headers (the `powSolutions.d` and `powSolutions.w` fields become
+    /// `null` in v2+, and `DeserializeBigIntFrom` has no `Null` variant).
+    /// Consumers needing parity with the chain validator should use
+    /// [`Self::sigma_parse_bytes`] which goes through the canonical
+    /// `Header::scorex_parse_bytes` path and handles all chain versions.
     pub fn from_json(json: &str) -> Result<BlockHeader, JsValue> {
         serde_json::from_str(json).map(Self).map_err(to_js)
+    }
+
+    /// Parse from canonical scorex-serialized bytes — the same wire
+    /// representation `ergo-node-rust` uses for chain validation. Handles
+    /// every header version (v1 Autolykos, v2+ Autolykos with null d/w,
+    /// future versions), unlike [`Self::from_json`].
+    ///
+    /// Required by consumers that need byte-level consensus parity with
+    /// the chain validator (the ergots mainnet-validate harness is the
+    /// first such consumer).
+    pub fn sigma_parse_bytes(bytes: &[u8]) -> Result<BlockHeader, JsValue> {
+        use sigma_ser::ScorexSerializable;
+        ergo_lib::ergo_chain_types::Header::scorex_parse_bytes(bytes)
+            .map(Self)
+            .map_err(to_js)
+    }
+
+    /// Serialize to canonical scorex-bytes, symmetric counterpart to
+    /// [`Self::sigma_parse_bytes`]. The output matches what the chain
+    /// hashes for header-id computation.
+    pub fn sigma_serialize_bytes(&self) -> Result<Vec<u8>, JsValue> {
+        use sigma_ser::ScorexSerializable;
+        self.0.scorex_serialize_bytes().map_err(to_js)
     }
 
     /// Get Header's id

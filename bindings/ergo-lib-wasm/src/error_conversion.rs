@@ -34,6 +34,7 @@ use ergo_lib::{
     wallet::{box_selector::BoxSelectorError, tx_builder::TxBuilderError, WalletError},
 };
 use serde_json::error::Error;
+use sigma_ser::{ScorexParsingError, ScorexSerializationError};
 #[cfg(feature = "rest")]
 use url::ParseError;
 use wasm_bindgen::JsValue;
@@ -70,6 +71,8 @@ from_error_to_wrap!(TryExtractFromError);
 from_error_to_wrap!(BoxSelectorError);
 from_error_to_wrap!(DigestNError);
 from_error_to_wrap!(SigmaSerializationError);
+from_error_to_wrap!(ScorexParsingError);
+from_error_to_wrap!(ScorexSerializationError);
 from_error_to_wrap!(Error);
 from_error_to_wrap!(BoxValueError);
 from_error_to_wrap!(TokenAmountError);
