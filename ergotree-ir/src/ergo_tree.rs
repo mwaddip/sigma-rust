@@ -321,6 +321,96 @@ impl ErgoTree {
     pub fn template_bytes(&self) -> Result<Vec<u8>, ErgoTreeError> {
         self.clone().parsed_tree()?.template_bytes()
     }
+
+    /// Replaces constants at the given `positions` with `new_values` in a
+    /// serialized ErgoTree, mirroring sigma-state's
+    /// `ErgoTreeSerializer.substituteConstants`. Only the header and the
+    /// constants segment are parsed; the body bytes are kept verbatim and
+    /// never deserialized, so an unparseable body is tolerated. Positions
+    /// outside the tree's constants list are silently ignored (no-op), and
+    /// the first position referencing a given constant index wins. Returns
+    /// the resulting bytes and the number of constants in the tree;
+    /// `positions.len()` must equal `new_values.len()`.
+    pub fn substitute_constants(
+        script_bytes: Vec<u8>,
+        positions: &[usize],
+        new_values: &[Constant],
+    ) -> Result<(Vec<u8>, usize), ErgoTreeError> {
+        use core2::io::Write;
+        use sigma_ser::vlq_encode::ReadSigmaVlqExt;
+        // Parse only the header + constants segment; keep the body raw.
+        let (header, mut constants, body_start) = {
+            let mut r = SigmaByteReader::new(
+                Cursor::new(script_bytes.as_slice()),
+                ConstantStore::empty(),
+            );
+            let header = ErgoTreeHeader::sigma_parse(&mut r)?;
+            let (constants, body_start) = r.with_tree_version(
+                header.version(),
+                |r| -> Result<(Vec<Constant>, usize), SigmaParsingError> {
+                    if header.has_size() {
+                        let _ = r.get_u32()?;
+                    }
+                    let constants = if header.is_constant_segregation() {
+                        ErgoTree::sigma_parse_constants(r)?
+                    } else {
+                        Vec::new()
+                    };
+                    let body_start = r.position()? as usize;
+                    Ok((constants, body_start))
+                },
+            )?;
+            (header, constants, body_start)
+        };
+        let num_constants = constants.len();
+        let tree_bytes = script_bytes.get(body_start..).unwrap_or_default().to_vec();
+
+        // First position referencing a given index wins (matches Scala's
+        // `getPositionsBackref`); out-of-range positions are dropped.
+        let mut already_set = vec![false; num_constants];
+        for (i_pos, &pos) in positions.iter().enumerate() {
+            if pos < num_constants && !already_set[pos] {
+                let new_c = &new_values[i_pos];
+                if new_c.tpe != constants[pos].tpe {
+                    return Err(ErgoTreeConstantError::SetConstantError(
+                        SetConstantError::TypeMismatch(format!(
+                            "substitute_constants: position {} expected type {:?}, got {:?}",
+                            pos, constants[pos].tpe, new_c.tpe
+                        )),
+                    )
+                    .into());
+                }
+                constants[pos] = new_c.clone();
+                already_set[pos] = true;
+            }
+        }
+
+        // Re-emit header + [size] + [count + constants (if segregated)] +
+        // verbatim body, mirroring `<ErgoTree as SigmaSerializable>`.
+        let body_section = {
+            let mut data = Vec::new();
+            let mut inner_w = SigmaByteWriter::new(&mut data, None);
+            inner_w.with_tree_version(header.version(), |inner_w| -> SigmaSerializeResult {
+                if header.is_constant_segregation() {
+                    inner_w.put_usize_as_u32_unwrapped(constants.len())?;
+                    constants
+                        .iter()
+                        .try_for_each(|c| c.sigma_serialize(inner_w))?;
+                }
+                inner_w.write_all(&tree_bytes)?;
+                Ok(())
+            })?;
+            data
+        };
+        let mut out = Vec::new();
+        let mut w = SigmaByteWriter::new(&mut out, None);
+        header.sigma_serialize(&mut w)?;
+        if header.has_size() {
+            w.put_usize_as_u32_unwrapped(body_section.len())?;
+        }
+        w.write_all(&body_section)?;
+        Ok((out, num_constants))
+    }
 }
 
 /// Constants related errors
@@ -664,6 +754,36 @@ mod tests {
         let ergo_tree = ErgoTree::new(ErgoTreeHeader::v0(true), &expr).unwrap();
         assert_eq!(ergo_tree.constants_len().unwrap(), 1);
         assert_eq!(ergo_tree.get_constant(0).unwrap().unwrap(), false.into());
+    }
+
+    // JVM parity (jvm:sigma-state-6.0.3 LanguageSpecificationV5 substConstants):
+    // a position outside the tree's constant list is a no-op that returns the
+    // original bytes, not an error. substitute_constants never parses the body,
+    // so even #1 (`[0,0,8,-45]`), whose body sigma-rust's full parser rejects
+    // with InvalidTypeCode, no-ops cleanly. (`-45` == `0xd3`.)
+    #[test]
+    fn substitute_constants_oob_is_noop() {
+        let dummy: Constant = 0i32.into();
+        let run = |bytes: Vec<u8>, pos: usize| -> (Vec<u8>, usize) {
+            ErgoTree::substitute_constants(bytes, &[pos], core::slice::from_ref(&dummy)).unwrap()
+        };
+        // #0: non-segregated header, 0 constants
+        assert_eq!(run(vec![0x00, 0x08, 0xd3], 0), (vec![0x00, 0x08, 0xd3], 0));
+        // #1: non-segregated, body unparseable by the full deserializer
+        assert_eq!(
+            run(vec![0x00, 0x00, 0x08, 0xd3], 0),
+            (vec![0x00, 0x00, 0x08, 0xd3], 0)
+        );
+        // #2/#3: segregated header, 0 constants
+        assert_eq!(
+            run(vec![0x10, 0x00, 0x08, 0xd3], 0),
+            (vec![0x10, 0x00, 0x08, 0xd3], 0)
+        );
+        // #6: segregated, 1 constant, position 1 is out of range
+        assert_eq!(
+            run(vec![0x10, 0x01, 0x08, 0xd3, 0x73, 0x00], 1),
+            (vec![0x10, 0x01, 0x08, 0xd3, 0x73, 0x00], 1)
+        );
     }
 
     #[test]
