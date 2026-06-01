@@ -332,6 +332,11 @@ impl NipopowAlgos {
     /// sequential distinct-group counter (used here pre-fix) produces leaves that
     /// hash differently and break `check_interlinks_proof` against JVM-generated
     /// proofs.
+    // A run's first-position index is bounded by interlinks.len() (a few dozen
+    // levels for any real chain), so the usize->u8 conversions below cannot
+    // overflow; the expects assert that invariant rather than handle the
+    // impossible case. Targeted allow over the crate-wide expect_used deny.
+    #[allow(clippy::expect_used)]
     pub fn pack_interlinks(interlinks: Vec<BlockId>) -> Vec<([u8; 2], Vec<u8>)> {
         if interlinks.is_empty() {
             return vec![];

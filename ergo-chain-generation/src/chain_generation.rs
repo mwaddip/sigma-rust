@@ -598,9 +598,7 @@ mod tests {
 
         let in_memory_proof = popow_algos.prove(&chain, k, m).unwrap();
         let reader = MockReader::from_chain(&chain);
-        let db_backed_proof = popow_algos
-            .prove_with_reader(&reader, None, k, m)
-            .unwrap();
+        let db_backed_proof = popow_algos.prove_with_reader(&reader, None, k, m).unwrap();
 
         assert!(db_backed_proof.has_valid_connections());
         assert_eq!(db_backed_proof.suffix_tail.len(), (k - 1) as usize);
@@ -612,11 +610,8 @@ mod tests {
         );
         // Db-backed prefix is a subset of the in-memory prefix on chains
         // with level-0 blocks (see doc comment above).
-        let in_memory_ids: std::collections::HashSet<BlockId> = in_memory_proof
-            .prefix
-            .iter()
-            .map(|p| p.header.id)
-            .collect();
+        let in_memory_ids: std::collections::HashSet<BlockId> =
+            in_memory_proof.prefix.iter().map(|p| p.header.id).collect();
         for ph in &db_backed_proof.prefix {
             assert!(
                 in_memory_ids.contains(&ph.header.id),

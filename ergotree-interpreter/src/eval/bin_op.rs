@@ -198,7 +198,9 @@ impl Evaluable for BinOp {
                 // dispatch below (per-type + per-coll-element), since the cost
                 // depends on the runtime value type.
                 RelationOp::Eq | RelationOp::NEq => {}
-                _ => { ctx.add_jit_cost(20)?; } // LT, LE, GT, GE = Fixed(20)
+                _ => {
+                    ctx.add_jit_cost(20)?;
+                } // LT, LE, GT, GE = Fixed(20)
             },
             BinOpKind::Logical(_) => {
                 ctx.add_jit_cost(20)?; // BinOr, BinAnd, BinXor = Fixed(20)
@@ -228,15 +230,15 @@ impl Evaluable for BinOp {
             BinOpKind::Relation(op) => match op {
                 RelationOp::Eq => {
                     let rv_val = rv()?;
-                    Ok(Value::Boolean(crate::eval::data_value_comparer::eq_with_cost(
-                        &lv, &rv_val, ctx,
-                    )?))
+                    Ok(Value::Boolean(
+                        crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
+                    ))
                 }
                 RelationOp::NEq => {
                     let rv_val = rv()?;
-                    Ok(Value::Boolean(!crate::eval::data_value_comparer::eq_with_cost(
-                        &lv, &rv_val, ctx,
-                    )?))
+                    Ok(Value::Boolean(
+                        !crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
+                    ))
                 }
                 RelationOp::Gt => eval_gt(lv, rv()?),
                 RelationOp::Lt => eval_lt(lv, rv()?),
@@ -284,13 +286,25 @@ impl Evaluable for BinOp {
                 };
                 let op_cost: u64 = match op {
                     ArithOp::Plus | ArithOp::Minus => {
-                        if op_bigint { 20 } else { 15 }
+                        if op_bigint {
+                            20
+                        } else {
+                            15
+                        }
                     }
                     ArithOp::Multiply | ArithOp::Divide | ArithOp::Modulo => {
-                        if op_bigint { 25 } else { 15 }
+                        if op_bigint {
+                            25
+                        } else {
+                            15
+                        }
                     }
                     ArithOp::Max | ArithOp::Min => {
-                        if op_bigint { 10 } else { 5 }
+                        if op_bigint {
+                            10
+                        } else {
+                            5
+                        }
                     }
                 };
                 ctx.add_jit_cost(op_cost)?;
@@ -427,6 +441,7 @@ impl Evaluable for BinOp {
 #[allow(clippy::panic)]
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::eval::test_util::eval_out_wo_ctx;
@@ -460,18 +475,30 @@ mod tests {
         let cases: &[(&str, Option<Value>, u64)] = &[
             ("009a04020504", Some(Value::Long(3)), 35), // Plus(Int 1, Long 2)
             ("009a05040402", Some(Value::Long(3)), 35), // Plus(Long 2, Int 1)
-            ("009a04feffffffffffffffff010502", Some(Value::Long(2147483648)), 35), // Plus(IntMax, Long 1)
+            (
+                "009a04feffffffffffffffff010502",
+                Some(Value::Long(2147483648)),
+                35,
+            ), // Plus(IntMax, Long 1)
             ("009a05feffffffffffffffff010402", None, 35), // Plus(LongMax, Int 1) -> reject
             ("009904020504", Some(Value::Long(-1)), 35), // Minus(Int 1, Long 2)
-            ("009c04020504", Some(Value::Long(2)), 35),  // Multiply(Int 1, Long 2)
-            ("009d04020504", Some(Value::Long(0)), 35),  // Divide(Int 1, Long 2)
-            ("009e04020504", Some(Value::Long(1)), 35),  // Modulo(Int 1, Long 2)
-            ("00a104020504", Some(Value::Long(1)), 25),  // Min(Int 1, Long 2)
-            ("00a204020504", Some(Value::Long(2)), 25),  // Max(Int 1, Long 2)
-            ("009a02010404", Some(Value::Int(3)), 35),   // Plus(Byte 1, Int 2)
-            ("009a03020404", Some(Value::Int(3)), 35),   // Plus(Short 1, Int 2)
-            ("009a0402060102", Some(Value::BigInt(BigInt256::from(3i32))), 60), // Plus(Int 1, BigInt 2)
-            ("009a0502060102", Some(Value::BigInt(BigInt256::from(3i32))), 60), // Plus(Long 1, BigInt 2)
+            ("009c04020504", Some(Value::Long(2)), 35), // Multiply(Int 1, Long 2)
+            ("009d04020504", Some(Value::Long(0)), 35), // Divide(Int 1, Long 2)
+            ("009e04020504", Some(Value::Long(1)), 35), // Modulo(Int 1, Long 2)
+            ("00a104020504", Some(Value::Long(1)), 25), // Min(Int 1, Long 2)
+            ("00a204020504", Some(Value::Long(2)), 25), // Max(Int 1, Long 2)
+            ("009a02010404", Some(Value::Int(3)), 35),  // Plus(Byte 1, Int 2)
+            ("009a03020404", Some(Value::Int(3)), 35),  // Plus(Short 1, Int 2)
+            (
+                "009a0402060102",
+                Some(Value::BigInt(BigInt256::from(3i32))),
+                60,
+            ), // Plus(Int 1, BigInt 2)
+            (
+                "009a0502060102",
+                Some(Value::BigInt(BigInt256::from(3i32))),
+                60,
+            ), // Plus(Long 1, BigInt 2)
         ];
         for (hex, expected, expected_cost) in cases {
             let tree = ErgoTree::sigma_parse_bytes(&hx(hex)).expect("parse tree");

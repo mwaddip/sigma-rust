@@ -450,15 +450,14 @@ mod tests {
 
         let in_memory_proof = popow_algos.prove(&chain, k, m).unwrap();
         let reader = MockReader::from_chain(&chain);
-        let db_backed_proof = popow_algos
-            .prove_with_reader(&reader, None, k, m)
-            .unwrap();
+        let db_backed_proof = popow_algos.prove_with_reader(&reader, None, k, m).unwrap();
 
         let in_memory_bytes = in_memory_proof.scorex_serialize_bytes().unwrap();
         let db_backed_bytes = db_backed_proof.scorex_serialize_bytes().unwrap();
 
         assert_eq!(
-            in_memory_bytes, db_backed_bytes,
+            in_memory_bytes,
+            db_backed_bytes,
             "prove and prove_with_reader produced different proofs:\n\
              in-memory prefix len: {}, db-backed prefix len: {}",
             in_memory_proof.prefix.len(),

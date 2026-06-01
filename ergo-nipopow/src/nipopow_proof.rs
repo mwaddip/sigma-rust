@@ -162,8 +162,7 @@ impl NipopowProof {
                 // Note that blocks with level 0 do not appear at all within
                 // interlinks, which is why we need to check the parent
                 // block id as well.
-                next.interlinks.contains(&prev.header.id)
-                    || next.header.parent_id == prev.header.id
+                next.interlinks.contains(&prev.header.id) || next.header.parent_id == prev.header.id
             })
         });
 
@@ -476,7 +475,10 @@ pub mod tests {
     /// `header.id`, `header.parent_id`, and `PoPowHeader::interlinks`.
     fn header_factory() -> impl Fn(BlockId, BlockId, u32) -> Header {
         let mut runner = TestRunner::default();
-        let base = any::<Box<Header>>().new_tree(&mut runner).unwrap().current();
+        let base = any::<Box<Header>>()
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
         move |id, parent_id, height| {
             let mut h = (*base).clone();
             h.id = id;
@@ -522,14 +524,8 @@ pub mod tests {
         );
         let suffix_tail = vec![mk_header(suffix_tail_id, suffix_head_id, 41)];
 
-        let proof = NipopowProof::new(
-            6,
-            2,
-            vec![h0, h1, h2, h3],
-            suffix_head,
-            suffix_tail,
-        )
-        .unwrap();
+        let proof =
+            NipopowProof::new(6, 2, vec![h0, h1, h2, h3], suffix_head, suffix_tail).unwrap();
 
         assert!(
             proof.has_valid_connections(),
@@ -555,20 +551,11 @@ pub mod tests {
         let h1 = pop_header(mk_header(h1_id, h0_id, 10), vec![h0_id]);
         let h2 = pop_header(mk_header(h2_id, h1_id, 20), vec![h0_id, h1_id]);
         let h3 = pop_header(mk_header(h3_id, h2_id, 30), vec![h0_id, h2_id]);
-        let suffix_head = pop_header(
-            mk_header(suffix_head_id, unrelated_parent, 40),
-            vec![h0_id],
-        );
+        let suffix_head = pop_header(mk_header(suffix_head_id, unrelated_parent, 40), vec![h0_id]);
         let suffix_tail = vec![mk_header(suffix_tail_id, suffix_head_id, 41)];
 
-        let mut proof = NipopowProof::new(
-            6,
-            2,
-            vec![h0, h1, h2, h3],
-            suffix_head,
-            suffix_tail,
-        )
-        .unwrap();
+        let mut proof =
+            NipopowProof::new(6, 2, vec![h0, h1, h2, h3], suffix_head, suffix_tail).unwrap();
 
         proof.popow_algos.use_last_epochs = 0;
 
@@ -589,20 +576,10 @@ pub mod tests {
         let suffix_tail_id = id_from_byte(3);
 
         let h0 = pop_header(mk_header(h0_id, id_from_byte(0), 1), vec![h0_id]);
-        let suffix_head = pop_header(
-            mk_header(suffix_head_id, h0_id, 10),
-            vec![h0_id],
-        );
+        let suffix_head = pop_header(mk_header(suffix_head_id, h0_id, 10), vec![h0_id]);
         let suffix_tail = vec![mk_header(suffix_tail_id, bad_parent, 11)];
 
-        let proof = NipopowProof::new(
-            6,
-            2,
-            vec![h0],
-            suffix_head,
-            suffix_tail,
-        )
-        .unwrap();
+        let proof = NipopowProof::new(6, 2, vec![h0], suffix_head, suffix_tail).unwrap();
 
         assert!(
             !proof.has_valid_connections(),
@@ -626,8 +603,7 @@ pub mod tests {
         payload.extend(vlq_encode_u32(0x7FFF_FFFF)); // num_prefixes
         payload.extend_from_slice(&[0u8; 16]); // padding
 
-        let result =
-            NipopowProof::scorex_parse(&mut std::io::Cursor::new(payload));
+        let result = NipopowProof::scorex_parse(&mut std::io::Cursor::new(payload));
         assert!(
             result.is_err(),
             "Expected Err for huge num_prefixes, got Ok"
@@ -640,12 +616,8 @@ pub mod tests {
         payload.extend(vlq_encode_u32(0x7FFF_FFFF)); // header_size
         payload.extend_from_slice(&[0u8; 16]); // padding
 
-        let result =
-            PoPowHeader::scorex_parse(&mut std::io::Cursor::new(payload));
-        assert!(
-            result.is_err(),
-            "Expected Err for huge header_size, got Ok"
-        );
+        let result = PoPowHeader::scorex_parse(&mut std::io::Cursor::new(payload));
+        assert!(result.is_err(), "Expected Err for huge header_size, got Ok");
     }
 
     #[test]
@@ -655,8 +627,7 @@ pub mod tests {
         payload.extend(vlq_encode_u32(over_limit)); // header_size
         payload.extend_from_slice(&[0u8; 16]); // padding
 
-        let result =
-            PoPowHeader::scorex_parse(&mut std::io::Cursor::new(payload));
+        let result = PoPowHeader::scorex_parse(&mut std::io::Cursor::new(payload));
         assert!(
             result.is_err(),
             "Expected Err for header_size > limit, got Ok"

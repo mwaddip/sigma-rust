@@ -26,8 +26,14 @@ impl Evaluable for XorOf {
             let mut has_true = false;
             let mut has_false = false;
             for b in input_v_bools {
-                if b { has_true = true; } else { has_false = true; }
-                if has_true && has_false { break; }
+                if b {
+                    has_true = true;
+                } else {
+                    has_false = true;
+                }
+                if has_true && has_false {
+                    break;
+                }
             }
             return Ok((has_true && has_false).into());
         }
@@ -90,7 +96,7 @@ mod tests {
         }
         .into();
         let ctx = ctx_with_tree_version(ErgoTreeVersion::V0);
-        assert_eq!(eval_out::<bool>(&expr, &ctx), true);
+        assert!(eval_out::<bool>(&expr, &ctx));
     }
 
     #[test]
@@ -101,6 +107,6 @@ mod tests {
         }
         .into();
         let ctx = ctx_with_tree_version(ErgoTreeVersion::V2);
-        assert_eq!(eval_out::<bool>(&expr, &ctx), false);
+        assert!(!eval_out::<bool>(&expr, &ctx));
     }
 }

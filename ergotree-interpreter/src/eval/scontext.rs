@@ -141,22 +141,22 @@ pub(crate) static GET_VAR_FROM_INPUT_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, arg
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::eval::test_util::eval_out;
+    use core::cell::Cell;
     use ergo_chain_types::{Header, PreHeader};
     use ergotree_ir::chain::context::Context;
     use ergotree_ir::chain::ergo_box::ErgoBox;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
     use ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
     use ergotree_ir::mir::constant::TryExtractFrom;
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::method_call::MethodCall;
     use ergotree_ir::mir::property_call::PropertyCall;
     use ergotree_ir::mir::value::Value;
-    use ergotree_ir::ergo_tree::ErgoTreeVersion;
     use ergotree_ir::serialization::SigmaSerializable;
     use ergotree_ir::types::scontext::{self, GET_VAR_FROM_INPUT_METHOD};
     use ergotree_ir::types::stype::LiftIntoSType;
     use ergotree_ir::types::stype_param::STypeVar;
     use sigma_test_util::force_any_val;
-    use core::cell::Cell;
 
     fn make_ctx_inputs_includes_self_box(
         tree_version: ErgoTreeVersion,

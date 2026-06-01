@@ -66,7 +66,10 @@ mod tests {
             input: Expr::Const(true.into()).into(),
         }
         .into();
-        let outer: Expr = BoolToSigmaProp { input: inner.into() }.into();
+        let outer: Expr = BoolToSigmaProp {
+            input: inner.into(),
+        }
+        .into();
 
         let ctx = force_any_val::<Context>();
         let ctx = Context {
@@ -85,7 +88,10 @@ mod tests {
             input: Expr::Const(true.into()).into(),
         }
         .into();
-        let outer: Expr = BoolToSigmaProp { input: inner.into() }.into();
+        let outer: Expr = BoolToSigmaProp {
+            input: inner.into(),
+        }
+        .into();
 
         let ctx = force_any_val::<Context>();
         let ctx = Context {

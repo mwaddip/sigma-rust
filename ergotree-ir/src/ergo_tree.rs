@@ -340,10 +340,8 @@ impl ErgoTree {
         use sigma_ser::vlq_encode::ReadSigmaVlqExt;
         // Parse only the header + constants segment; keep the body raw.
         let (header, mut constants, body_start) = {
-            let mut r = SigmaByteReader::new(
-                Cursor::new(script_bytes.as_slice()),
-                ConstantStore::empty(),
-            );
+            let mut r =
+                SigmaByteReader::new(Cursor::new(script_bytes.as_slice()), ConstantStore::empty());
             let header = ErgoTreeHeader::sigma_parse(&mut r)?;
             let (constants, body_start) = r.with_tree_version(
                 header.version(),
