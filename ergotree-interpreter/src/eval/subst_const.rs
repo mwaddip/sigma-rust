@@ -59,9 +59,13 @@ impl Evaluable for SubstConstants {
             // parsed and out-of-range positions are a no-op, so a malformed
             // body or an OOB position returns the original bytes (JVM parity)
             // instead of erroring.
-            let (new_bytes, num_constants) =
-                ErgoTree::substitute_constants(b.as_vec_u8(), &positions, &new_constants)
-                    .map_err(to_misc_err)?;
+            let (new_bytes, num_constants) = ErgoTree::substitute_constants(
+                b.as_vec_u8(),
+                &positions,
+                &new_constants,
+                ctx.tree_version(),
+            )
+            .map_err(to_misc_err)?;
             // Charge based on the template's constants count, matching Scala's
             // `ErgoTreeSerializer.substituteConstants` — the walk visits every
             // constant in the template regardless of how many positions the

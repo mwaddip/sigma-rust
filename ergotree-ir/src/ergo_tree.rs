@@ -331,10 +331,18 @@ impl ErgoTree {
     /// the first position referencing a given constant index wins. Returns
     /// the resulting bytes and the number of constants in the tree;
     /// `positions.len()` must equal `new_values.len()`.
+    ///
+    /// `tree_version` is the *evaluation's* ErgoTree version (not the
+    /// template header's). The tree-size slot is re-emitted only when it is
+    /// `>= V3` — the V6 soft-fork `isV3OrLaterErgoTreeVersion` gate in
+    /// `ErgoTreeSerializer.scala`; for `<= V2` the slot is dropped even
+    /// though the header's `has_size` bit stays set, a JVM quirk we mirror
+    /// byte-for-byte.
     pub fn substitute_constants(
         script_bytes: Vec<u8>,
         positions: &[usize],
         new_values: &[Constant],
+        tree_version: ErgoTreeVersion,
     ) -> Result<(Vec<u8>, usize), ErgoTreeError> {
         use core2::io::Write;
         use sigma_ser::vlq_encode::ReadSigmaVlqExt;
@@ -403,7 +411,10 @@ impl ErgoTree {
         let mut out = Vec::new();
         let mut w = SigmaByteWriter::new(&mut out, None);
         header.sigma_serialize(&mut w)?;
-        if header.has_size() {
+        // V6 soft-fork: re-emit the size slot only when the evaluation's tree
+        // version is >= V3 (`isV3OrLaterErgoTreeVersion`); for <= V2 it is
+        // dropped even with the has_size bit set (JVM parity).
+        if tree_version >= ErgoTreeVersion::V3 && header.has_size() {
             w.put_usize_as_u32_unwrapped(body_section.len())?;
         }
         w.write_all(&body_section)?;
@@ -763,7 +774,13 @@ mod tests {
     fn substitute_constants_oob_is_noop() {
         let dummy: Constant = 0i32.into();
         let run = |bytes: Vec<u8>, pos: usize| -> (Vec<u8>, usize) {
-            ErgoTree::substitute_constants(bytes, &[pos], core::slice::from_ref(&dummy)).unwrap()
+            ErgoTree::substitute_constants(
+                bytes,
+                &[pos],
+                core::slice::from_ref(&dummy),
+                ErgoTreeVersion::V3,
+            )
+            .unwrap()
         };
         // #0: non-segregated header, 0 constants
         assert_eq!(run(vec![0x00, 0x08, 0xd3], 0), (vec![0x00, 0x08, 0xd3], 0));
@@ -782,6 +799,41 @@ mod tests {
             run(vec![0x10, 0x01, 0x08, 0xd3, 0x73, 0x00], 1),
             (vec![0x10, 0x01, 0x08, 0xd3, 0x73, 0x00], 1)
         );
+    }
+
+    // JVM parity (jvm:sigma-state-6.0.3 substituteConstants): the tree-size
+    // slot is re-emitted only when the evaluation's ErgoTree version is >= V3
+    // (the V6 soft-fork `isV3OrLaterErgoTreeVersion` gate,
+    // ErgoTreeSerializer.scala:369). For v<=2 the slot is dropped even though
+    // the header's has_size bit stays set. No SANTA substConstants vector is a
+    // has_size template, so this path is certified against the Scala source.
+    #[test]
+    fn substitute_constants_v3_gates_size_slot() {
+        // A v1 (has_size) segregated template with a single constant.
+        let expr = Expr::Const(Constant {
+            tpe: SType::SBoolean,
+            v: Literal::Boolean(false),
+        });
+        let bytes = ErgoTree::new(ErgoTreeHeader::v1(true), &expr)
+            .unwrap()
+            .sigma_serialize_bytes()
+            .unwrap();
+        assert!(ErgoTreeHeader::new(bytes[0]).unwrap().has_size());
+        // Tiny tree => single-byte size VLQ, so it can be stripped positionally.
+        assert!(bytes[1] < 0x80, "test assumes a single-byte size VLQ");
+
+        // No substitution: the only inter-version difference is the size slot.
+        let (out_v3, _) =
+            ErgoTree::substitute_constants(bytes.clone(), &[], &[], ErgoTreeVersion::V3).unwrap();
+        let (out_v2, _) =
+            ErgoTree::substitute_constants(bytes.clone(), &[], &[], ErgoTreeVersion::V2).unwrap();
+
+        // v>=3: size slot kept => byte-identical round-trip.
+        assert_eq!(out_v3, bytes, "v3 must re-emit the size slot");
+        // v<=2: size slot dropped => header byte then the bytes after the slot.
+        let mut expected_v2 = vec![bytes[0]];
+        expected_v2.extend_from_slice(&bytes[2..]);
+        assert_eq!(out_v2, expected_v2, "v<=2 must drop the size slot");
     }
 
     #[test]
