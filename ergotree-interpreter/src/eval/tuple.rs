@@ -27,6 +27,7 @@ impl Evaluable for Tuple {
                 self.items.len()
             )));
         }
+        ctx.add_jit_cost(15)?; // Tuple = Fixed(15)
         let items_v = self
             .items
             .try_mapped_ref(|i| -> Result<Value<'ctx>, EvalError> {
