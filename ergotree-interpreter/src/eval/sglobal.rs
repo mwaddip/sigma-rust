@@ -197,6 +197,9 @@ pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
 };
 
 pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    // Scala `serialize_eval` charges SigmaByteWriter.StartWriterCost = FixedCost(JitCost(10))
+    // up front, then each writer `put`'s cost during DataSerializer.serialize.
+    ctx.add_jit_cost(10)?;
     if obj != Value::Global {
         return Err(EvalError::UnexpectedValue(format!(
             "sglobal.groupGenerator expected obj to be Value::Global, got {:?}",
@@ -211,10 +214,15 @@ pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .map_err(EvalError::UnexpectedValue)?;
 
     let mut buf = vec![];
-    let mut writer = SigmaByteWriter::new(&mut buf, None);
-    writer.with_tree_version(ctx.tree_version(), |writer| {
-        DataSerializer::sigma_serialize(&arg, writer)
-    })?;
+    let put_cost = {
+        let mut writer = SigmaByteWriter::new(&mut buf, None);
+        writer.enable_serialize_cost_tracking();
+        writer.with_tree_version(ctx.tree_version(), |writer| {
+            DataSerializer::sigma_serialize(&arg, writer)
+        })?;
+        writer.serialize_cost()
+    };
+    ctx.add_jit_cost(put_cost)?;
     Ok(Value::from(buf))
 };
 
