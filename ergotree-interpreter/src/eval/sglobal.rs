@@ -29,7 +29,8 @@ fn helper_xor(x: &[i8], y: &[i8]) -> Arc<[i8]> {
     x.iter().zip(y.iter()).map(|(x1, x2)| *x1 ^ *x2).collect()
 }
 
-pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
+pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+    ctx.add_jit_cost(10)?;
     if obj != Value::Global {
         return Err(EvalError::UnexpectedValue(format!(
             "sglobal.groupGenerator expected obj to be Value::Global, got {:?}",
@@ -39,7 +40,8 @@ pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args
     Ok(Value::from(generator()))
 };
 
-pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
+pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    ctx.add_jit_cost(10)?;
     if obj != Value::Global {
         return Err(EvalError::UnexpectedValue(format!(
             "sglobal.xor expected obj to be Value::Global, got {:?}",
@@ -70,7 +72,8 @@ pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     }
 };
 
-pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, _ctx, obj, args| {
+pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
+    ctx.add_jit_cost(10)?;
     if obj != Value::Global {
         return Err(EvalError::UnexpectedValue(format!(
             "sglobal.fromBigEndianBytes expected obj to be Value::Global, got {:?}",
@@ -183,6 +186,8 @@ pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::NotFound("deserialize: missing first arg".into()))?
         .clone()
         .try_extract_into::<Vec<u8>>()?;
+    let n = bytes.len() as u32;
+    ctx.add_per_item_jit_cost(100, 32, 32, n)?;
     let mut reader = sigma_byte_reader::from_bytes(&bytes);
     Ok(Value::from(
         reader.with_tree_version(ctx.tree_version(), |reader| {
@@ -213,7 +218,8 @@ pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     Ok(Value::from(buf))
 };
 
-pub(crate) static SGLOBAL_SOME_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
+pub(crate) static SGLOBAL_SOME_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    ctx.add_jit_cost(5)?;
     if obj != Value::Global {
         return Err(EvalError::UnexpectedValue(format!(
             "sglobal.some expected obj to be Value::Global, got {:?}",
@@ -227,7 +233,8 @@ pub(crate) static SGLOBAL_SOME_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     Ok(Value::Opt(Some(Box::new(value))))
 };
 
-pub(crate) static SGLOBAL_NONE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
+pub(crate) static SGLOBAL_NONE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+    ctx.add_jit_cost(5)?;
     if obj != Value::Global {
         return Err(EvalError::UnexpectedValue(format!(
             "sglobal.none expected obj to be Value::Global, got {:?}",
