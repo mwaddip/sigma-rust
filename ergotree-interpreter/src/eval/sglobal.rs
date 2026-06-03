@@ -244,7 +244,9 @@ pub(crate) static SGLOBAL_NONE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     Ok(Value::Opt(None))
 };
 
-pub(crate) static ENCODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, args| {
+pub(crate) static ENCODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
+    // Scala Global.encodeNbits EncodeNBitsCost = FixedCost(JitCost(25)).
+    ctx.add_jit_cost(25)?;
     let bigint: BigInt = args
         .first()
         .cloned()
@@ -254,7 +256,9 @@ pub(crate) static ENCODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, args| {
     Ok(Value::Long(encode_compact_bits(&bigint)))
 };
 
-pub(crate) static DECODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, args| {
+pub(crate) static DECODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
+    // Scala Global.decodeNbits DecodeNBitsCost = FixedCost(JitCost(50)).
+    ctx.add_jit_cost(50)?;
     let nbits: i64 = args
         .first()
         .cloned()
@@ -268,8 +272,8 @@ pub(crate) static DECODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, args| {
             .map_err(EvalError::UnexpectedValue)?,
     ))
 };
-pub(crate) static POW_HIT_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, mut args| {
-    // Pop arguments to avoid cloning
+pub(crate) static POW_HIT_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, mut args| {
+    // Pop arguments first: the Scala cost depends on k and the msg/nonce/h lengths.
     let big_n: u32 = args
         .pop()
         .ok_or_else(|| EvalError::NotFound("powHit: missing N".into()))?
@@ -292,6 +296,13 @@ pub(crate) static POW_HIT_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, mut args| {
         .pop()
         .ok_or_else(|| EvalError::NotFound("powHit: missing msg".into()))?
         .try_extract_into::<i32>()?;
+    // Scala PowHitCostKind.cost: baseCost(500) + (k+1) * (totalLen / chunkSize + 1)
+    // * perChunkCost, where chunkSize=128 and perChunkCost=7 are CalcBlake2b256's
+    // costKind (the heaviest part is k+1 Blake2b256 invocations over msg||nonce||h).
+    let total_len = msg.len() + nonce.len() + h.len();
+    let chunks = total_len as u64 / 128 + 1;
+    let k_plus_1 = u64::try_from(k).map_err(|_| EvalError::Misc("k out of bounds".into()))? + 1;
+    ctx.add_jit_cost(500 + k_plus_1 * chunks * 7)?;
     Ok(UnsignedBigInt::try_from(
         AutolykosPowScheme::new(
             k.try_into()
@@ -525,6 +536,49 @@ mod tests {
         assert_eq!(decode_nbits(n_bits), BigInt256::from(1_i8));
     }
 
+    /// Regression: the Global nbits methods charge their Scala costKinds --
+    /// Global.encodeNbits = FixedCost(JitCost(25)), Global.decodeNbits =
+    /// FixedCost(JitCost(50)) (both were a flat 10, the v6 -15/-40 undercharge).
+    /// Isolate each method's costKind by subtracting its arg-const eval cost; the
+    /// shared `Global` receiver eval and the MethodCall Fixed(4) cancel, so the
+    /// decode-minus-encode costKind delta must be 50 - 25 = 25.
+    #[test]
+    fn nbits_methods_charge_scala_costkinds() {
+        use crate::eval::test_util::eval_out;
+        use ergotree_ir::chain::context::Context;
+        use ergotree_ir::mir::constant::TryExtractFrom;
+        use ergotree_ir::mir::value::Value;
+        use sigma_test_util::force_any_val;
+
+        fn cost_of<T: TryExtractFrom<Value<'static>> + 'static>(e: &Expr) -> u64 {
+            let ctx = force_any_val::<Context>();
+            let before = ctx.jit_cost_value();
+            let _: T = eval_out(e, &ctx);
+            ctx.jit_cost_value() - before
+        }
+
+        let enc_arg: Expr = Constant::from(BigInt256::from(1i8)).into();
+        let dec_arg: Expr = Constant::from(16842752i64).into();
+        let enc_mc: Expr = MethodCall::new(
+            Expr::Global,
+            ENCODE_NBITS_METHOD.clone(),
+            vec![enc_arg.clone()],
+        )
+        .unwrap()
+        .into();
+        let dec_mc: Expr = MethodCall::new(
+            Expr::Global,
+            DECODE_NBITS_METHOD.clone(),
+            vec![dec_arg.clone()],
+        )
+        .unwrap()
+        .into();
+
+        let enc_kind = cost_of::<i64>(&enc_mc) - cost_of::<BigInt256>(&enc_arg);
+        let dec_kind = cost_of::<BigInt256>(&dec_mc) - cost_of::<i64>(&dec_arg);
+        assert_eq!(dec_kind - enc_kind, 25);
+    }
+
     use proptest::prelude::*;
 
     proptest! {
@@ -715,6 +769,45 @@ mod tests {
             deserialize(&encoded, SType::SGroupElement),
             Constant::from(ec_point)
         );
+    }
+
+    /// Regression: powHit charges the Scala PowHitCostKind formula
+    /// `500 + (k+1) * (totalLen/128 + 1) * 7` (was a flat 900). Isolate the
+    /// `(k+1)` term with a k-delta: two calls differing only in k by 1 (identical
+    /// msg/nonce/h, so totalLen and every other charge cancel) must differ by
+    /// `1 * chunks(=1 here) * perChunkCost(=7)` = 7.
+    #[test]
+    fn pow_hit_charges_scala_costkind() {
+        use crate::eval::test_util::try_eval_out;
+        use ergotree_ir::chain::context::Context;
+        use sigma_test_util::force_any_val;
+
+        let msg = vec![1u8, 2, 3, 4, 5, 6, 7];
+        let nonce = vec![0u8; 8];
+        let h = vec![0u8; 4]; // totalLen = 19 < 128 -> chunks = 1
+
+        let cost_of = |k: u32| -> u64 {
+            let expr: Expr = MethodCall::new(
+                Expr::Global,
+                POW_HIT_METHOD.clone(),
+                vec![
+                    Constant::from(k as i32).into(),
+                    Constant::from(msg.clone()).into(),
+                    Constant::from(nonce.clone()).into(),
+                    Constant::from(h.clone()).into(),
+                    Constant::from(1024i32 * 1024).into(),
+                ],
+            )
+            .unwrap()
+            .into();
+            let ctx = force_any_val::<Context>();
+            let before = ctx.jit_cost_value();
+            // cost is charged before the hit computation, so the result is irrelevant
+            let _ = try_eval_out::<UnsignedBigInt>(&expr, &ctx);
+            ctx.jit_cost_value() - before
+        };
+
+        assert_eq!(cost_of(33) - cost_of(32), 7);
     }
 
     #[test]
