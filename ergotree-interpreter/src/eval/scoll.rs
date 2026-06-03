@@ -1,5 +1,4 @@
 use crate::eval::EvalError;
-use crate::eval::Evaluable;
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -96,19 +95,16 @@ pub(crate) fn flatmap_eval<'ctx>(
             return Err(EvalError::UnexpectedValue(unsupported_msg));
         }
     }
+    // ADD_TO_ENV charged once per INPUT element (distinct from the output-length
+    // per-item charge below, which scales with the flattened result).
     let mut lambda_call = |arg: Value<'ctx>| {
-        let func_arg = lambda.args.first().ok_or_else(|| {
-            EvalError::NotFound("flatmap: lambda has empty arguments list".to_string())
-        })?;
-        let orig_val = env.get(func_arg.idx).cloned();
-        env.insert(func_arg.idx, arg);
-        let res = lambda.body.eval(env, ctx);
-        if let Some(orig_val) = orig_val {
-            env.insert(func_arg.idx, orig_val);
-        } else {
-            env.remove(&func_arg.idx);
-        }
-        res
+        crate::eval::eval_lambda_1arg(
+            lambda,
+            arg,
+            env,
+            ctx,
+            "flatmap: lambda has empty arguments list",
+        )
     };
     let mapper_input_tpe = lambda
         .args
@@ -136,15 +132,17 @@ pub(crate) fn flatmap_eval<'ctx>(
             input_v
         ))),
     }?;
-    normalized_input_vals
+    let values = normalized_input_vals
         .iter()
         .map(|item| lambda_call(item.clone()))
-        .collect::<Result<Vec<Value>, EvalError>>()
-        .map(|values| {
-            CollKind::from_vec_vec(lambda.body.tpe(), values).map_err(EvalError::TryExtractFrom)
-        })
-        .and_then(|v| v) // flatten <Result<Result<Value, _>, _>
-        .map(Value::Coll)
+        .collect::<Result<Vec<Value>, EvalError>>()?;
+    let coll =
+        CollKind::from_vec_vec(lambda.body.tpe(), values).map_err(EvalError::TryExtractFrom)?;
+    // flatMap cost scales with the OUTPUT (flattened) length, not the input
+    // length, matching Scala's `flatMap_eval` (addSeqCost over `res.length`
+    // after building the result, post the per-item lambda calls).
+    ctx.add_per_item_jit_cost(60, 10, 8, coll.len() as u32)?;
+    Ok(Value::Coll(coll))
 }
 
 pub(crate) static ZIP_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
@@ -628,6 +626,102 @@ mod tests {
         .into();
         let res = eval_out_wo_ctx::<Vec<i32>>(&expr);
         assert_eq!(res, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn flatmap_charges_add_to_env_per_input() {
+        use crate::eval::test_util::try_eval_out;
+        use ergotree_ir::chain::context::Context;
+        use sigma_test_util::force_any_val;
+
+        // `inner.flatMap(x => x.reverse)` over a Coll[Coll[Long]].
+        let flatmap_reverse = |inner: Vec<Vec<i64>>| -> Expr {
+            let items: Arc<[Literal]> = Arc::from(
+                inner
+                    .into_iter()
+                    .map(|v| Constant::from(v).v)
+                    .collect::<Vec<_>>(),
+            );
+            let coll_const = Constant {
+                tpe: SType::SColl(Arc::new(SType::SColl(Arc::new(SType::SLong)))),
+                v: Literal::Coll(CollKind::WrappedColl {
+                    items,
+                    elem_tpe: SType::SColl(Arc::new(SType::SLong)),
+                }),
+            };
+            let body: Expr = MethodCall::new(
+                ValUse {
+                    val_id: 1.into(),
+                    tpe: SType::SColl(Arc::new(SType::SLong)),
+                }
+                .into(),
+                scoll::REVERSE_METHOD.clone().with_concrete_types(
+                    &[(STypeVar::t(), SType::SLong)].iter().cloned().collect(),
+                ),
+                vec![],
+            )
+            .unwrap()
+            .into();
+            MethodCall::new(
+                coll_const.into(),
+                scoll::FLATMAP_METHOD.clone().with_concrete_types(
+                    &[
+                        (STypeVar::iv(), SType::SColl(Arc::new(SType::SLong))),
+                        (STypeVar::ov(), SType::SLong),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                ),
+                vec![FuncValue::new(
+                    vec![FuncArg {
+                        idx: 1.into(),
+                        tpe: SType::SColl(Arc::new(SType::SLong)),
+                    }],
+                    body,
+                )
+                .into()],
+            )
+            .unwrap()
+            .into()
+        };
+
+        let cost_of = |expr: &Expr| -> u64 {
+            let ctx = force_any_val::<Context>();
+            let before = ctx.jit_cost_value();
+            let _ = try_eval_out::<Vec<i64>>(expr, &ctx).unwrap();
+            ctx.jit_cost_value() - before
+        };
+
+        // Standalone `[7].reverse` measures one lambda-body evaluation `r`:
+        // inside flatMap the body's only difference is a ValUse vs Constant
+        // receiver, and both are Fixed(5), so the per-input body cost equals
+        // this.
+        let reverse_standalone: Expr = MethodCall::new(
+            Constant::from(vec![7i64]).into(),
+            scoll::REVERSE_METHOD
+                .clone()
+                .with_concrete_types(&[(STypeVar::t(), SType::SLong)].iter().cloned().collect()),
+            vec![],
+        )
+        .unwrap()
+        .into();
+        let r = cost_of(&reverse_standalone);
+
+        // 1 -> 2 input elements adds exactly one body eval (`r`) + one
+        // ADD_TO_ENV_COST(5). Output length 1 -> 2 stays in the first chunk of
+        // PerItemCost(60,10,8), so that charge is unchanged. Pre-fix the delta
+        // was just `r`; the +5 is the per-input ADD_TO_ENV this fix adds.
+        let one = cost_of(&flatmap_reverse(vec![vec![7]]));
+        let two = cost_of(&flatmap_reverse(vec![vec![7], vec![8]]));
+        assert_eq!(
+            two - one,
+            r + 5,
+            "flatMap must charge ADD_TO_ENV_COST(5) per input element: delta {} \
+             should equal one body eval {} + 5",
+            two - one,
+            r,
+        );
     }
 
     #[test]

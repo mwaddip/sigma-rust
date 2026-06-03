@@ -10,7 +10,7 @@ use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
 use snumeric::numeric_method_evalfn;
 
 use ergotree_ir::mir::expr::Expr;
-use ergotree_ir::mir::value::Value;
+use ergotree_ir::mir::value::{Lambda, Value};
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaBoolean;
 
 use ergotree_ir::types::smethod::SMethod;
@@ -132,6 +132,38 @@ pub struct ReductionResult {
 /// JIT cost for a script that trivially reduces to a SigmaProp constant (e.g.
 /// bare P2PK). Scala's `EvalSigmaPropConstant` charges 50 JitCost.
 const EVAL_SIGMA_PROP_CONSTANT: u64 = 50;
+
+/// `AddToEnvironmentDesc` cost (Scala `values.scala`): charged once per lambda-arg
+/// binding — i.e. once per invocation of a collection HOF's lambda.
+pub(crate) const ADD_TO_ENV_COST: u64 = 5;
+
+/// Bind `arg` to a single-argument lambda's parameter, evaluate the body, then
+/// restore the previous binding — charging `ADD_TO_ENV_COST` for the binding,
+/// matching Scala's per-invocation `AddToEnvironment`. Shared by the collection
+/// HOFs (map/filter/fold/exists/forall/flatMap); `empty_args_err` is the caller's
+/// message for the (type-unreachable) empty-parameter case.
+pub(crate) fn eval_lambda_1arg<'ctx>(
+    lambda: &Lambda,
+    arg: Value<'ctx>,
+    env: &mut Env<'ctx>,
+    ctx: &Context<'ctx>,
+    empty_args_err: &str,
+) -> Result<Value<'ctx>, EvalError> {
+    let func_arg = lambda
+        .args
+        .first()
+        .ok_or_else(|| EvalError::NotFound(empty_args_err.to_string()))?;
+    let orig_val = env.get(func_arg.idx).cloned();
+    ctx.add_jit_cost(ADD_TO_ENV_COST)?;
+    env.insert(func_arg.idx, arg);
+    let res = lambda.body.eval(env, ctx);
+    if let Some(orig_val) = orig_val {
+        env.insert(func_arg.idx, orig_val);
+    } else {
+        env.remove(&func_arg.idx);
+    }
+    res
+}
 
 /// Short-circuit for trees whose proposition is a plain SigmaProp constant.
 /// Returns `Some(sigma_bool)` for both forms:
