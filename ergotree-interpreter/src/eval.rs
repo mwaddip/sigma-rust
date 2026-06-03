@@ -42,7 +42,6 @@ pub(crate) mod coll_size;
 pub(crate) mod coll_slice;
 pub(crate) mod collection;
 pub(crate) mod cost_accum;
-pub(crate) mod costs;
 pub(crate) mod create_avl_tree;
 pub(crate) mod create_prove_dh_tuple;
 pub(crate) mod create_provedlog;
@@ -295,7 +294,7 @@ pub(crate) trait Evaluable {
         &self,
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
-        // TODO for JIT costing: cost_accum: &mut CostAccumulator,
+        // JIT costing is handled via ctx.add_jit_cost()
     ) -> Result<Value<'ctx>, EvalError>;
 }
 
