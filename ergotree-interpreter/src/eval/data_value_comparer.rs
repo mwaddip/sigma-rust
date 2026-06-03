@@ -7,6 +7,9 @@
 
 use ergotree_ir::chain::context::Context;
 use ergotree_ir::mir::value::{CollKind, NativeColl, Value};
+use ergotree_ir::sigma_protocol::sigma_boolean::{
+    SigmaBoolean, SigmaConjecture, SigmaConjectureItems, SigmaProofOfKnowledgeTree,
+};
 use ergotree_ir::types::stype::SType;
 
 use super::EvalError;
@@ -22,9 +25,11 @@ const EQ_BOX_COST: u64 = 6;
 const EQ_PREHEADER_COST: u64 = 4;
 const EQ_HEADER_COST: u64 = 6;
 
-// MatchType dispatch cost for collection equality. Charged first, before the
-// length-mismatch short-circuit so the dispatch itself is always paid for.
-const COLL_MATCH_TYPE_COST: u64 = 1;
+// Scala's MatchType dispatch cost (`CostOf_MatchType` = 1), charged on each
+// type-match step: the collection dispatch (before its length-mismatch
+// short-circuit, so it is always paid), the SigmaProp dispatch, and once per
+// SigmaBoolean tree node.
+const MATCH_TYPE_COST: u64 = 1;
 
 // Per-element collection equality costs as (base, per_chunk, chunk_size),
 // matching `Context::add_per_item_jit_cost`'s argument shape.
@@ -105,7 +110,7 @@ pub(crate) fn eq_with_cost<'ctx>(
         (Value::Coll(l_coll), Value::Coll(r_coll)) => {
             // MatchType dispatch cost always paid, matching Scala's
             // DataValueComparer case 2 (bug 4).
-            ctx.add_jit_cost(COLL_MATCH_TYPE_COST)?;
+            ctx.add_jit_cost(MATCH_TYPE_COST)?;
             let n = l_coll.len();
             if n != r_coll.len() {
                 // Scala short-circuits on length mismatch without charging
@@ -144,13 +149,82 @@ pub(crate) fn eq_with_cost<'ctx>(
             Ok(lv == rv)
         }
 
-        // SigmaProp, String, Unit, Lambda, Context, Global, and any cross-type
-        // comparisons (which PartialEq returns false for anyway).
+        (Value::SigmaProp(l), Value::SigmaProp(r)) => {
+            // Scala `DataValueComparer.equalDataValues` SigmaProp case
+            // (DataValueComparer.scala:353): one MatchType for the dispatch,
+            // then `equalSigmaBoolean` walks both trees.
+            ctx.add_jit_cost(MATCH_TYPE_COST)?;
+            eq_sigma_bool_with_cost(l.value(), r.value(), ctx)
+        }
+
+        // String, Unit, Lambda, Context, Global, and any cross-type comparisons
+        // (which PartialEq returns false for anyway).
         _ => {
             ctx.add_jit_cost(EQ_PRIM_COST)?;
             Ok(lv == rv)
         }
     }
+}
+
+/// Compare two `SigmaBoolean` trees, charging cost per Scala `equalSigmaBoolean`
+/// (DataValueComparer.scala:253): `MATCH_TYPE_COST` once per node + the
+/// `EQ_GROUP_ELEMENT_COST` per EcPoint. Short-circuits exactly as Scala's `&&`
+/// and length checks do, so an unequal pair is charged only up to the first
+/// mismatch.
+fn eq_sigma_bool_with_cost(
+    l: &SigmaBoolean,
+    r: &SigmaBoolean,
+    ctx: &Context<'_>,
+) -> Result<bool, EvalError> {
+    use SigmaBoolean::{ProofOfKnowledge, SigmaConjecture as Conj, TrivialProp};
+    use SigmaConjecture::{Cand, Cor, Cthreshold};
+    use SigmaProofOfKnowledgeTree::{ProveDhTuple, ProveDlog};
+    ctx.add_jit_cost(MATCH_TYPE_COST)?; // once per node
+    match (l, r) {
+        (ProofOfKnowledge(ProveDlog(x)), ProofOfKnowledge(ProveDlog(y))) => {
+            ctx.add_jit_cost(EQ_GROUP_ELEMENT_COST)?;
+            Ok(x.h == y.h)
+        }
+        (ProofOfKnowledge(ProveDhTuple(x)), ProofOfKnowledge(ProveDhTuple(y))) => {
+            // Four `equalECPoint`s, &&-short-circuited: each one reached charges
+            // EQ_GROUP_ELEMENT_COST (including the mismatching one); a mismatch
+            // stops the rest.
+            for (lp, rp) in [(&x.g, &y.g), (&x.h, &y.h), (&x.u, &y.u), (&x.v, &y.v)] {
+                ctx.add_jit_cost(EQ_GROUP_ELEMENT_COST)?;
+                if lp != rp {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (TrivialProp(a), TrivialProp(b)) => Ok(a == b),
+        (Conj(Cand(x)), Conj(Cand(y))) => eq_sigma_bools_with_cost(&x.items, &y.items, ctx),
+        (Conj(Cor(x)), Conj(Cor(y))) => eq_sigma_bools_with_cost(&x.items, &y.items, ctx),
+        (Conj(Cthreshold(x)), Conj(Cthreshold(y))) => {
+            Ok(x.k == y.k && eq_sigma_bools_with_cost(&x.children, &y.children, ctx)?)
+        }
+        // Mismatched node types: the node's MatchType is charged above; the
+        // comparison is false (Scala's `case _ => false`).
+        _ => Ok(false),
+    }
+}
+
+/// `equalSigmaBooleans` (DataValueComparer.scala:241): length check (no per-item
+/// charge on mismatch), then per-child `eq_sigma_bool_with_cost`, short-circuiting.
+fn eq_sigma_bools_with_cost(
+    xs: &SigmaConjectureItems<SigmaBoolean>,
+    ys: &SigmaConjectureItems<SigmaBoolean>,
+    ctx: &Context<'_>,
+) -> Result<bool, EvalError> {
+    if xs.len() != ys.len() {
+        return Ok(false);
+    }
+    for (x, y) in xs.iter().zip(ys.iter()) {
+        if !eq_sigma_bool_with_cost(x, y, ctx)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Per-item cost tuple for collection equality based on element type.
@@ -282,7 +356,7 @@ mod tests {
             items: items_b,
         });
         assert!(!eq_with_cost(&lv, &rv, &ctx).unwrap());
-        assert_eq!(ctx.jit_cost_value() - before, COLL_MATCH_TYPE_COST);
+        assert_eq!(ctx.jit_cost_value() - before, MATCH_TYPE_COST);
     }
 
     /// Charge for equality of two equal empty `Coll[elem_tpe]` (wrapped form):
@@ -374,5 +448,38 @@ mod tests {
         assert_eq!(cost(1), 18);
         assert_eq!(cost(48), 18);
         assert_eq!(cost(49), 20);
+    }
+
+    /// CONSENSUS PARITY: `SigmaProp == SigmaProp` matches Scala
+    /// `DataValueComparer.equalDataValues`'s dedicated `SigmaProp` case
+    /// (DataValueComparer.scala:353) → `equalSigmaBoolean`: `MatchType(1)` for the
+    /// dispatch + `MatchType(1)` per tree node + `EQ_GroupElement(172)` per EcPoint.
+    ///   ProveDlog    == ProveDlog:    1 + 1 + 172     = 174
+    ///   ProveDHTuple == ProveDHTuple: 1 + 1 + 4 * 172 = 690
+    #[test]
+    fn sigmaprop_eq_matches_scala_equalsigmaboolean() {
+        use ergotree_ir::sigma_protocol::sigma_boolean::{
+            ProveDhTuple, ProveDlog, SigmaBoolean, SigmaProp,
+        };
+        let cost_of = |sp: SigmaProp| -> u64 {
+            let ctx = force_any_val::<Context>();
+            let v: Value<'_> = Value::sigma_prop(sp);
+            let rv = v.clone();
+            let before = ctx.jit_cost_value();
+            assert!(eq_with_cost(&v, &rv, &ctx).unwrap());
+            ctx.jit_cost_value() - before
+        };
+        let dlog = SigmaProp::new(SigmaBoolean::from(force_any_val::<ProveDlog>()));
+        let dht = SigmaProp::new(SigmaBoolean::from(force_any_val::<ProveDhTuple>()));
+        assert_eq!(
+            cost_of(dlog),
+            174,
+            "ProveDlog==ProveDlog: Scala charges MatchType*2 + EQ_GroupElement(172)"
+        );
+        assert_eq!(
+            cost_of(dht),
+            690,
+            "ProveDHTuple==ProveDHTuple: Scala charges MatchType*2 + 4*EQ_GroupElement(172)"
+        );
     }
 }
