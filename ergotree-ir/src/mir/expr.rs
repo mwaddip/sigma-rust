@@ -452,7 +452,15 @@ impl Expr {
                             // how the JVM accepts testnet block 111,927.
                             None => return Ok(()),
                         };
-                        let vec = value.try_extract_into::<Vec<u8>>()?;
+                        // Present but not a `Coll[Byte]`: leave the node
+                        // unchanged too, mirroring the JVM
+                        // `Interpreter.substDeserialize` inner `case _ => None`
+                        // (a non-SByteArray extension value is not substituted;
+                        // the leftover node errors only on the live eval path).
+                        let vec = match value.try_extract_into::<Vec<u8>>() {
+                            Ok(vec) => vec,
+                            Err(_) => return Ok(()),
+                        };
                         // Each actually-substituted node charges the JVM's
                         // deserialization complexity — `scriptBytes.length ×
                         // CostPerByteDeserialized(2)` block cost
