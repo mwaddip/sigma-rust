@@ -439,13 +439,19 @@ impl Expr {
             |expr| {
                 let (tpe, parsed_expr): (&mut SType, Expr) = match expr {
                     Expr::DeserializeContext(DeserializeContext { tpe, id }) => {
-                        let vec = ctx
-                            .extension
-                            .values
-                            .get(&*id)
-                            .ok_or(SubstDeserializeError::ExtensionKeyNotFound(*id))?
-                            .clone()
-                            .try_extract_into::<Vec<u8>>()?;
+                        let value = match ctx.extension.values.get(&*id) {
+                            Some(value) => value.clone(),
+                            // Absent context variable: leave the DeserializeContext
+                            // node unchanged, mirroring the JVM
+                            // `Interpreter.substDeserialize` `else None` (and the
+                            // DeserializeRegister branch below). A leftover node
+                            // errors only if the *live* reduction path evaluates it
+                            // (eval/expr.rs: "DeserializeContext cannot be
+                            // evaluated"); on a dead branch it is harmless, which is
+                            // how the JVM accepts testnet block 111,927.
+                            None => return Ok(()),
+                        };
+                        let vec = value.try_extract_into::<Vec<u8>>()?;
                         (
                             tpe,
                             sigma_byte_reader::from_bytes(&vec)
@@ -698,8 +704,6 @@ impl From<BoundedVecOutOfBounds> for InvalidArgumentError {
 pub enum SubstDeserializeError {
     #[error("TryExtractFromError: {0}")]
     TryExtractFromError(#[from] TryExtractFromError),
-    #[error("Could not find context extension variable {0}")]
-    ExtensionKeyNotFound(u8),
     #[error("executeFromReg: Register out of bounds {0}")]
     InvalidRegister(#[from] RegisterIdOutOfBounds),
     #[error("Register {0} does not exist")]
