@@ -134,6 +134,55 @@ mod tests {
         );
     }
 
+    // Each actually-substituted var charges the JVM's deserialization
+    // complexity — `scriptBytes.length × CostPerByteDeserialized(2)` block =
+    // bytes × 20 JitCost (`Interpreter.deserializeMeasured`) — while an absent
+    // var (node left in place) charges nothing. The dead-branch shape keeps
+    // the evaluated path identical between the two runs, isolating exactly
+    // the substitution charge.
+    #[test]
+    fn deserialize_substituted_var_charges_per_byte() {
+        let deser: Expr = DeserializeContext {
+            tpe: SType::SBoolean,
+            id: 0,
+        }
+        .into();
+        // if (true) true else deserializeContext(0)
+        let expr: Expr = If {
+            condition: Expr::Const(true.into()).into(),
+            true_branch: Expr::Const(true.into()).into(),
+            false_branch: deser.into(),
+        }
+        .into();
+        let inner_expr: Expr = false.into();
+        let inner_bytes = inner_expr.sigma_serialize_bytes().unwrap();
+
+        let with_var = ContextExtension {
+            values: [(0u8, Constant::from(inner_bytes.clone()))]
+                .iter()
+                .cloned()
+                .collect(),
+        };
+        let cost_with = {
+            let ctx = force_any_val::<Context>().with_extension(&with_var);
+            let before = ctx.jit_cost_value();
+            assert!(try_eval_with_deserialize::<bool>(&expr, &ctx).unwrap());
+            ctx.jit_cost_value() - before
+        };
+        let empty = ContextExtension::empty();
+        let cost_without = {
+            let ctx = force_any_val::<Context>().with_extension(&empty);
+            let before = ctx.jit_cost_value();
+            assert!(try_eval_with_deserialize::<bool>(&expr, &ctx).unwrap());
+            ctx.jit_cost_value() - before
+        };
+        assert_eq!(
+            cost_with - cost_without,
+            inner_bytes.len() as u64 * 20,
+            "substituting a present var must charge its bytes × 20 JitCost"
+        );
+    }
+
     // Regression for testnet block 111,927: a `DeserializeContext` over an
     // absent context var sitting on a dead `if` branch must NOT sink reduction.
     // Substitution walks the whole tree but, mirroring the JVM
