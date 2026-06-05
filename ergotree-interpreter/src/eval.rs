@@ -259,7 +259,12 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
                 })
             }
             Ok(reduction) => Ok(reduction),
-            Err(EvalError::CostError(e)) => Err(EvalError::CostError(e)),
+            // A cost-limit error must NOT trigger the diagnostic retry — the
+            // retry re-evaluates and re-charges, making the charged cost (and
+            // near the budget even the verdict) path-dependent. `enrich_err`
+            // wraps every error — including `CostError` — in `Spanned` at
+            // each eval node boundary, so match through the wrappers.
+            Err(e) if e.is_cost_error() => Err(e),
             Err(_) => {
                 let (spanned_expr, printed_expr_str) = expr
                     .pretty_print()
@@ -318,7 +323,14 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
             })
         }
         Ok(reduction) => Ok(reduction),
-        Err(EvalError::CostError(e)) => Err(EvalError::CostError(e)),
+        // A cost-limit error must NOT trigger the diagnostic retry: the retry
+        // re-evaluates the constant-substituted `proposition()` tree, which
+        // charges on a different lattice (substituted `Constant`s cost 5
+        // JitCost where placeholders cost 1), making the charged cost — and
+        // near the budget even the verdict — path-dependent. `enrich_err`
+        // wraps every error — including `CostError` — in `Spanned` at each
+        // eval node boundary, so match through the wrappers.
+        Err(e) if e.is_cost_error() => Err(e),
         Err(_) => {
             // Error path: use proposition() for fully-resolved spanned re-evaluation.
             let resolved = tree.proposition()?;
@@ -744,6 +756,49 @@ mod test {
             _ => false,
         };
         assert!(is_cost_error, "Expected CostError");
+    }
+
+    // A cost-limit trip must NOT trigger the diagnostic retry: the retry
+    // re-evaluates the constant-substituted `proposition()` tree, which
+    // charges on a different lattice (substituted `Constant`s cost 5 JitCost
+    // where placeholders cost 1), making the charged cost path-dependent near
+    // the budget. `enrich_err` wraps the `CostError` in `Spanned` at every
+    // eval node boundary, so the pre-fix bare `EvalError::CostError` match
+    // arm never fired and every limit trip took the retry. The accumulator
+    // landing exactly on the lazy-lattice total proves no retry ran — a retry
+    // resets it and re-accumulates on the substituted lattice (10 JitCost for
+    // this tree's two segregated constants vs their 2 as placeholders).
+    #[test]
+    fn cost_limit_error_skips_diagnostic_retry() {
+        let eq: Expr = BinOp {
+            kind: BinOpKind::Relation(RelationOp::Eq),
+            left: Box::new(Expr::Const(1i32.into())),
+            right: Box::new(Expr::Const(1i32.into())),
+        }
+        .into();
+        let tree = ErgoTree::try_from(eq).unwrap();
+
+        // Learn the lazy-lattice total with no limit.
+        let ctx = force_any_val::<Context>();
+        ctx.jit_cost.set(0);
+        reduce_to_crypto(&tree, &ctx).unwrap();
+        let total = ctx.jit_cost_value();
+
+        // Trip the limit on the final charge.
+        let mut ctx = force_any_val::<Context>();
+        ctx.jit_cost.set(0);
+        ctx.jit_cost_limit = Some(total - 1);
+        let err = reduce_to_crypto(&tree, &ctx).unwrap_err();
+        assert!(
+            err.is_cost_error(),
+            "limit trip must surface as a cost error through the span wrappers, got {err:?}"
+        );
+        assert_eq!(
+            ctx.jit_cost_value(),
+            total,
+            "accumulator must stop at the lazy-lattice total — a diagnostic \
+             retry would have reset and re-charged on the substituted lattice"
+        );
     }
 
     // Scala parity: ConstantPlaceholder costs JitCost(1), distinct from
