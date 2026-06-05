@@ -74,6 +74,66 @@ mod tests {
         assert!(try_eval_with_deserialize::<bool>(&expr, &ctx).is_err());
     }
 
+    // SANTA tx-tier regression (captured testnet tx at height 111,927): trees
+    // containing deserialize nodes must charge the JVM's substitution pass —
+    // `ergoTree.bytes.length * CostPerTreeByte(2)` block cost, i.e. bytes × 20
+    // JitCost (Scala `Interpreter.reductionWithDeserialize`). Since V6
+    // activation the charge is part of the reported cost; pre-V6 the JVM
+    // checks it against the cost limit but excludes it from the result.
+    #[test]
+    fn deserialize_substitution_cost_charged() {
+        let expr: Expr = Expr::from(DeserializeContext {
+            tpe: SType::SBoolean,
+            id: 1,
+        });
+        let inner_expr: Expr = true.into();
+        let ctx_ext = ContextExtension {
+            values: [(1u8, inner_expr.sigma_serialize_bytes().unwrap().into())]
+                .iter()
+                .cloned()
+                .collect(),
+        };
+        let tree = ErgoTree::new(ErgoTreeHeader::v1(false), &expr).unwrap();
+        let tree_len = tree.sigma_serialize_bytes().unwrap().len() as u64;
+
+        let run = |block_version: u8| -> (u64, u64) {
+            let mut ctx = force_any_val::<Context>().with_extension(&ctx_ext);
+            ctx.pre_header.version = block_version;
+            ctx.jit_cost.set(0);
+            let res = reduce_to_crypto(&tree, &ctx).unwrap();
+            assert_eq!(res.sigma_prop, true.into());
+            (ctx.jit_cost_value(), res.cost)
+        };
+
+        // V6 activated (block version 4 → activated script version 3): the
+        // substitution charge is included; pre-V6 it is rolled back after the
+        // limit check. The subtraction isolates exactly the per-byte charge.
+        let (jit_v6, cost_v6) = run(4);
+        let (jit_pre, cost_pre) = run(3);
+        assert_eq!(
+            jit_v6 - jit_pre,
+            tree_len * 20,
+            "V6 reduction must charge tree bytes ({tree_len}) × 20 JitCost over pre-V6"
+        );
+        assert_eq!(
+            cost_v6 - cost_pre,
+            tree_len * 2,
+            "reported block cost must include bytes × CostPerTreeByte(2) since V6"
+        );
+
+        // The limit check fires in BOTH eras (Scala's `addCostChecked` runs
+        // before the era branch): a limit below the substitution charge must
+        // reject even pre-V6, where the charge is excluded from the result.
+        let mut ctx = force_any_val::<Context>().with_extension(&ctx_ext);
+        ctx.pre_header.version = 3;
+        ctx.jit_cost.set(0);
+        ctx.jit_cost_limit = Some(tree_len * 20 - 1);
+        assert!(
+            reduce_to_crypto(&tree, &ctx).is_err(),
+            "substitution cost must be limit-checked even pre-V6"
+        );
+    }
+
     // Regression for testnet block 111,927: a `DeserializeContext` over an
     // absent context var sitting on a dead `if` branch must NOT sink reduction.
     // Substitution walks the whole tree but, mirroring the JVM
