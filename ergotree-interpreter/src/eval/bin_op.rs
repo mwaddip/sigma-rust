@@ -280,7 +280,12 @@ impl Evaluable for BinOp {
                         (lv, rv, w == 4)
                     }
                     None => {
-                        let bigint = matches!(lv, Value::BigInt(_) | Value::UnsignedBigInt(_));
+                        // Scala's arith cost table special-cases ONLY `SBigInt`
+                        // (every `ArithOpCompanion.costKind` in trees.scala is
+                        // `case SBigInt => …; case _ => …`), so UnsignedBigInt
+                        // arithmetic rides the default arm — 15/15/5, not the
+                        // BigInt 20/25/10.
+                        let bigint = matches!(lv, Value::BigInt(_));
                         (lv, rv, bigint)
                     }
                 };
@@ -514,6 +519,57 @@ mod tests {
                 }
                 None => assert!(res.is_err(), "{hex}: expected reject, got {res:?}"),
             }
+        }
+    }
+
+    // SANTA tx-tier regression (captured testnet tx at height 28,474): Scala's
+    // arith cost table special-cases ONLY `SBigInt` (every
+    // `ArithOpCompanion.costKind` in trees.scala is `case SBigInt => …;
+    // case _ => …`), so UnsignedBigInt arithmetic must ride the default arm —
+    // Plus/Minus 15, Multiply/Divide/Modulo 15, Max/Min 5 — not the BigInt
+    // 20/25/10. Pre-fix, eni routed UBI into the BigInt arm, overcharging
+    // every UBI arith op (+10 per division in the captured tx).
+    #[test]
+    fn arith_unsigned_bigint_costs_default_arm_not_bigint() {
+        use crate::eval::test_util::try_eval_out;
+        use ergotree_ir::chain::context::Context;
+        use sigma_test_util::force_any_val;
+
+        let cost_of = |kind: ArithOp, left: Constant, right: Constant| -> u64 {
+            let expr: Expr = BinOp {
+                kind: BinOpKind::Arith(kind),
+                left: Box::new(left.into()),
+                right: Box::new(right.into()),
+            }
+            .into();
+            let ctx = force_any_val::<Context>();
+            let before = ctx.jit_cost_value();
+            let _ = try_eval_out::<Value>(&expr, &ctx).unwrap();
+            ctx.jit_cost_value() - before
+        };
+        let ubi = |v: u32| Constant::from(UnsignedBigInt::from(v));
+        let bi = |v: i32| Constant::from(BigInt256::from(v));
+
+        // Two Const evals (5 each) + the op cost.
+        for (op, ubi_op_cost, bigint_op_cost) in [
+            (ArithOp::Plus, 15, 20),
+            (ArithOp::Minus, 15, 20),
+            (ArithOp::Multiply, 15, 25),
+            (ArithOp::Divide, 15, 25),
+            (ArithOp::Modulo, 15, 25),
+            (ArithOp::Max, 5, 10),
+            (ArithOp::Min, 5, 10),
+        ] {
+            assert_eq!(
+                cost_of(op, ubi(6), ubi(3)),
+                10 + ubi_op_cost,
+                "{op:?} over UnsignedBigInt must cost the default arm ({ubi_op_cost})"
+            );
+            assert_eq!(
+                cost_of(op, bi(6), bi(3)),
+                10 + bigint_op_cost,
+                "{op:?} over BigInt must cost the SBigInt arm ({bigint_op_cost})"
+            );
         }
     }
 
