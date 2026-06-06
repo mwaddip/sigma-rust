@@ -1,5 +1,5 @@
 use crate::eval::EvalError;
-use crate::eval::Evaluable;
+use crate::eval::LambdaInvoker;
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -65,7 +65,7 @@ pub(crate) static INDEX_OF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 
 pub(crate) fn flatmap_eval<'ctx>(
     _mc: &SMethod,
-    env: &mut Env<'ctx>,
+    _env: &mut Env<'ctx>,
     ctx: &Context<'ctx>,
     obj: Value<'ctx>,
     args: Vec<Value<'ctx>>,
@@ -96,26 +96,16 @@ pub(crate) fn flatmap_eval<'ctx>(
             return Err(EvalError::UnexpectedValue(unsupported_msg));
         }
     }
-    let mut lambda_call = |arg: Value<'ctx>| {
-        let func_arg = lambda.args.first().ok_or_else(|| {
-            EvalError::NotFound("flatmap: lambda has empty arguments list".to_string())
-        })?;
-        let orig_val = env.get(func_arg.idx).cloned();
-        // ADD_TO_ENV_COST (5) per lambda-arg binding, charged once per INPUT
-        // element -- every FuncValue application pays it on the JVM
-        // (AddToEnvironmentDesc, values.scala:1047). Mirrors coll_map.rs and
-        // the other HOFs (filter/fold/exists/forall); flatMap was the lone
-        // omission. Distinct from the output-length per-item charge below.
-        ctx.add_jit_cost(5)?;
-        env.insert(func_arg.idx, arg);
-        let res = lambda.body.eval(env, ctx);
-        if let Some(orig_val) = orig_val {
-            env.insert(func_arg.idx, orig_val);
-        } else {
-            env.remove(&func_arg.idx);
-        }
-        res
-    };
+    lambda.args.first().ok_or_else(|| {
+        EvalError::NotFound("flatmap: lambda has empty arguments list".to_string())
+    })?;
+    // The body evaluates in the lambda's CAPTURED environment (JVM closure
+    // semantics) — not in the caller's env. ADD_TO_ENV_COST (5) per input
+    // element is charged by the invoker (AddToEnvironmentDesc,
+    // values.scala:1047), distinct from the output-length per-item charge
+    // below.
+    let mut invoker = LambdaInvoker::new(lambda);
+    let mut lambda_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
     let mapper_input_tpe = lambda
         .args
         .first()
