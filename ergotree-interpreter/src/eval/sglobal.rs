@@ -787,6 +787,71 @@ mod tests {
         assert_eq!(quint - quad, 3);
     }
 
+    /// A legacy box register holding a tuple EXPRESSION (`RegisterValue::ParsedTupleExpr`,
+    /// the pre-v5.0 register encoding still on-chain) re-serializes through the expression
+    /// serializer; the JVM charges the Tuple op-code byte (`ValueSerializer`'s costed
+    /// `put(opCode)`) and the item-count byte (`TupleSerializer`'s `putUByte`), then each
+    /// item as a full Constant. Against the same data as a plain Constant register:
+    /// tuple-expr (1,2):(Byte,Byte) = opcode(1) + count(1) + 2x[SBYTE code(1) + data put(1)]
+    /// = 6 vs the constant register's symmetric-pair type code(1) + 2 data puts = 3.
+    #[test]
+    fn serialize_box_charges_tuple_expr_register_opcode_and_count() {
+        use crate::eval::test_util::eval_out;
+        use ergotree_ir::chain::context::Context;
+        use ergotree_ir::chain::ergo_box::box_value::BoxValue;
+        use ergotree_ir::chain::ergo_box::{
+            ErgoBox, EvaluatedTuple, NonMandatoryRegisters, RegisterValue,
+        };
+        use ergotree_ir::chain::tx_id::TxId;
+        use ergotree_ir::ergo_tree::ErgoTree;
+        use ergotree_ir::mir::tuple::Tuple;
+        use sigma_test_util::force_any_val;
+
+        fn cost_of(e: &Expr) -> u64 {
+            let ctx = force_any_val::<Context>();
+            ctx.tree_version.set(ErgoTreeVersion::V3);
+            let before = ctx.jit_cost_value();
+            let _: Vec<u8> = eval_out(e, &ctx);
+            ctx.jit_cost_value() - before
+        }
+
+        fn serialize_mc(c: &Constant) -> Expr {
+            MethodCall::new(
+                Expr::Global,
+                SERIALIZE_METHOD
+                    .clone()
+                    .with_concrete_types(&[(STypeVar::t(), c.tpe.clone())].into_iter().collect()),
+                vec![c.clone().into()],
+            )
+            .unwrap()
+            .into()
+        }
+
+        fn box_with_r4(reg: RegisterValue) -> Constant {
+            let tree = ErgoTree::try_from(Expr::Const(true.into())).unwrap();
+            ErgoBox::new(
+                BoxValue::SAFE_USER_MIN,
+                tree,
+                None,
+                NonMandatoryRegisters::try_from(vec![reg]).unwrap(),
+                0,
+                TxId::zero(),
+                0,
+            )
+            .unwrap()
+            .into()
+        }
+
+        let const_reg = RegisterValue::Parsed((1i8, 2i8).into());
+        let tuple = Tuple::new(vec![Expr::Const(1i8.into()), Expr::Const(2i8.into())]).unwrap();
+        let tup_expr_reg = RegisterValue::ParsedTupleExpr(EvaluatedTuple::new(tuple).unwrap());
+
+        let const_box = cost_of(&serialize_mc(&box_with_r4(const_reg)));
+        let tup_expr_box = cost_of(&serialize_mc(&box_with_r4(tup_expr_reg)));
+        // opcode(1) + count(1) + per-item SBYTE type codes(2) vs the pair's combined code(1)
+        assert_eq!(tup_expr_box - const_box, 3);
+    }
+
     use proptest::prelude::*;
 
     proptest! {

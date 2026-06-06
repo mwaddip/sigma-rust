@@ -16,9 +16,9 @@ use crate::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
 
 impl SigmaSerializable for SigmaBoolean {
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
+        // the 1-byte op code Scala writes for every variant is metered inside
+        // `OpCode::sigma_serialize` (PutByteCost)
         self.op_code().sigma_serialize(w)?;
-        // Scala SigmaBoolean.serializer writes a 1-byte op code (PutByteCost) for every variant.
-        w.add_put_byte_cost();
         match self {
             SigmaBoolean::ProofOfKnowledge(proof) => match proof {
                 SigmaProofOfKnowledgeTree::ProveDhTuple(v) => v.sigma_serialize(w),
