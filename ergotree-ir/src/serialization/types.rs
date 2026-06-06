@@ -454,6 +454,8 @@ impl SigmaSerializable for SType {
                 _ => {
                     TypeCode::TUPLE.sigma_serialize(w)?;
                     w.put_u8(items.len() as u8)?;
+                    // item count is one byte (PutByteCost) -- Scala `serializeTuple`'s `putUByte`
+                    w.add_put_byte_cost();
                     items.iter().try_for_each(|i| i.sigma_serialize(w))
                 }
             },
@@ -467,6 +469,8 @@ impl SigmaSerializable for SType {
                 w.put_u8(sfunc.t_dom.len().try_into().map_err(|_| {
                     SigmaSerializationError::NotSupported("t_dom.len() must be <= 255".into())
                 })?)?;
+                // tDom length is one byte (PutByteCost) -- Scala `TypeSerializer`'s `putUByte`
+                w.add_put_byte_cost();
                 sfunc
                     .t_dom
                     .iter()
@@ -475,6 +479,8 @@ impl SigmaSerializable for SType {
                 w.put_u8(sfunc.tpe_params.len().try_into().map_err(|_| {
                     SigmaSerializationError::NotSupported("tpe_params.len() must be <= 255".into())
                 })?)?;
+                // tpeParams length is one byte (PutByteCost) -- Scala `TypeSerializer`'s `putUByte`
+                w.add_put_byte_cost();
                 sfunc.tpe_params.iter().try_for_each(|tpe_param| {
                     SType::STypeVar(tpe_param.ident.clone()).sigma_serialize(w)
                 })
@@ -555,6 +561,48 @@ mod tests {
         assert_eq!(type_put_cost(&pair(SType::SInt, SType::SInt)), 1); // TUPLE_PAIR_SYMMETRIC
         assert_eq!(type_put_cost(&pair(SType::SInt, SType::SLong)), 2); // TUPLE_PAIR1 + SLong prim byte
         assert_eq!(type_put_cost(&pair(coll(SType::SByte), SType::SInt)), 2); // TUPLE_PAIR2 + Coll[Byte] byte (blessed (Coll[Byte],Int) box = 154)
+    }
+
+    /// Every length byte the type serializer writes is a JVM `putUByte` => PutByteCost(1), and
+    /// the `STypeVar` name block a `putBytes` => PutChunkCost(3+n) (`TypeSerializer.scala`
+    /// 113/118/125-126/248; both `putUByte` overloads funnel into the costed `put(Byte)`).
+    /// Charged for Constant type prefixes (box register types) during `Global.serialize`.
+    #[test]
+    fn serialize_charges_type_length_bytes() {
+        use crate::serialization::sigma_byte_writer::SigmaByteWriter;
+        fn type_put_cost(t: &SType, version: ErgoTreeVersion) -> u64 {
+            let mut buf = Vec::new();
+            let mut w = SigmaByteWriter::new(&mut buf, None);
+            w.enable_serialize_cost_tracking();
+            w.with_tree_version(version, |w| t.sigma_serialize(w))
+                .unwrap();
+            w.serialize_cost()
+        }
+        // quadruple rides the symmetric-pair code: PAIR_SYMMETRIC(1) + 4 prim codes -- no count byte
+        let quad = SType::STuple(stuple::STuple {
+            items: vec![SType::SByte; 4].try_into().unwrap(),
+        });
+        assert_eq!(type_put_cost(&quad, ErgoTreeVersion::V0), 5);
+        // arity > 4 crosses into the generic encoding: TUPLE(1) + count putUByte(1) + 5 prim codes
+        let quint = SType::STuple(stuple::STuple {
+            items: vec![SType::SByte; 5].try_into().unwrap(),
+        });
+        assert_eq!(type_put_cost(&quint, ErgoTreeVersion::V0), 7);
+        // STypeVar: STYPE_VAR code(1) + name-length putUByte(1) + name putBytes chunk(3+1)
+        assert_eq!(
+            type_put_cost(&SType::STypeVar(STypeVar::t()), ErgoTreeVersion::V0),
+            6
+        );
+        // SFunc (V3+): SFUNC(1) + tDom-length(1) + SByte(1) + SBoolean(1) + tpeParams-length(1)
+        // + tpe param "T" as STypeVar(6)
+        let sfunc = SType::SFunc(SFunc {
+            t_dom: vec![SType::SByte],
+            t_range: SType::SBoolean.into(),
+            tpe_params: vec![STypeParam {
+                ident: STypeVar::t(),
+            }],
+        });
+        assert_eq!(type_put_cost(&sfunc, ErgoTreeVersion::V3), 11);
     }
 
     proptest! {

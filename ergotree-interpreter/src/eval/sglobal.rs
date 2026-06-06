@@ -717,6 +717,76 @@ mod tests {
         assert_eq!(header - byte, 243);
     }
 
+    /// The type prefix of each box-register Constant rides through the type serializer under
+    /// `Global.serialize[Box]`. A >4-arity tuple register type takes the generic TUPLE
+    /// encoding, whose item-count byte the JVM charges (`TypeSerializer.scala:248` `putUByte`
+    /// => PutByteCost). Pin the arity boundary: boxes identical but for R4 = 4-tuple vs
+    /// 5-tuple of bytes differ by the extra prim type code (1) + the count byte (1) + the
+    /// extra data put (1); everything else cancels.
+    #[test]
+    fn serialize_box_charges_tuple_register_type_count_byte() {
+        use crate::eval::test_util::eval_out;
+        use ergotree_ir::chain::context::Context;
+        use ergotree_ir::chain::ergo_box::box_value::BoxValue;
+        use ergotree_ir::chain::ergo_box::{ErgoBox, NonMandatoryRegisters};
+        use ergotree_ir::chain::tx_id::TxId;
+        use ergotree_ir::ergo_tree::ErgoTree;
+        use ergotree_ir::mir::constant::Literal;
+        use ergotree_ir::types::stuple::STuple;
+        use sigma_test_util::force_any_val;
+
+        fn cost_of(e: &Expr) -> u64 {
+            let ctx = force_any_val::<Context>();
+            ctx.tree_version.set(ErgoTreeVersion::V3);
+            let before = ctx.jit_cost_value();
+            let _: Vec<u8> = eval_out(e, &ctx);
+            ctx.jit_cost_value() - before
+        }
+
+        fn serialize_mc(c: &Constant) -> Expr {
+            MethodCall::new(
+                Expr::Global,
+                SERIALIZE_METHOD
+                    .clone()
+                    .with_concrete_types(&[(STypeVar::t(), c.tpe.clone())].into_iter().collect()),
+                vec![c.clone().into()],
+            )
+            .unwrap()
+            .into()
+        }
+
+        fn byte_tuple_const(n: i8) -> Constant {
+            let items: Vec<Literal> = (1..=n).map(Literal::from).collect();
+            Constant {
+                tpe: SType::STuple(STuple {
+                    items: vec![SType::SByte; n as usize].try_into().unwrap(),
+                }),
+                v: Literal::Tup(items.try_into().unwrap()),
+            }
+        }
+
+        fn box_with_r4(c: Constant) -> Constant {
+            let tree = ErgoTree::try_from(Expr::Const(true.into())).unwrap();
+            ErgoBox::new(
+                BoxValue::SAFE_USER_MIN,
+                tree,
+                None,
+                NonMandatoryRegisters::try_from(vec![c]).unwrap(),
+                0,
+                TxId::zero(),
+                0,
+            )
+            .unwrap()
+            .into()
+        }
+
+        let quad = cost_of(&serialize_mc(&box_with_r4(byte_tuple_const(4))));
+        let quint = cost_of(&serialize_mc(&box_with_r4(byte_tuple_const(5))));
+        // type: TUPLE(1) + count putUByte(1) + 5 prim codes vs PAIR_SYMMETRIC(1) + 4 => +2;
+        // data: one more byte put => +1
+        assert_eq!(quint - quad, 3);
+    }
+
     use proptest::prelude::*;
 
     proptest! {
