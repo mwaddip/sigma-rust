@@ -646,7 +646,18 @@ pub mod test_util {
         expr: &Expr,
         ctx: &'ctx Context<'ctx>,
     ) -> Result<T, EvalError> {
-        let expr = expr.clone().substitute_deserialize(ctx)?;
+        // Mirror `Interpreter.fullReduction`: a deserialize-bearing segregated
+        // tree is reduced from its constants-substituted proposition (Constant
+        // visits, JitCost 5), not the lazy placeholder form (ConstantPlaceholder
+        // visits, JitCost 1) — the same conditionality the production
+        // `reduce_to_crypto` applies via `tree.proposition()`.
+        let expr = match ctx.constants {
+            Some(constants) if expr.has_deserialize() => {
+                expr.clone().substitute_constants(constants)?
+            }
+            _ => expr.clone(),
+        };
+        let expr = expr.substitute_deserialize(ctx)?;
         try_eval_out(&expr, ctx)
     }
 

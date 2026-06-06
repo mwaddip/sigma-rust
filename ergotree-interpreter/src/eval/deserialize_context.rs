@@ -134,6 +134,54 @@ mod tests {
         );
     }
 
+    // SANTA eval-tier harness seam (corpus re-bless at santa@9167d38): the JVM's
+    // `Interpreter.fullReduction` reduces a deserialize-bearing SEGREGATED tree
+    // from its constants-substituted proposition (Constant visits, JitCost 5),
+    // not the lazy placeholder form (ConstantPlaceholder visits, JitCost 1) it
+    // uses for ordinary trees. `try_eval_with_deserialize` must apply the same
+    // conditionality the production `reduce_to_crypto` gets via
+    // `tree.proposition()`. The blessed vector trees
+    // `{ if (true) true else deserializeContext[Boolean](0|1) }` (two segregated
+    // Boolean constants) cost If(10) + 2 × Constant(5) = 20, not 10 + 2 × CP(1).
+    #[test]
+    fn deserialize_bearing_segregated_tree_costs_substituted_constants() {
+        for hex in [
+            "1b0d02010101019573007301d40100", // dead branch over an absent var
+            "1b0d02010101019573007301d40101", // dead branch over a wrong-typed var
+        ] {
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect();
+            // Clear the size bit and drop the size byte (non-SigmaProp root —
+            // the conformance runner's lenient parse path).
+            let mut lenient = Vec::with_capacity(bytes.len() - 1);
+            lenient.push(bytes[0] & !0x08);
+            lenient.extend_from_slice(&bytes[2..]);
+            let tree = ErgoTree::sigma_parse_bytes(&lenient).unwrap();
+
+            // The vector input: var 1 = Int 0 — var 0 absent, var 1 wrong-typed;
+            // both deserialize nodes sit on the dead branch and stay unsubstituted.
+            let ctx_ext = ContextExtension {
+                values: [(1u8, 0i32.into())].iter().cloned().collect(),
+            };
+            let mut ctx = force_any_val::<Context>().with_extension(&ctx_ext);
+            ctx.pre_header.version = 4;
+            ctx.tree_version.set(ErgoTreeVersion::V3);
+            ctx.jit_cost.set(0);
+            let constants = tree.constants().unwrap();
+            let eval_ctx = ctx.with_constants(constants);
+            assert!(
+                try_eval_with_deserialize::<bool>(tree.root_expr().unwrap(), &eval_ctx).unwrap()
+            );
+            assert_eq!(
+                eval_ctx.jit_cost_value(),
+                20,
+                "deserialize-bearing segregated tree must cost the substituted form"
+            );
+        }
+    }
+
     // Each actually-substituted var charges the JVM's deserialization
     // complexity — `scriptBytes.length × CostPerByteDeserialized(2)` block =
     // bytes × 20 JitCost (`Interpreter.deserializeMeasured`) — while an absent
