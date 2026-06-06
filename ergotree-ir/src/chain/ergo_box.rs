@@ -324,7 +324,7 @@ pub fn serialize_box_with_indexed_digests<W: SigmaByteWrite>(
     w.put_u8(u8::try_from(tokens.len()).unwrap())?;
     w.add_put_byte_cost();
 
-    tokens.iter().try_for_each(|t| {
+    tokens.iter().try_for_each(|t| -> SigmaSerializeResult {
         match token_ids_in_tx {
             Some(token_ids) => Ok(w.put_u32(
                 #[allow(clippy::unwrap_used)]
@@ -339,9 +339,20 @@ pub fn serialize_box_with_indexed_digests<W: SigmaByteWrite>(
                 )
                 .unwrap(),
             )?),
-            None => t.token_id.sigma_serialize(w),
+            None => {
+                t.token_id.sigma_serialize(w)?;
+                // token id is one 32-byte block -- Scala `putBytes` => PutChunkCost(32); the
+                // indexed-digest arm above is Scala's no-info `putUInt`, which is unmetered
+                w.add_put_chunk_cost(32);
+                Ok(())
+            }
         }
-        .and_then(|()| Ok(w.put_u64(t.amount.into())?))
+        .and_then(|()| {
+            w.put_u64(t.amount.into())?;
+            // amount is Scala `putULong` => PutUnsignedNumericCost(3)
+            w.add_put_numeric_cost();
+            Ok(())
+        })
     })?;
     additional_registers.sigma_serialize(w)
 }

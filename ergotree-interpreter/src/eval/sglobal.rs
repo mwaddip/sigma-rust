@@ -920,6 +920,69 @@ mod tests {
         assert_eq!(cthreshold - cand, 3);
     }
 
+    /// Each box token under `Global.serialize[Box]` is the JVM's `putBytes(id)` =>
+    /// PutChunkCost(32) = 35 plus `putULong(amount)` => PutUnsignedNumericCost(3)
+    /// (`ErgoBoxCandidate.scala:158/160`; the indexed-digest arm is the unmetered no-info
+    /// `putUInt` and never taken here). The token-count byte is written (and charged) for
+    /// zero tokens too, so a one-token box costs exactly +38 over a token-less twin.
+    #[test]
+    fn serialize_box_charges_token_id_and_amount() {
+        use crate::eval::test_util::eval_out;
+        use ergotree_ir::chain::context::Context;
+        use ergotree_ir::chain::ergo_box::box_value::BoxValue;
+        use ergotree_ir::chain::ergo_box::{BoxId, BoxTokens, ErgoBox, NonMandatoryRegisters};
+        use ergotree_ir::chain::token::{Token, TokenAmount, TokenId};
+        use ergotree_ir::chain::tx_id::TxId;
+        use ergotree_ir::ergo_tree::ErgoTree;
+        use sigma_test_util::force_any_val;
+
+        fn cost_of(e: &Expr) -> u64 {
+            let ctx = force_any_val::<Context>();
+            ctx.tree_version.set(ErgoTreeVersion::V3);
+            let before = ctx.jit_cost_value();
+            let _: Vec<u8> = eval_out(e, &ctx);
+            ctx.jit_cost_value() - before
+        }
+
+        fn serialize_mc(c: &Constant) -> Expr {
+            MethodCall::new(
+                Expr::Global,
+                SERIALIZE_METHOD
+                    .clone()
+                    .with_concrete_types(&[(STypeVar::t(), c.tpe.clone())].into_iter().collect()),
+                vec![c.clone().into()],
+            )
+            .unwrap()
+            .into()
+        }
+
+        fn box_with_tokens(tokens: Option<BoxTokens>) -> Constant {
+            let tree = ErgoTree::try_from(Expr::Const(true.into())).unwrap();
+            ErgoBox::new(
+                BoxValue::SAFE_USER_MIN,
+                tree,
+                tokens,
+                NonMandatoryRegisters::empty(),
+                0,
+                TxId::zero(),
+                0,
+            )
+            .unwrap()
+            .into()
+        }
+
+        let token = Token::from((
+            TokenId::from(BoxId::zero()),
+            TokenAmount::try_from(1u64).unwrap(),
+        ));
+        let without = cost_of(&serialize_mc(&box_with_tokens(None)));
+        let with_one = cost_of(&serialize_mc(&box_with_tokens(Some(
+            vec![token].try_into().unwrap(),
+        ))));
+        // id putBytes chunk(3+32) + amount putULong(3)
+        assert_eq!(with_one - without, 38);
+    }
+
     use proptest::prelude::*;
 
     proptest! {
