@@ -1,3 +1,4 @@
+use alloc::string::ToString;
 use ergotree_ir::mir::coll_fold::Fold;
 use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::NativeColl;
@@ -7,6 +8,7 @@ use crate::eval::env::Env;
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
+use crate::eval::LambdaInvoker;
 
 impl Evaluable for Fold {
     fn eval<'ctx>(
@@ -18,19 +20,24 @@ impl Evaluable for Fold {
         let zero_v = self.zero.eval(env, ctx)?;
         let fold_op_v = self.fold_op.eval(env, ctx)?;
         let input_v_clone = input_v.clone();
-        let mut fold_op_call = |arg: Value<'ctx>| match &fold_op_v {
-            Value::Lambda(func_value) => crate::eval::eval_lambda_1arg(
-                func_value,
-                arg,
-                env,
-                ctx,
-                "empty argument for fold op",
-            ),
-            _ => Err(EvalError::UnexpectedValue(format!(
-                "expected fold_op to be Value::FuncValue got: {0:?}",
-                input_v_clone
-            ))),
+        let mut invoker = match &fold_op_v {
+            Value::Lambda(func_value) => {
+                func_value
+                    .args
+                    .first()
+                    .ok_or_else(|| EvalError::NotFound("empty argument for fold op".to_string()))?;
+                // The body evaluates in the lambda's CAPTURED environment
+                // (JVM closure semantics) — not in the caller's env.
+                LambdaInvoker::new(func_value)
+            }
+            _ => {
+                return Err(EvalError::UnexpectedValue(format!(
+                    "expected fold_op to be Value::FuncValue got: {0:?}",
+                    input_v_clone
+                )))
+            }
         };
+        let mut fold_op_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
         let n_items = match &input_v {
             Value::Coll(coll) => coll.len() as u32,
             _ => 0,

@@ -1,3 +1,4 @@
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use ergotree_ir::mir::coll_exists::Exists;
 use ergotree_ir::mir::constant::TryExtractInto;
@@ -7,6 +8,7 @@ use crate::eval::env::Env;
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
+use crate::eval::LambdaInvoker;
 
 impl Evaluable for Exists {
     fn eval<'ctx>(
@@ -17,19 +19,25 @@ impl Evaluable for Exists {
         let input_v = self.input.eval(env, ctx)?;
         let condition_v = self.condition.eval(env, ctx)?;
         let input_v_clone = input_v.clone();
-        let mut condition_call = |arg: Value<'ctx>| match &condition_v {
-            Value::Lambda(func_value) => crate::eval::eval_lambda_1arg(
-                func_value,
-                arg,
-                env,
-                ctx,
-                "Exists: evaluated condition has empty arguments list",
-            ),
-            _ => Err(EvalError::UnexpectedValue(format!(
-                "expected Exists::condition to be Value::FuncValue got: {0:?}",
-                input_v_clone
-            ))),
+        let mut invoker = match &condition_v {
+            Value::Lambda(func_value) => {
+                func_value.args.first().ok_or_else(|| {
+                    EvalError::NotFound(
+                        "Exists: evaluated condition has empty arguments list".to_string(),
+                    )
+                })?;
+                // The body evaluates in the lambda's CAPTURED environment
+                // (JVM closure semantics) — not in the caller's env.
+                LambdaInvoker::new(func_value)
+            }
+            _ => {
+                return Err(EvalError::UnexpectedValue(format!(
+                    "expected Exists::condition to be Value::FuncValue got: {0:?}",
+                    input_v_clone
+                )))
+            }
         };
+        let mut condition_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
         let normalized_input_vals: Vec<Value> = match input_v {
             Value::Coll(coll) => {
                 if coll.elem_tpe() != &*self.elem_tpe {

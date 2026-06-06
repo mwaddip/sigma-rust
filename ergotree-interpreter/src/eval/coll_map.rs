@@ -10,6 +10,7 @@ use crate::eval::env::Env;
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
+use crate::eval::LambdaInvoker;
 
 impl Evaluable for Map {
     fn eval<'ctx>(
@@ -20,19 +21,25 @@ impl Evaluable for Map {
         let input_v = self.input.eval(env, ctx)?;
         let mapper_v = self.mapper.eval(env, ctx)?;
         let input_v_clone = input_v.clone();
-        let mut mapper_call = |arg: Value<'ctx>| match &mapper_v {
-            Value::Lambda(func_value) => crate::eval::eval_lambda_1arg(
-                func_value,
-                arg,
-                env,
-                ctx,
-                "Map: evaluated mapper has empty arguments list",
-            ),
-            _ => Err(EvalError::UnexpectedValue(format!(
-                "expected mapper to be Value::FuncValue got: {0:?}",
-                input_v_clone
-            ))),
+        let mut invoker = match &mapper_v {
+            Value::Lambda(func_value) => {
+                func_value.args.first().ok_or_else(|| {
+                    EvalError::NotFound(
+                        "Map: evaluated mapper has empty arguments list".to_string(),
+                    )
+                })?;
+                // The body evaluates in the lambda's CAPTURED environment
+                // (JVM closure semantics) — not in the caller's env.
+                LambdaInvoker::new(func_value)
+            }
+            _ => {
+                return Err(EvalError::UnexpectedValue(format!(
+                    "expected mapper to be Value::FuncValue got: {0:?}",
+                    input_v_clone
+                )))
+            }
         };
+        let mut mapper_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
         let mapper_input_tpe = self
             .mapper_sfunc
             .t_dom
