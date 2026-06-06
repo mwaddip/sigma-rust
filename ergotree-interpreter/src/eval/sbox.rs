@@ -160,17 +160,13 @@ mod tests {
         .into();
         let ctx = force_any_val::<Context>();
         (0..ErgoTreeVersion::V3.into()).for_each(|version| {
+            // Pre-V3 the method id is not in the method table at all (min_version),
+            // so the versioned roundtrip fails at deserialization — mirroring JVM
+            // v5Methods, which has no getReg (id 19) entry.
             let res = try_eval_out_with_version::<Option<i64>>(&expr, &ctx, version, version);
             match res {
-                Err(EvalError::Spanned(err))
-                    if matches!(
-                        *err.error,
-                        EvalError::ScriptVersionError {
-                            required_version: ErgoTreeVersion::V3,
-                            activated_version: _
-                        }
-                    ) => {}
-                _ => panic!("Expected script version error"),
+                Err(EvalError::SigmaParsingError(_)) => {}
+                _ => panic!("Expected method-id parsing rejection, got {:?}", res),
             }
         });
         (ErgoTreeVersion::V3.into()..=ErgoTreeVersion::MAX_SCRIPT_VERSION.into()).for_each(
