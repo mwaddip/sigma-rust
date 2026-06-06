@@ -852,6 +852,74 @@ mod tests {
         assert_eq!(tup_expr_box - const_box, 3);
     }
 
+    /// `Global.serialize` over a SigmaProp conjecture charges the JVM's child-count (and
+    /// Cthreshold's k) `putUShort` => PutUnsignedNumericCost(3) each
+    /// (`SigmaBoolean.scala:48/55/61/63`), on top of the per-node op-code byte. With dlog =
+    /// opcode(1) + GroupElement chunk(36) = 37: CAND/COR of two dlogs = 1 + 3 + 74 = 78
+    /// (so +41 over a single dlog), CTHRESHOLD adds k's 3 more. The shared MethodCall /
+    /// StartWriter / arg-const eval costs cancel in the differences.
+    #[test]
+    fn serialize_charges_sigma_conjecture_child_counts() {
+        use crate::eval::test_util::eval_out;
+        use ergotree_ir::chain::context::Context;
+        use ergotree_ir::sigma_protocol::sigma_boolean::cand::Cand;
+        use ergotree_ir::sigma_protocol::sigma_boolean::cor::Cor;
+        use ergotree_ir::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
+        use ergotree_ir::sigma_protocol::sigma_boolean::{ProveDlog, SigmaBoolean};
+        use sigma_test_util::force_any_val;
+
+        fn cost_of(e: &Expr) -> u64 {
+            let ctx = force_any_val::<Context>();
+            ctx.tree_version.set(ErgoTreeVersion::V3);
+            let before = ctx.jit_cost_value();
+            let _: Vec<u8> = eval_out(e, &ctx);
+            ctx.jit_cost_value() - before
+        }
+
+        fn serialize_mc(c: &Constant) -> Expr {
+            MethodCall::new(
+                Expr::Global,
+                SERIALIZE_METHOD
+                    .clone()
+                    .with_concrete_types(&[(STypeVar::t(), c.tpe.clone())].into_iter().collect()),
+                vec![c.clone().into()],
+            )
+            .unwrap()
+            .into()
+        }
+
+        fn ser_cost(sb: SigmaBoolean) -> u64 {
+            cost_of(&serialize_mc(&Constant::from(SigmaProp::new(sb))))
+        }
+
+        let dlog = || {
+            SigmaBoolean::from(ProveDlog::new(
+                EcPoint::from_base16_str(String::from(
+                    "026930cb9972e01534918a6f6d6b8e35bc398f57140d13eb3623ea31fbd069939b",
+                ))
+                .unwrap(),
+            ))
+        };
+        let two_dlogs = || vec![dlog(), dlog()].try_into().unwrap();
+
+        let single = ser_cost(dlog());
+        let cand = ser_cost(Cand { items: two_dlogs() }.into());
+        let cor = ser_cost(Cor { items: two_dlogs() }.into());
+        let cthreshold = ser_cost(
+            Cthreshold {
+                k: 1,
+                children: two_dlogs(),
+            }
+            .into(),
+        );
+
+        // opcode(1) + count putUShort(3) + one more dlog(37)
+        assert_eq!(cand - single, 41);
+        assert_eq!(cor, cand);
+        // k's putUShort(3) on top of CAND's shape
+        assert_eq!(cthreshold - cand, 3);
+    }
+
     use proptest::prelude::*;
 
     proptest! {
