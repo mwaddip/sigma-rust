@@ -263,7 +263,7 @@ mod tests {
     fn test_eval_version() {
         let expr = create_get_header_property_expr(sheader::VERSION_PROPERTY.clone());
         let ctx = force_any_val::<Context>();
-        let version = ctx.headers[HEADER_INDEX].version as i8;
+        let version = ctx.headers.as_slice()[HEADER_INDEX].version as i8;
         assert_eq!(version, eval_out::<i8>(&expr, &ctx));
     }
 
@@ -298,7 +298,7 @@ mod tests {
         // `stateRoot` is an AvlTree wrapping the digest, all operations enabled,
         // keyLength 32 (`CHeader.stateRoot` → `AvlTreeData.avlTreeFromDigest`).
         let expected = AvlTreeData {
-            digest: ctx.headers[HEADER_INDEX].state_root,
+            digest: ctx.headers.as_slice()[HEADER_INDEX].state_root,
             tree_flags: AvlTreeFlags::new(true, true, true),
             key_length: 32,
             value_length_opt: None,
@@ -314,7 +314,9 @@ mod tests {
     fn test_eval_state_root_blessed_bytes() {
         let header = Header::scorex_parse_bytes(&base16::decode("02ac2101807f0000ca01ff0119db227f202201007f62000177a080005d440896d05d3f80dcff7f5e7f59007294c180808d0158d1ff6ba10000f901c7f0ef87dcfff17fffacb6ff7f7f1180d2ff7f1e24ffffe1ff937f807f0797b9ff6ebdae007e5c8c00b8403d3701557181c8df800001b6d5009e2201c6ff807d71808c00019780f087adb3fcdbc0b3441480887f80007f4b01cf7f013ff1ffff564a0000b9a54f00770e807f41ff88c00240000080c0250000000003bedaee069ff4829500b3c07c4d5fe6b3ea3d3bf76c5c28c1d4dcdb1bed0ade0c0000000000003105").unwrap()).unwrap();
         let mut ctx = force_any_val::<Context>();
-        ctx.headers[HEADER_INDEX] = header;
+        let mut headers = ctx.headers.as_vec().clone();
+        headers[HEADER_INDEX] = header;
+        ctx.headers = headers.try_into().unwrap();
         let expr = create_get_header_property_expr(sheader::STATE_ROOT_PROPERTY.clone());
         let actual = eval_out::<AvlTreeData>(&expr, &ctx);
         assert_eq!(
@@ -330,7 +332,7 @@ mod tests {
     fn test_eval_timestamp() {
         let expr = create_get_header_property_expr(sheader::TIMESTAMP_PROPERTY.clone());
         let ctx = force_any_val::<Context>();
-        let expected = ctx.headers[HEADER_INDEX].timestamp as i64;
+        let expected = ctx.headers.as_slice()[HEADER_INDEX].timestamp as i64;
         let actual = eval_out::<i64>(&expr, &ctx);
         assert_eq!(expected, actual);
     }
@@ -339,7 +341,7 @@ mod tests {
     fn test_eval_n_bits() {
         let expr = create_get_header_property_expr(sheader::N_BITS_PROPERTY.clone());
         let ctx = force_any_val::<Context>();
-        let expected = ctx.headers[HEADER_INDEX].n_bits as i64;
+        let expected = ctx.headers.as_slice()[HEADER_INDEX].n_bits as i64;
         let actual = eval_out::<i64>(&expr, &ctx);
         assert_eq!(expected, actual);
     }
@@ -348,7 +350,7 @@ mod tests {
     fn test_eval_height() {
         let expr = create_get_header_property_expr(sheader::HEIGHT_PROPERTY.clone());
         let ctx = force_any_val::<Context>();
-        let expected = ctx.headers[HEADER_INDEX].height as i32;
+        let expected = ctx.headers.as_slice()[HEADER_INDEX].height as i32;
         let actual = eval_out::<i32>(&expr, &ctx);
         assert_eq!(expected, actual);
     }
@@ -382,7 +384,9 @@ mod tests {
     fn test_eval_pow_onetime_pk_blessed_bytes() {
         let header = Header::scorex_parse_bytes(&base16::decode("02ac2101807f0000ca01ff0119db227f202201007f62000177a080005d440896d05d3f80dcff7f5e7f59007294c180808d0158d1ff6ba10000f901c7f0ef87dcfff17fffacb6ff7f7f1180d2ff7f1e24ffffe1ff937f807f0797b9ff6ebdae007e5c8c00b8403d3701557181c8df800001b6d5009e2201c6ff807d71808c00019780f087adb3fcdbc0b3441480887f80007f4b01cf7f013ff1ffff564a0000b9a54f00770e807f41ff88c00240000080c0250000000003bedaee069ff4829500b3c07c4d5fe6b3ea3d3bf76c5c28c1d4dcdb1bed0ade0c0000000000003105").unwrap()).unwrap();
         let mut ctx = force_any_val::<Context>();
-        ctx.headers[HEADER_INDEX] = header;
+        let mut headers = ctx.headers.as_vec().clone();
+        headers[HEADER_INDEX] = header;
+        ctx.headers = headers.try_into().unwrap();
         let expr = create_get_header_property_expr(sheader::POW_ONETIME_PK_PROPERTY.clone());
         let actual = eval_out::<EcPoint>(&expr, &ctx);
         assert_eq!(actual, ec_point::generator());
@@ -397,7 +401,7 @@ mod tests {
     fn test_eval_pow_distance() {
         let expr = create_get_header_property_expr(sheader::POW_DISTANCE_PROPERTY.clone());
         let ctx = force_any_val::<Context>();
-        let expected = ctx.headers[HEADER_INDEX]
+        let expected = ctx.headers.as_slice()[HEADER_INDEX]
             .autolykos_solution
             .pow_distance
             .clone()
@@ -415,7 +419,10 @@ mod tests {
     fn test_eval_pow_nonce() {
         let expr = create_get_header_property_expr(sheader::POW_NONCE_PROPERTY.clone());
         let ctx = force_any_val::<Context>();
-        let expected = ctx.headers[HEADER_INDEX].autolykos_solution.nonce.clone();
+        let expected = ctx.headers.as_slice()[HEADER_INDEX]
+            .autolykos_solution
+            .nonce
+            .clone();
         let actual = eval_out::<Vec<i8>>(&expr, &ctx).as_vec_u8();
         assert_eq!(expected, actual);
     }
@@ -424,7 +431,7 @@ mod tests {
     fn test_eval_votes() {
         let expr = create_get_header_property_expr(sheader::VOTES_PROPERTY.clone());
         let ctx = force_any_val::<Context>();
-        let expected = ctx.headers[HEADER_INDEX].votes.clone();
+        let expected = ctx.headers.as_slice()[HEADER_INDEX].votes.clone();
         let actual = {
             let votes_bytes = eval_out::<Vec<i8>>(&expr, &ctx).as_vec_u8();
             Votes::try_from(votes_bytes)
@@ -462,7 +469,8 @@ mod tests {
     #[test]
     fn test_eval_check_pow() {
         let mut ctx = force_any_val::<Context>();
-        ctx.headers[0] = serde_json::from_str(
+        let mut headers = ctx.headers.as_vec().clone();
+        headers[0] = serde_json::from_str(
             r#"{
             "extensionId": "d51a477cc12b187d9bc7f464b22d00e3aa7c92463874e863bf3acf2f427bb48b",
             "difficulty": "1595361307131904",
@@ -490,16 +498,18 @@ mod tests {
           }"#,
         )
         .unwrap();
+        ctx.headers = headers.clone().try_into().unwrap();
         // Add a mainnet block header with valid PoW to context. TODO: this can be simplified once Header serialization is added to sigma-rust (v6.0), right now we need to access CONTEXT.headers(0)
-        let headers = PropertyCall::new(Expr::Context, HEADERS_PROPERTY.clone()).unwrap();
-        let header = ByIndex::new(headers.into(), 0i32.into(), None).unwrap();
+        let headers_pc = PropertyCall::new(Expr::Context, HEADERS_PROPERTY.clone()).unwrap();
+        let header = ByIndex::new(headers_pc.into(), 0i32.into(), None).unwrap();
         let check_pow: Expr =
             MethodCall::new(header.into(), sheader::CHECK_POW_METHOD.clone(), vec![])
                 .unwrap()
                 .into();
         assert!(eval_out::<bool>(&check_pow, &ctx));
         // Mutate header to invalidate proof-of-work
-        ctx.headers[0].timestamp -= 1;
+        headers[0].timestamp -= 1;
+        ctx.headers = headers.try_into().unwrap();
         assert!(!eval_out::<bool>(&check_pow, &ctx));
     }
 }
