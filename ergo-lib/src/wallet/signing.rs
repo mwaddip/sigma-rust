@@ -118,7 +118,7 @@ pub fn make_context<'ctx, T: ErgoTransaction>(
         // is faithful whenever headers exist (`ErgoStateContext` always has at
         // least one).
         last_block_utxo_root: AvlTreeData {
-            digest: state_ctx.headers.first().state_root,
+            digest: state_ctx.headers.first().state_root.0.to_vec(),
             tree_flags: AvlTreeFlags::new(true, true, true),
             key_length: 32,
             value_length_opt: None,

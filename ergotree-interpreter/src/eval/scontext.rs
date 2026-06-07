@@ -268,7 +268,7 @@ mod tests {
         ctx.last_block_utxo_root.digest = [7u8; 33].into();
         assert_ne!(
             ctx.last_block_utxo_root.digest,
-            ctx.headers.first().unwrap().state_root
+            ctx.headers.first().unwrap().state_root.0.to_vec()
         );
         assert_eq!(
             eval_out::<AvlTreeData>(&expr, &ctx),

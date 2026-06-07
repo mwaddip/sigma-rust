@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use ergo_chain_types::ADDigest;
 use sigma_ser::ScorexSerializable;
 
@@ -58,8 +59,13 @@ impl AvlTreeFlags {
 /// value length, and access flags are stored in an instance of the datatype.
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct AvlTreeData {
-    /// Authenticated tree digest: root hash along with tree height
-    pub digest: ADDigest,
+    /// Authenticated tree digest: root hash along with tree height. Normally
+    /// 33 bytes (`ADDigest` = 32-byte root hash + height byte), but
+    /// `updateDigest` may set an arbitrary-length value — the reference
+    /// `CAvlTree.updateDigest` stores any `Coll[Byte]` without a length check.
+    /// Such a value exists only in memory: the parser always reads exactly 33
+    /// bytes, matching the JVM `AvlTreeData.serializer` (`getBytes(DigestSize)`).
+    pub digest: Vec<u8>,
     /// Allowed modifications
     pub tree_flags: AvlTreeFlags,
     /// All the elements under the tree have the same length
@@ -70,13 +76,14 @@ pub struct AvlTreeData {
 
 impl SigmaSerializable for AvlTreeData {
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
-        // Meter each put to match Scala `AvlTreeData.serializer` under `Global.serialize`:
-        // digest = putBytes(33-byte ADDigest) => PutChunkCost(33)=36; treeFlags = putUByte =>
-        // PutByteCost (charged via the virtual `put`); keyLength & valueLength use the no-info
-        // `putUInt` which writes to the underlying writer directly and is not metered (0); the
-        // option tag byte is PutByteCost. (ADDigest is in ergo-chain-types and can't reach the
-        // cost sink, so record its chunk here at the delegating site.)
-        self.digest.scorex_serialize(w)?;
+        // Mirror the JVM `AvlTreeData.serializer`: write the digest bytes raw
+        // (`putBytes`), whatever their length. The parser always reads exactly
+        // 33 bytes, so a non-33 digest (only producible in memory via
+        // `updateDigest`) does not round-trip — same as the reference impl.
+        // Metered as PutChunkCost(33) under `Global.serialize`: treeFlags =
+        // PutByteCost via the virtual put; keyLength & valueLength use the no-info
+        // `putUInt` (unmetered); the option tag byte is PutByteCost.
+        w.write_all(&self.digest)?;
         w.add_put_chunk_cost(33);
         w.put_u8(self.tree_flags.0)?;
         w.add_put_byte_cost();
@@ -86,7 +93,8 @@ impl SigmaSerializable for AvlTreeData {
         Ok(())
     }
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
-        let digest = ADDigest::scorex_parse(r)?;
+        // Always read exactly `DigestSize` (33) bytes, matching the JVM parser.
+        let digest = ADDigest::scorex_parse(r)?.0.to_vec();
         let tree_flags = AvlTreeFlags::parse(r.get_u8()?);
         let key_length = r.get_u32()?;
         let value_length_opt = <Option<Box<u32>> as SigmaSerializable>::sigma_parse(r)?;
@@ -113,7 +121,9 @@ mod arbitrary {
 
         fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
             (
-                any::<ADDigest>(),
+                // 33-byte digests only: a non-33 digest is producible solely in
+                // memory via `updateDigest` and does not survive serialization.
+                any::<ADDigest>().prop_map(|d| d.0.to_vec()),
                 any::<AvlTreeFlags>(),
                 any::<u32>(),
                 any::<OptBox>(),

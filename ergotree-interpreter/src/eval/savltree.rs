@@ -2,7 +2,6 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::convert::TryFrom;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
 
 use bytes::Bytes;
@@ -13,18 +12,20 @@ use ergo_avltree_rust::batch_node::Node;
 use ergo_avltree_rust::batch_node::NodeHeader;
 use ergo_avltree_rust::operation::KeyValue;
 use ergo_avltree_rust::operation::Operation;
-use ergo_chain_types::ADDigest;
 use ergotree_ir::mir::avl_tree_data::AvlTreeData;
 use ergotree_ir::mir::avl_tree_data::AvlTreeFlags;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::{CollKind, NativeColl, Value};
-use sigma_ser::ScorexSerializable;
 
 use super::Context;
 use super::EvalError;
 use super::EvalFn;
 use ergotree_ir::types::stype::SType;
 
+/// Tree height as recorded in the digest's last byte — the same source Scala's
+/// `BatchAVLVerifier.rootNodeHeight` reads (`startingDigest.last & 0xff`), used
+/// to scale per-operation verifier costs.
+///
 /// `rootNodeHeight` is assigned only AFTER reconstruction's up-front
 /// `require`s pass (`keyLength > 0`, digest length); when they fail no root is
 /// built and the height stays 0, so the JVM charges degenerate trees a
@@ -33,10 +34,12 @@ use ergotree_ir::types::stype::SType;
 /// (Failures *during* proof parsing — malformed proof bytes, wrong value
 /// length — happen after the assignment and keep the digest-derived height.)
 fn tree_height(avl_tree_data: &AvlTreeData) -> u32 {
-    if (avl_tree_data.key_length as i32) <= 0 {
+    // 33 = ADDigest (32-byte root hash + height byte); a non-33 in-memory
+    // digest (producible via updateDigest) cannot seed reconstruction either.
+    if avl_tree_data.digest.len() != 33 || (avl_tree_data.key_length as i32) <= 0 {
         return 0;
     }
-    avl_tree_data.digest.0.last().copied().unwrap_or(0) as u32
+    avl_tree_data.digest.last().copied().unwrap_or(0) as u32
 }
 
 /// Build the batch AVL verifier for `avl_tree_data` over `proof`, charging the
@@ -49,7 +52,7 @@ fn create_verifier(
     proof: &Bytes,
 ) -> Result<BatchAVLVerifier, EvalError> {
     ctx.add_per_item_jit_cost(110, 20, 64, proof.len() as u32)?;
-    let starting_digest = Bytes::from(avl_tree_data.digest.0.to_vec());
+    let starting_digest = Bytes::from(avl_tree_data.digest.clone());
     BatchAVLVerifier::new(
         &starting_digest,
         proof,
@@ -71,7 +74,7 @@ pub(crate) static DIGEST_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(15)?;
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
     Ok(Value::Coll(CollKind::NativeColl(NativeColl::CollByte(
-        avl_tree_data.digest.0.iter().map(|&b| b as i8).collect(),
+        avl_tree_data.digest.iter().map(|&b| b as i8).collect(),
     ))))
 };
 
@@ -132,12 +135,14 @@ pub(crate) static UPDATE_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args
 pub(crate) static UPDATE_DIGEST_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     ctx.add_jit_cost(40)?;
     let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    // `CAvlTree.updateDigest` stores the new digest with no length check; mirror
+    // that — accept any-length `Coll[Byte]`. A non-33 digest exists only in
+    // memory (it cannot round-trip through serialization), same as the reference.
     let new_digest = {
         let v = args.first().cloned().ok_or_else(|| {
             EvalError::AvlTree("eval is missing first arg (new_digest)".to_string())
         })?;
-        let bytes_vec = v.try_extract_into::<Vec<u8>>()?;
-        ADDigest::try_from(bytes_vec).map_err(map_eval_err)?
+        v.try_extract_into::<Vec<u8>>()?
     };
     avl_tree_data.digest = new_digest;
     Ok(Value::AvlTree(Box::new(avl_tree_data)))
@@ -350,8 +355,7 @@ pub(crate) static INSERT_EVAL_FN: EvalFn =
         Ok(if let Some(new_digest) = bv.digest() {
             // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
             ctx.add_jit_cost(40)?;
-            let digest = ADDigest::scorex_parse_bytes(&new_digest)?;
-            avl_tree_data.digest = digest;
+            avl_tree_data.digest = new_digest.to_vec();
             Value::Opt(Some(Box::new(Value::AvlTree(avl_tree_data.into()))))
         } else {
             Value::Opt(None)
@@ -409,15 +413,11 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn =
             // The cost of a tree remove is O(treeHeight): `RemoveAvlTree_Info`
             // = PerItemCost(100, 15, 1) per height item.
             ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
-            if bv
-                .perform_one_operation(&Operation::Remove(Bytes::from(key)))
-                .is_err()
-            {
-                return Err(EvalError::AvlTree(format!(
-                    "Incorrect remove for {:?}",
-                    avl_tree_data
-                )));
-            }
+            // op results are ignored — the reference impl loops with `cfor`,
+            // no break, no check (`CErgoTreeEvaluator.remove_eval`); a failed
+            // op invalidates the verifier, so the digest below decides the
+            // outcome
+            let _ = bv.perform_one_operation(&Operation::Remove(Bytes::from(key)));
         }
         // Digest read after the operation loop: `digest_Info` = FixedCost(15)
         // (Scala `remove_eval` charges it unconditionally, unlike insert/update).
@@ -425,8 +425,7 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn =
         if let Some(new_digest) = bv.digest() {
             // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
             ctx.add_jit_cost(40)?;
-            let digest = ADDigest::scorex_parse_bytes(&new_digest)?;
-            avl_tree_data.digest = digest;
+            avl_tree_data.digest = new_digest.to_vec();
             Ok(Value::Opt(Some(Box::new(Value::AvlTree(
                 avl_tree_data.into(),
             )))))
@@ -542,8 +541,7 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn =
         Ok(if let Some(new_digest) = bv.digest() {
             // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
             ctx.add_jit_cost(40)?;
-            let digest = ADDigest::scorex_parse_bytes(&new_digest)?;
-            avl_tree_data.digest = digest;
+            avl_tree_data.digest = new_digest.to_vec();
             Value::Opt(Some(Value::AvlTree(avl_tree_data.into()).into()))
         } else {
             Value::Opt(None)
@@ -617,8 +615,7 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
     Ok(if let Some(new_digest) = bv.digest() {
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
-        let digest = ADDigest::scorex_parse_bytes(&new_digest)?;
-        avl_tree_data.digest = digest;
+        avl_tree_data.digest = new_digest.to_vec();
         Value::Opt(Some(Box::new(Value::AvlTree(avl_tree_data.into()))))
     } else {
         Value::Opt(None)
@@ -655,6 +652,8 @@ mod tests {
     use crate::eval::test_util::{eval_out_wo_ctx, try_eval_out_with_version, try_eval_out_wo_ctx};
 
     use super::*;
+    use ergo_chain_types::ADDigest;
+    use sigma_ser::ScorexSerializable;
     use sigma_util::{AsVecI8, AsVecU8};
 
     #[test]
@@ -677,7 +676,7 @@ mod tests {
         let tree_flags = AvlTreeFlags::new(false, false, false);
         let obj = Expr::Const(
             AvlTreeData {
-                digest: initial_digest,
+                digest: initial_digest.0.to_vec(),
                 tree_flags,
                 key_length: 1,
                 value_length_opt: None,
@@ -753,7 +752,7 @@ mod tests {
         let tree_flags = AvlTreeFlags::new(false, false, false);
         let obj = Expr::Const(
             AvlTreeData {
-                digest: initial_digest,
+                digest: initial_digest.0.to_vec(),
                 tree_flags,
                 key_length: 1,
                 value_length_opt: None,
@@ -842,7 +841,7 @@ mod tests {
         let tree_flags = AvlTreeFlags::new(true, false, false);
         let obj = Expr::Const(
             AvlTreeData {
-                digest: initial_digest,
+                digest: initial_digest.0.to_vec(),
                 tree_flags,
                 key_length: 1,
                 value_length_opt: None,
@@ -876,7 +875,7 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest);
+                assert_eq!(avl.digest, final_digest.0.to_vec());
             } else {
                 unreachable!();
             }
@@ -937,7 +936,7 @@ mod tests {
         let tree_flags = AvlTreeFlags::new(true, true, false);
         let obj = Expr::Const(
             AvlTreeData {
-                digest: initial_digest,
+                digest: initial_digest.0.to_vec(),
                 tree_flags,
                 key_length: 1,
                 value_length_opt: None,
@@ -969,7 +968,7 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest);
+                assert_eq!(avl.digest, final_digest.0.to_vec());
             } else {
                 unreachable!();
             }
@@ -1026,7 +1025,7 @@ mod tests {
 
         let obj = Expr::Const(
             AvlTreeData {
-                digest: tree_a_digest,
+                digest: tree_a_digest.0.to_vec(),
                 tree_flags: AvlTreeFlags::new(true, true, false),
                 key_length: 1,
                 value_length_opt: None,
@@ -1079,7 +1078,7 @@ mod tests {
     proptest! {
         #[test]
         fn eval_avl_digest(v in any::<AvlTreeData>()) {
-            let digest: Vec<i8> = v.digest.into();
+            let digest: Vec<i8> = v.digest.as_vec_i8();
             let obj = Expr::Const(v.into());
 
             let expr: Expr = MethodCall::new(
@@ -1252,7 +1251,51 @@ mod tests {
             .into();
             let res = eval_out_wo_ctx::<Value>(&expr);
             if let Value::AvlTree(a) = res {
-                assert_eq!(a.digest, new_digest);
+                assert_eq!(a.digest, new_digest.0.to_vec());
+            } else {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn eval_avl_update_digest_any_length() {
+        // `CAvlTree.updateDigest` stores any-length `Coll[Byte]` with no length
+        // check (santa-eval `AvlTree.updateDigest_any_length`): the new digest is
+        // kept verbatim and read back by `.digest`, regardless of length. Such a
+        // value is in-memory only — it does not round-trip through serialization.
+        for new_digest in [
+            vec![1u8, 2, 3],
+            Vec::<u8>::new(),
+            (1u8..=40).collect::<Vec<u8>>(),
+        ] {
+            let tree = AvlTreeData {
+                digest: vec![0u8; 33],
+                tree_flags: AvlTreeFlags::new(true, true, true),
+                key_length: 32,
+                value_length_opt: None,
+            };
+            let updated: Expr = MethodCall::new(
+                Expr::Const(tree.into()),
+                savltree::UPDATE_DIGEST_METHOD.clone(),
+                vec![Constant::from(new_digest.clone()).into()],
+            )
+            .unwrap()
+            .into();
+            // stored verbatim
+            assert_eq!(
+                eval_out_wo_ctx::<AvlTreeData>(&updated.clone()).digest,
+                new_digest
+            );
+            // and read back via `.digest`, whatever the length
+            let digest_back: Expr =
+                MethodCall::new(updated, savltree::DIGEST_METHOD.clone(), vec![])
+                    .unwrap()
+                    .into();
+            if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) =
+                eval_out_wo_ctx::<Value>(&digest_back)
+            {
+                assert_eq!(b.as_vec_u8(), new_digest);
             } else {
                 unreachable!();
             }
@@ -1280,7 +1323,7 @@ mod tests {
         let tree_flags = AvlTreeFlags::new(false, false, false);
         let obj = Expr::Const(
             AvlTreeData {
-                digest,
+                digest: digest.0.to_vec(),
                 tree_flags,
                 key_length: 1,
                 value_length_opt: None,
@@ -1316,7 +1359,7 @@ mod tests {
         let tree_flags = AvlTreeFlags::new(false, false, true);
         let obj = Expr::Const(
             AvlTreeData {
-                digest: initial_digest,
+                digest: initial_digest.0.to_vec(),
                 tree_flags,
                 key_length: 1,
                 value_length_opt: None,
@@ -1343,7 +1386,7 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest);
+                assert_eq!(avl.digest, final_digest.0.to_vec());
             } else {
                 unreachable!();
             }
@@ -1382,7 +1425,7 @@ mod tests {
         let tree_flags = AvlTreeFlags::new(false, true, false);
         let obj = Expr::Const(
             AvlTreeData {
-                digest: initial_digest,
+                digest: initial_digest.0.to_vec(),
                 tree_flags,
                 key_length: 1,
                 value_length_opt: None,
@@ -1416,7 +1459,7 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest);
+                assert_eq!(avl.digest, final_digest.0.to_vec());
             } else {
                 unreachable!();
             }
@@ -1474,7 +1517,7 @@ mod tests {
 
         let obj = Expr::Const(
             AvlTreeData {
-                digest: tree_a_digest,
+                digest: tree_a_digest.0.to_vec(),
                 tree_flags,
                 key_length: 1,
                 value_length_opt: None,
@@ -1569,7 +1612,10 @@ mod tests {
             }))
             .unwrap();
         prover.generate_proof();
-        let digest = ADDigest::scorex_parse_bytes(&prover.digest().unwrap()).unwrap();
+        let digest = ADDigest::scorex_parse_bytes(&prover.digest().unwrap())
+            .unwrap()
+            .0
+            .to_vec();
         let garbage_proof: Constant = vec![0u8].into();
         let obj = Expr::Const(
             AvlTreeData {
@@ -1607,7 +1653,10 @@ mod tests {
             .into_iter()
             .collect::<Vec<_>>()
             .into();
-        let digest = ADDigest::scorex_parse_bytes(&prover.digest().unwrap()).unwrap();
+        let digest = ADDigest::scorex_parse_bytes(&prover.digest().unwrap())
+            .unwrap()
+            .0
+            .to_vec();
         let obj = Expr::Const(
             AvlTreeData {
                 digest,
@@ -1770,6 +1819,45 @@ mod tests {
         assert!(matches!(res, Value::Opt(None)));
     }
 
+    #[test]
+    fn eval_avl_remove_mismatched_op() {
+        // a VALID proof (construction succeeds: the digest matches) committing
+        // remove(1), but the script removes key 9 — the op fails against the
+        // proof, invalidating the verifier, and the None digest yields None
+        // where the reference impl never raises (`remove_eval` ignores op
+        // results — cfor, no break)
+        let mut prover = populate_tree(vec![(vec![1u8], 10u64.to_be_bytes().to_vec())]);
+        let initial_digest = ADDigest::scorex_parse_bytes(&prover.digest().unwrap()).unwrap();
+        prover
+            .perform_one_operation(&Operation::Remove(Bytes::from(vec![1u8])))
+            .unwrap();
+        let proof: Constant = prover
+            .generate_proof()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into();
+
+        let obj = Expr::Const(
+            AvlTreeData {
+                digest: initial_digest.0.to_vec(),
+                tree_flags: AvlTreeFlags::new(false, false, true),
+                key_length: 1,
+                value_length_opt: None,
+            }
+            .into(),
+        );
+        let key9 = Literal::from(vec![9u8]);
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::REMOVE_METHOD.clone(),
+            vec![keys_coll(Arc::new([key9])).into(), proof.into()],
+        )
+        .unwrap()
+        .into();
+        let res = eval_out_wo_ctx::<Value>(&expr);
+        assert!(matches!(res, Value::Opt(None)));
+    }
+
     // JVM-blessed byte vectors (santa-eval `AvlTree.wrong_tree_proof` /
     // `AvlTree.insert_wrong_tree`): a valid proof from a committed n=4 tree
     // against the n=8 digest, carried with the args as segregated constants.
@@ -1889,7 +1977,7 @@ mod tests {
         let tree_const = |digest: &ADDigest, flags: AvlTreeFlags| {
             Expr::Const(
                 AvlTreeData {
-                    digest: *digest,
+                    digest: digest.0.to_vec(),
                     tree_flags: flags,
                     key_length: 1,
                     value_length_opt: None,
@@ -2046,25 +2134,30 @@ mod tests {
     }
 
     /// JVM parity: `BatchAVLVerifier.rootNodeHeight` is assigned from the
-    /// digest's trailing byte only after the `keyLength > 0` require; a
-    /// non-positive keyLength (signed `Int` on the JVM) fails reconstruction
-    /// before the assignment, so the op-cost height is 0
-    /// (`CAvlTreeVerifier.treeHeight`).
+    /// digest's trailing byte only after the `keyLength > 0` and digest-length
+    /// requires; a non-positive keyLength (signed `Int` on the JVM) or a
+    /// non-33-byte digest fails reconstruction before the assignment, so the
+    /// op-cost height is 0 (`CAvlTreeVerifier.treeHeight`).
     #[test]
     fn tree_height_zero_when_reconstruction_cannot_start() {
-        let mut digest_bytes = [0u8; 33];
+        let mut digest_bytes = vec![0u8; 33];
         digest_bytes[32] = 4;
-        let tree = |key_length: u32| AvlTreeData {
-            digest: ADDigest::try_from(digest_bytes.to_vec()).unwrap(),
+        let tree = |digest: Vec<u8>, key_length: u32| AvlTreeData {
+            digest,
             tree_flags: AvlTreeFlags::new(false, false, false),
             key_length,
             value_length_opt: None,
         };
         // a valid-shaped tree keeps its digest-derived height
-        assert_eq!(tree_height(&tree(32)), 4);
+        assert_eq!(tree_height(&tree(digest_bytes.clone(), 32)), 4);
         // keyLength 0 or negative-on-the-JVM (high bit set) => height 0
-        assert_eq!(tree_height(&tree(0)), 0);
-        assert_eq!(tree_height(&tree(u32::MAX)), 0); // JVM Int -1
-        assert_eq!(tree_height(&tree(0x8000_0000)), 0); // JVM Int.MinValue
+        assert_eq!(tree_height(&tree(digest_bytes.clone(), 0)), 0);
+        assert_eq!(tree_height(&tree(digest_bytes.clone(), u32::MAX)), 0); // JVM Int -1
+        assert_eq!(tree_height(&tree(digest_bytes, 0x8000_0000)), 0); // JVM Int.MinValue
+
+        // a non-33-byte in-memory digest (via updateDigest) => height 0
+        assert_eq!(tree_height(&tree(vec![1, 2, 3], 32)), 0);
+        assert_eq!(tree_height(&tree(vec![0u8; 32], 32)), 0);
+        assert_eq!(tree_height(&tree(vec![0u8; 34], 32)), 0);
     }
 }
