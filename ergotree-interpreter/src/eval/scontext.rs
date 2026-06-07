@@ -2,8 +2,6 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 
-use ergotree_ir::mir::avl_tree_data::AvlTreeData;
-use ergotree_ir::mir::avl_tree_data::AvlTreeFlags;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
@@ -88,14 +86,9 @@ pub(crate) static LAST_BLOCK_UTXO_ROOT_HASH_EVAL_FN: EvalFn = |_mc, _env, ctx, o
             obj
         )));
     }
-    let digest = ctx.headers[0].state_root;
-    let tree_flags = AvlTreeFlags::new(true, true, true);
-    Ok(Value::AvlTree(Box::from(AvlTreeData {
-        digest,
-        tree_flags,
-        key_length: 32,
-        value_length_opt: None,
-    })))
+    // The root is a standalone context input, as in the JVM (`CContext` returns
+    // `lastBlockUtxoRootHash` directly, never deriving it from `headers(0)`).
+    Ok(Value::AvlTree(Box::from(ctx.last_block_utxo_root.clone())))
 };
 
 pub(crate) static MINER_PUBKEY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
@@ -146,7 +139,7 @@ mod tests {
     use ergotree_ir::chain::context::Context;
     use ergotree_ir::chain::ergo_box::ErgoBox;
     use ergotree_ir::ergo_tree::ErgoTreeVersion;
-    use ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
+    use ergotree_ir::mir::avl_tree_data::AvlTreeData;
     use ergotree_ir::mir::constant::TryExtractFrom;
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::method_call::MethodCall;
@@ -264,16 +257,16 @@ mod tests {
         )
         .unwrap()
         .into();
-        let ctx = force_any_val::<Context>();
-        let digest = ctx.headers[0].state_root;
-        let tree_flags = AvlTreeFlags::new(true, true, true);
-        let avl_tree_data = AvlTreeData {
-            digest,
-            tree_flags,
-            key_length: 32,
-            value_length_opt: None,
-        };
-        assert_eq!(eval_out::<AvlTreeData>(&expr, &ctx), avl_tree_data);
+        let mut ctx = force_any_val::<Context>();
+        // Pin the field to a digest distinct from headers[0].state_root: the eval
+        // must return the standalone context input (JVM `CContext` semantics),
+        // not a value derived from the headers.
+        ctx.last_block_utxo_root.digest = [7u8; 33].into();
+        assert_ne!(ctx.last_block_utxo_root.digest, ctx.headers[0].state_root);
+        assert_eq!(
+            eval_out::<AvlTreeData>(&expr, &ctx),
+            ctx.last_block_utxo_root
+        );
     }
 
     #[test]
