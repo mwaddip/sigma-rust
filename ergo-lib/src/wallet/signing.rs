@@ -20,6 +20,7 @@ use ergotree_interpreter::sigma_protocol::prover::Prover;
 use ergotree_interpreter::sigma_protocol::prover::ProverError;
 use ergotree_interpreter::sigma_protocol::prover::ProverResult;
 use ergotree_ir::chain::context::Context;
+use ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
 use thiserror::Error;
 
 pub use super::tx_context::TransactionContext;
@@ -109,6 +110,15 @@ pub fn make_context<'ctx, T: ErgoTransaction>(
         inputs: inputs_ir,
         pre_header: state_ctx.pre_header.clone(),
         extension,
+        // The JVM requires `headers(0).stateRoot.digest == lastBlockUtxoRoot.digest`
+        // (`ErgoLikeContext.scala:85`), so deriving the root from the newest header
+        // is faithful whenever headers exist (`ErgoStateContext` always has them).
+        last_block_utxo_root: AvlTreeData {
+            digest: state_ctx.headers[0].state_root,
+            tree_flags: AvlTreeFlags::new(true, true, true),
+            key_length: 32,
+            value_length_opt: None,
+        },
         headers: state_ctx.headers.clone(),
         tree_version: Default::default(),
         extension_provider: &tx_ctx.spending_tx,

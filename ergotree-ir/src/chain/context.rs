@@ -3,6 +3,7 @@ use core::cell::Cell;
 use core::fmt;
 
 use crate::chain::ergo_box::ErgoBox;
+use crate::mir::avl_tree_data::AvlTreeData;
 use crate::mir::constant::Constant;
 use crate::{chain::context_extension::ContextExtension, ergo_tree::ErgoTreeVersion};
 use bounded_vec::BoundedVec;
@@ -36,6 +37,11 @@ pub struct Context<'ctx> {
     pub inputs: TxIoVec<&'ctx ErgoBox>,
     /// Pre header of current block
     pub pre_header: PreHeader,
+    /// State root of the UTXO state before current block application. A standalone
+    /// context input as in the JVM (`ErgoLikeContext.lastBlockUtxoRoot`), not derived
+    /// from `headers`: with non-empty headers the two agree by construction, and with
+    /// empty headers this field is the only source of the root.
+    pub last_block_utxo_root: AvlTreeData,
     /// Fixed number of last block headers in descending order (first header is the newest one)
     pub headers: [Header; 10],
     /// prover-defined key-value pairs, that may be used inside a script
@@ -147,6 +153,7 @@ pub trait ContextExtensionProvider {
 pub mod arbitrary {
 
     use super::*;
+    use crate::mir::avl_tree_data::AvlTreeFlags;
     use proptest::{collection::vec, option::of, prelude::*};
 
     pub struct DummyContextExtensionProvider(pub Vec<ContextExtension>);
@@ -202,6 +209,12 @@ pub mod arbitrary {
                                 .unwrap(),
                             pre_header,
                             extension: Box::leak(extensions[0].clone().into()),
+                            last_block_utxo_root: AvlTreeData {
+                                digest: headers[0].state_root,
+                                tree_flags: AvlTreeFlags::new(true, true, true),
+                                key_length: 32,
+                                value_length_opt: None,
+                            },
                             headers,
                             tree_version: Default::default(),
                             extension_provider: Box::leak(
