@@ -62,7 +62,11 @@ pub(crate) static HEADERS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         )));
     }
     Ok(Value::Coll(CollKind::WrappedColl {
-        items: Arc::new(ctx.headers.clone().map(Box::new).map(Value::Header)),
+        items: ctx
+            .headers
+            .iter()
+            .map(|h| Value::Header(Box::new(h.clone())))
+            .collect(),
         elem_tpe: SType::SHeader,
     }))
 };
@@ -133,13 +137,13 @@ pub(crate) static GET_VAR_FROM_INPUT_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, arg
 #[cfg(feature = "arbitrary")]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use crate::eval::test_util::eval_out;
+    use crate::eval::test_util::{eval_out, try_eval_out_with_version};
     use core::cell::Cell;
     use ergo_chain_types::{Header, PreHeader};
-    use ergotree_ir::chain::context::Context;
+    use ergotree_ir::chain::context::{Context, ContextHeaders};
     use ergotree_ir::chain::ergo_box::ErgoBox;
-    use ergotree_ir::ergo_tree::ErgoTreeVersion;
-    use ergotree_ir::mir::avl_tree_data::AvlTreeData;
+    use ergotree_ir::ergo_tree::{ErgoTree, ErgoTreeVersion};
+    use ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
     use ergotree_ir::mir::constant::TryExtractFrom;
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::method_call::MethodCall;
@@ -225,7 +229,7 @@ mod tests {
             .expect("internal error: `headers` method has parameters length != 1")
             .into();
         let ctx = force_any_val::<Context>();
-        assert_eq!(eval_out::<[Header; 10]>(&expr, &ctx), ctx.headers);
+        assert_eq!(eval_out::<Vec<Header>>(&expr, &ctx), *ctx.headers.as_vec());
     }
 
     #[test]
@@ -262,9 +266,66 @@ mod tests {
         // must return the standalone context input (JVM `CContext` semantics),
         // not a value derived from the headers.
         ctx.last_block_utxo_root.digest = [7u8; 33].into();
-        assert_ne!(ctx.last_block_utxo_root.digest, ctx.headers[0].state_root);
+        assert_ne!(
+            ctx.last_block_utxo_root.digest,
+            ctx.headers.first().unwrap().state_root
+        );
         assert_eq!(
             eval_out::<AvlTreeData>(&expr, &ctx),
+            ctx.last_block_utxo_root
+        );
+    }
+
+    /// Canonical synthetic eval context essentials for the blessed vectors below:
+    /// EMPTY headers — the honest value for a contextless eval, which the JVM
+    /// expresses (`headers.isEmpty` is legal, `ErgoLikeContext.scala:85`) — and
+    /// the dummy root (all-zero 33-byte digest, all operations allowed).
+    fn empty_headers_ctx() -> Context<'static> {
+        let mut ctx = force_any_val::<Context>();
+        ctx.headers = ContextHeaders::from_vec(vec![]).unwrap();
+        ctx.last_block_utxo_root = AvlTreeData {
+            digest: [0u8; 33].into(),
+            tree_flags: AvlTreeFlags::new(true, true, true),
+            key_length: 32,
+            value_length_opt: None,
+        };
+        ctx
+    }
+
+    /// JVM-blessed byte vectors (santa-eval `Context.properties`, eval/v5/authored):
+    /// closed v2 trees. The blessed sized header (`1a` + size VLQ) is rewritten to
+    /// the non-sized `12` (size bit cleared, size byte dropped) because the sized
+    /// parse path rejects non-SigmaProp roots — the same lenient deserialize the
+    /// conformance runner applies to expression-rooted corpus trees; body verbatim.
+    fn eval_blessed_context_tree<T: TryExtractFrom<Value<'static>> + 'static>(
+        tree_hex: &str,
+        ctx: &Context<'static>,
+    ) -> T {
+        let tree_bytes = base16::decode(tree_hex).unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let expr = tree.proposition().unwrap();
+        try_eval_out_with_version::<T>(&expr, ctx, 2, 2).unwrap()
+    }
+
+    #[test]
+    fn eval_headers_empty_context_blessed_bytes() {
+        // `{ CONTEXT.headers }` (`CONTEXT.headers#dummy`): the JVM yields the
+        // context's actual — here empty — header collection.
+        let ctx = empty_headers_ctx();
+        assert_eq!(
+            eval_blessed_context_tree::<Vec<Header>>("1200db6502fe", &ctx),
+            Vec::<Header>::new()
+        );
+    }
+
+    #[test]
+    fn eval_last_block_utxo_root_hash_empty_context_blessed_bytes() {
+        // `{ CONTEXT.LastBlockUtxoRootHash }` (`CONTEXT.LastBlockUtxoRootHash#dummy`):
+        // with no headers the standalone field is the only source of the root —
+        // the JVM returns it; a `headers(0)`-derived value cannot express this.
+        let ctx = empty_headers_ctx();
+        assert_eq!(
+            eval_blessed_context_tree::<AvlTreeData>("1200db6509fe", &ctx),
             ctx.last_block_utxo_root
         );
     }

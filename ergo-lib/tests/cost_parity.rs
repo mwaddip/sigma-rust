@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ergo_chain_types::{Header, PreHeader};
-use ergo_lib::chain::ergo_state_context::ErgoStateContext;
+use ergo_lib::chain::ergo_state_context::{ErgoStateContext, Headers};
 use ergo_lib::chain::parameters::Parameters;
 use ergo_lib::chain::transaction::Transaction;
 use ergo_lib::wallet::signing::make_context;
@@ -84,7 +84,7 @@ fn count_tokens(boxes: &[ErgoBox]) -> (usize, usize) {
 
 /// Build the 10-header window for a given block height from a map of
 /// height -> Header. Returns None if any of the 10 preceding headers is missing.
-fn build_header_window(header_map: &HashMap<u32, Header>, height: u32) -> Option<[Header; 10]> {
+fn build_header_window(header_map: &HashMap<u32, Header>, height: u32) -> Option<Headers> {
     // We need headers at heights (height-1), (height-2), ..., (height-10)
     // but the Scala code uses the "previous 10 headers" in the state context.
     // The pre_header is FROM the current block header (height).
@@ -99,7 +99,6 @@ fn build_header_window(header_map: &HashMap<u32, Header>, height: u32) -> Option
             None => return None,
         }
     }
-    // Convert to [Header; 10]
     arr.try_into().ok()
 }
 
@@ -725,8 +724,11 @@ fn run_validate_parity_check_paths(
         }
 
         let current_header = header_map[&height].clone();
-        let headers_10: [Header; 10] =
-            std::array::from_fn(|i| header_map[&(height - 1 - i as u32)].clone());
+        let headers_10: Headers = (0..10u32)
+            .map(|i| header_map[&(height - 1 - i)].clone())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
         let pre_header = PreHeader::from(current_header);
         let state_ctx = ErgoStateContext::new(pre_header, headers_10, Parameters::default());
 
