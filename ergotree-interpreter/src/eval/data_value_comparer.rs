@@ -220,9 +220,20 @@ fn eq_sigma_bool_with_cost(
         (Conj(Cthreshold(x)), Conj(Cthreshold(y))) => {
             Ok(x.k == y.k && eq_sigma_bools_with_cost(&x.children, &y.children, ctx)?)
         }
-        // Mismatched node types: the node's MatchType is charged above; the
-        // comparison is false (Scala's `case _ => false`).
-        _ => Ok(false),
+        // Mismatched node kinds, dispatched on the LEFT per Scala's guard
+        // structure: a leaf left (ProveDlog / ProveDhTuple / TrivialProp)
+        // falls into that arm's inner `case _ => false`; the conjecture arms
+        // are *guarded* (`case CAND(children) if r.isInstanceOf[CAND]`), so a
+        // conjecture left vs a different-kind right falls through to the
+        // top-level `case _ => sys.error(...)` — eval throws. The node's
+        // MatchType is charged above either way, matching the JVM's
+        // charge-then-throw shape.
+        _ => match l {
+            ProofOfKnowledge(_) | TrivialProp(_) => Ok(false),
+            Conj(_) => Err(EvalError::Misc(format!(
+                "Cannot compare SigmaBoolean values {l:?} and {r:?}: unknown type"
+            ))),
+        },
     }
 }
 
@@ -504,6 +515,39 @@ mod tests {
             690,
             "ProveDHTuple==ProveDHTuple: Scala charges MatchType*2 + 4*EQ_GroupElement(172)"
         );
+    }
+
+    /// CONSENSUS PARITY: a node-kind mismatch dispatches on the LEFT
+    /// (`equalSigmaBoolean`'s guard structure): a leaf left is `false` (the
+    /// leaf arm's inner `case _`); a conjecture left falls through to the
+    /// top-level `case _ => sys.error` and THROWS. Either way the node's
+    /// MatchType is charged first (charge-then-throw), so both directions
+    /// cost SigmaProp dispatch (1) + node (1) = 2.
+    #[test]
+    fn sigmaprop_eq_kind_mismatch_dispatches_on_left() {
+        use ergotree_ir::sigma_protocol::sigma_boolean::cand::Cand;
+        use ergotree_ir::sigma_protocol::sigma_boolean::{ProveDlog, SigmaBoolean, SigmaProp};
+
+        let dlog = SigmaBoolean::from(force_any_val::<ProveDlog>());
+        let cand = SigmaBoolean::SigmaConjecture(SigmaConjecture::Cand(Cand {
+            items: vec![dlog.clone(), dlog.clone()].try_into().unwrap(),
+        }));
+        let case = |l: SigmaBoolean, r: SigmaBoolean| -> (Result<bool, EvalError>, u64) {
+            let ctx = force_any_val::<Context>();
+            let lv: Value<'_> = Value::sigma_prop(SigmaProp::new(l));
+            let rv: Value<'_> = Value::sigma_prop(SigmaProp::new(r));
+            let before = ctx.jit_cost_value();
+            let res = eq_with_cost(&lv, &rv, &ctx);
+            (res, ctx.jit_cost_value() - before)
+        };
+        // Conjecture left vs leaf right: throws after charging.
+        let (res, cost) = case(cand.clone(), dlog.clone());
+        assert!(matches!(res, Err(EvalError::Misc(_))));
+        assert_eq!(cost, 2, "MatchType dispatch + node precede the throw");
+        // Leaf left vs conjecture right: the leaf arm's inner `case _` → false.
+        let (res, cost) = case(dlog, cand);
+        assert!(!res.unwrap());
+        assert_eq!(cost, 2);
     }
 
     #[test]
