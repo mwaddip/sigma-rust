@@ -50,7 +50,7 @@ pub(crate) static STATE_ROOT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     // keyLength = 32 (`CHeader.stateRoot` → `AvlTreeData.avlTreeFromDigest`),
     // rather than returning the raw digest bytes.
     Ok(Value::AvlTree(Box::new(AvlTreeData {
-        digest: header.state_root,
+        digest: header.state_root.0.to_vec(),
         tree_flags: AvlTreeFlags::new(true, true, true),
         key_length: 32,
         value_length_opt: None,
@@ -298,7 +298,7 @@ mod tests {
         // `stateRoot` is an AvlTree wrapping the digest, all operations enabled,
         // keyLength 32 (`CHeader.stateRoot` → `AvlTreeData.avlTreeFromDigest`).
         let expected = AvlTreeData {
-            digest: ctx.headers.as_slice()[HEADER_INDEX].state_root,
+            digest: ctx.headers.as_slice()[HEADER_INDEX].state_root.0.to_vec(),
             tree_flags: AvlTreeFlags::new(true, true, true),
             key_length: 32,
             value_length_opt: None,

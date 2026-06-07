@@ -59,7 +59,7 @@ mod tests {
 
         let obj = Expr::Const(
             AvlTreeData {
-                digest: initial_digest,
+                digest: initial_digest.0.to_vec(),
                 tree_flags: AvlTreeFlags::new(false, false, false),
                 key_length: 1,
                 value_length_opt: None,
