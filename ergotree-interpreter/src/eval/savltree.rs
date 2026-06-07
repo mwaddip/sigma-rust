@@ -1540,6 +1540,134 @@ mod tests {
         assert!(try_eval_out_wo_ctx::<Value<'_>>(&expr).is_err());
     }
 
+    // --- F4 degenerate-input family (ergo_avltree_rust#14) ---
+    // Additional construction-failure modes the reference verifier handles
+    // gracefully but the crate used to panic on: unparseable/garbage proof bytes
+    // and an out-of-range (wrapped-negative) key length. With the crate returning
+    // Err instead of panicking (PR #14), they route exactly like the wrong-tree
+    // digest mismatch above. Requires that crate fix; validated locally via
+    // [patch.crates-io]. (The op-level wrong-value-length mode — santa-eval
+    // `AvlTree.per_op_failure` — is covered crate-side in #14 and routes like
+    // `eval_avl_insert_bad_proof` once the op returns Err.)
+
+    /// A valid non-empty-tree digest paired with garbage proof bytes: the proof
+    /// does not parse at all, a construction failure distinct from the wrong-tree
+    /// digest mismatch. santa-eval `AvlTree.bad_proof_bytes`.
+    fn bad_proof_bytes_fixture(tree_flags: AvlTreeFlags) -> (Expr, Constant) {
+        let mut prover = BatchAVLProver::new(
+            AVLTree::new(
+                |digest| Node::LabelOnly(NodeHeader::new(Some(*digest), None)),
+                1,
+                None,
+            ),
+            true,
+        );
+        prover
+            .perform_one_operation(&Operation::Insert(KeyValue {
+                key: Bytes::from(vec![5u8]),
+                value: Bytes::from(50u64.to_be_bytes().to_vec()),
+            }))
+            .unwrap();
+        prover.generate_proof();
+        let digest = ADDigest::scorex_parse_bytes(&prover.digest().unwrap()).unwrap();
+        let garbage_proof: Constant = vec![0u8].into();
+        let obj = Expr::Const(
+            AvlTreeData {
+                digest,
+                tree_flags,
+                key_length: 1,
+                value_length_opt: None,
+            }
+            .into(),
+        );
+        (obj, garbage_proof)
+    }
+
+    /// An AvlTreeData whose key length is the wrapped-negative `0x8000_0000`: the
+    /// reference verifier reads keyLength as a signed Int, fails its
+    /// `keyLength > 0` check, and runs ops on a no-tree verifier. santa-eval
+    /// `AvlTree.negative_keylength_tree`.
+    fn negative_keylength_fixture(tree_flags: AvlTreeFlags) -> (Expr, Constant) {
+        let mut prover = BatchAVLProver::new(
+            AVLTree::new(
+                |digest| Node::LabelOnly(NodeHeader::new(Some(*digest), None)),
+                1,
+                None,
+            ),
+            true,
+        );
+        prover
+            .perform_one_operation(&Operation::Insert(KeyValue {
+                key: Bytes::from(vec![1u8]),
+                value: Bytes::from(10u64.to_be_bytes().to_vec()),
+            }))
+            .unwrap();
+        let proof: Constant = prover
+            .generate_proof()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into();
+        let digest = ADDigest::scorex_parse_bytes(&prover.digest().unwrap()).unwrap();
+        let obj = Expr::Const(
+            AvlTreeData {
+                digest,
+                tree_flags,
+                key_length: 0x8000_0000,
+                value_length_opt: None,
+            }
+            .into(),
+        );
+        (obj, proof)
+    }
+
+    #[test]
+    #[ignore = "requires ergo_avltree_rust no-panic fix (ergoplatform/ergo_avltree_rust#14); \
+                un-ignore on its release + version bump"]
+    fn eval_avl_contains_garbage_proof_bytes() {
+        let (obj, proof) = bad_proof_bytes_fixture(AvlTreeFlags::new(false, false, false));
+        let key: Constant = vec![1u8].into();
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::CONTAINS_METHOD.clone(),
+            vec![key.into(), proof.into()],
+        )
+        .unwrap()
+        .into();
+        assert!(!eval_out_wo_ctx::<bool>(&expr));
+    }
+
+    #[test]
+    #[ignore = "requires ergo_avltree_rust no-panic fix (ergoplatform/ergo_avltree_rust#14); \
+                un-ignore on its release + version bump"]
+    fn eval_avl_get_garbage_proof_bytes() {
+        let (obj, proof) = bad_proof_bytes_fixture(AvlTreeFlags::new(false, false, false));
+        let key: Constant = vec![1u8].into();
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::GET_METHOD.clone(),
+            vec![key.into(), proof.into()],
+        )
+        .unwrap()
+        .into();
+        assert!(try_eval_out_wo_ctx::<Value<'_>>(&expr).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires ergo_avltree_rust no-panic fix (ergoplatform/ergo_avltree_rust#14); \
+                un-ignore on its release + version bump"]
+    fn eval_avl_contains_negative_key_length() {
+        let (obj, proof) = negative_keylength_fixture(AvlTreeFlags::new(false, false, false));
+        let key: Constant = vec![1u8].into();
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::CONTAINS_METHOD.clone(),
+            vec![key.into(), proof.into()],
+        )
+        .unwrap()
+        .into();
+        assert!(!eval_out_wo_ctx::<bool>(&expr));
+    }
+
     #[test]
     fn eval_avl_get_many_bad_proof() {
         let (obj, wrong_proof) = wrong_tree_proof_fixture(AvlTreeFlags::new(false, false, false));
