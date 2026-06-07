@@ -1,5 +1,6 @@
 //! Evaluating predefined `Header` (or SHeader) type properties
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::convert::TryInto;
 use num_bigint::ToBigInt;
@@ -8,7 +9,11 @@ use alloc::vec::Vec;
 use ergo_chain_types::Header;
 use ergotree_ir::{
     bigint256::BigInt256,
-    mir::{constant::TryExtractInto, value::Value},
+    mir::{
+        avl_tree_data::{AvlTreeData, AvlTreeFlags},
+        constant::TryExtractInto,
+        value::Value,
+    },
 };
 
 use super::{EvalError, EvalFn};
@@ -40,7 +45,16 @@ pub(crate) static AD_PROOFS_ROOT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| 
 pub(crate) static STATE_ROOT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(10)?;
     let header = obj.try_extract_into::<Header>()?;
-    Ok(Into::<Vec<i8>>::into(header.state_root).into())
+    // `stateRoot` is typed `SAvlTree` (and so declared in our method descriptor):
+    // the reference impl wraps the digest with all operations enabled and
+    // keyLength = 32 (`CHeader.stateRoot` → `AvlTreeData.avlTreeFromDigest`),
+    // rather than returning the raw digest bytes.
+    Ok(Value::AvlTree(Box::new(AvlTreeData {
+        digest: header.state_root,
+        tree_flags: AvlTreeFlags::new(true, true, true),
+        key_length: 32,
+        value_length_opt: None,
+    })))
 };
 
 pub(crate) static TRANSACTION_ROOT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
@@ -130,14 +144,18 @@ mod tests {
     use core::convert::{TryFrom, TryInto};
 
     use alloc::{boxed::Box, vec::Vec};
-    use ergo_chain_types::{BlockId, Digest, Digest32, EcPoint, Votes};
+    use ergo_chain_types::{BlockId, Digest, Digest32, EcPoint, Header, Votes};
     use ergotree_ir::{
         bigint256::BigInt256,
         chain::context::Context,
         mir::{
-            coll_by_index::ByIndex, expr::Expr, method_call::MethodCall,
+            avl_tree_data::{AvlTreeData, AvlTreeFlags},
+            coll_by_index::ByIndex,
+            expr::Expr,
+            method_call::MethodCall,
             property_call::PropertyCall,
         },
+        serialization::SigmaSerializable,
         types::{
             scontext::{self, HEADERS_PROPERTY},
             sheader,
@@ -145,6 +163,7 @@ mod tests {
         },
     };
     use num_bigint::ToBigInt;
+    use sigma_ser::ScorexSerializable;
     use sigma_test_util::force_any_val;
     use sigma_util::AsVecU8;
 
@@ -268,9 +287,35 @@ mod tests {
     fn test_eval_state_root() {
         let expr = create_get_header_property_expr(sheader::STATE_ROOT_PROPERTY.clone());
         let ctx = force_any_val::<Context>();
-        let expected = ctx.headers[HEADER_INDEX].state_root;
-        let actual = digest_from_bytes_signed::<33>(eval_out::<Vec<i8>>(&expr, &ctx));
+        // `stateRoot` is an AvlTree wrapping the digest, all operations enabled,
+        // keyLength 32 (`CHeader.stateRoot` → `AvlTreeData.avlTreeFromDigest`).
+        let expected = AvlTreeData {
+            digest: ctx.headers[HEADER_INDEX].state_root,
+            tree_flags: AvlTreeFlags::new(true, true, true),
+            key_length: 32,
+            value_length_opt: None,
+        };
+        let actual = eval_out::<AvlTreeData>(&expr, &ctx);
         assert_eq!(expected, actual);
+    }
+
+    // JVM-blessed byte vector (santa-eval `Header.property_accessors`, entry
+    // `h.stateRoot#nominal`): the blessed result is the serialized AvlTree —
+    // digest ‖ flags 0x07 ‖ keyLength 32 ‖ no value length.
+    #[test]
+    fn test_eval_state_root_blessed_bytes() {
+        let header = Header::scorex_parse_bytes(&base16::decode("02ac2101807f0000ca01ff0119db227f202201007f62000177a080005d440896d05d3f80dcff7f5e7f59007294c180808d0158d1ff6ba10000f901c7f0ef87dcfff17fffacb6ff7f7f1180d2ff7f1e24ffffe1ff937f807f0797b9ff6ebdae007e5c8c00b8403d3701557181c8df800001b6d5009e2201c6ff807d71808c00019780f087adb3fcdbc0b3441480887f80007f4b01cf7f013ff1ffff564a0000b9a54f00770e807f41ff88c00240000080c0250000000003bedaee069ff4829500b3c07c4d5fe6b3ea3d3bf76c5c28c1d4dcdb1bed0ade0c0000000000003105").unwrap()).unwrap();
+        let mut ctx = force_any_val::<Context>();
+        ctx.headers[HEADER_INDEX] = header;
+        let expr = create_get_header_property_expr(sheader::STATE_ROOT_PROPERTY.clone());
+        let actual = eval_out::<AvlTreeData>(&expr, &ctx);
+        assert_eq!(
+            actual.sigma_serialize_bytes().unwrap(),
+            base16::decode(
+                "5c8c00b8403d3701557181c8df800001b6d5009e2201c6ff807d71808c00019780072000"
+            )
+            .unwrap()
+        );
     }
 
     #[test]
