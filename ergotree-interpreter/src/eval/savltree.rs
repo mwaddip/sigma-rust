@@ -402,15 +402,11 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn =
             // The cost of a tree remove is O(treeHeight): `RemoveAvlTree_Info`
             // = PerItemCost(100, 15, 1) per height item.
             ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
-            if bv
-                .perform_one_operation(&Operation::Remove(Bytes::from(key)))
-                .is_err()
-            {
-                return Err(EvalError::AvlTree(format!(
-                    "Incorrect remove for {:?}",
-                    avl_tree_data
-                )));
-            }
+            // op results are ignored — the reference impl loops with `cfor`,
+            // no break, no check (`CErgoTreeEvaluator.remove_eval`); a failed
+            // op invalidates the verifier, so the digest below decides the
+            // outcome
+            let _ = bv.perform_one_operation(&Operation::Remove(Bytes::from(key)));
         }
         // Digest read after the operation loop: `digest_Info` = FixedCost(15)
         // (Scala `remove_eval` charges it unconditionally, unlike insert/update).
@@ -1631,6 +1627,45 @@ mod tests {
         .unwrap()
         .into();
         // failed removes are ignored and the None digest yields None
+        let res = eval_out_wo_ctx::<Value>(&expr);
+        assert!(matches!(res, Value::Opt(None)));
+    }
+
+    #[test]
+    fn eval_avl_remove_mismatched_op() {
+        // a VALID proof (construction succeeds: the digest matches) committing
+        // remove(1), but the script removes key 9 — the op fails against the
+        // proof, invalidating the verifier, and the None digest yields None
+        // where the reference impl never raises (`remove_eval` ignores op
+        // results — cfor, no break)
+        let mut prover = populate_tree(vec![(vec![1u8], 10u64.to_be_bytes().to_vec())]);
+        let initial_digest = ADDigest::scorex_parse_bytes(&prover.digest().unwrap()).unwrap();
+        prover
+            .perform_one_operation(&Operation::Remove(Bytes::from(vec![1u8])))
+            .unwrap();
+        let proof: Constant = prover
+            .generate_proof()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into();
+
+        let obj = Expr::Const(
+            AvlTreeData {
+                digest: initial_digest,
+                tree_flags: AvlTreeFlags::new(false, false, true),
+                key_length: 1,
+                value_length_opt: None,
+            }
+            .into(),
+        );
+        let key9 = Literal::from(vec![9u8]);
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::REMOVE_METHOD.clone(),
+            vec![keys_coll(Arc::new([key9])).into(), proof.into()],
+        )
+        .unwrap()
+        .into();
         let res = eval_out_wo_ctx::<Value>(&expr);
         assert!(matches!(res, Value::Opt(None)));
     }
