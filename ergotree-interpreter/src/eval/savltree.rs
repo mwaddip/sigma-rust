@@ -25,10 +25,6 @@ use super::EvalError;
 use super::EvalFn;
 use ergotree_ir::types::stype::SType;
 
-/// Tree height as recorded in the digest's last byte — the same source Scala's
-/// `BatchAVLVerifier.rootNodeHeight` reads (`startingDigest.last & 0xff`), used
-/// to scale per-operation verifier costs.
-///
 /// `rootNodeHeight` is assigned only AFTER reconstruction's up-front
 /// `require`s pass (`keyLength > 0`, digest length); when they fail no root is
 /// built and the height stays 0, so the JVM charges degenerate trees a
@@ -164,7 +160,24 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         Bytes::from(v.try_extract_into::<Vec<u8>>()?)
     };
 
-    let mut bv = create_verifier(ctx, &avl_tree_data, &proof)?;
+    let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: a proof that
+        // does not match the tree digest yields a verifier with no reconstructed
+        // tree, the lookup fails, and `get_eval` raises the same "Tree proof is
+        // incorrect" error as an op-level lookup failure
+        // (`CErgoTreeEvaluator.get_eval`). The JVM charges that lookup before
+        // raising — charge-then-throw. Cost-limit errors from the construction
+        // charge are not construction failures — they propagate.
+        Err(EvalError::AvlTree(_)) => {
+            ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+            return Err(EvalError::AvlTree(format!(
+                "Tree proof is incorrect {:?}",
+                avl_tree_data
+            )));
+        }
+        Err(e) => return Err(e),
+    };
     // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
     // PerItemCost(40, 10, 1) per height item (Scala `get_eval`).
     ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
@@ -199,7 +212,32 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn =
             Bytes::from(v.try_extract_into::<Vec<u8>>()?)
         };
 
-        let mut bv = create_verifier(ctx, &avl_tree_data, &proof)?;
+        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+            Ok(bv) => bv,
+            // The reference impl's verifier construction never throws: lookups
+            // fail on the no-tree verifier, so the first key raises the same
+            // "Tree proof is incorrect" error as an op-level lookup failure
+            // (charged like any first lookup — charge-then-throw) — and with no
+            // keys no lookup runs at all, leaving the empty collection
+            // (`CErgoTreeEvaluator.getMany_eval`). Cost-limit errors from the
+            // construction charge are not construction failures — they
+            // propagate.
+            Err(EvalError::AvlTree(_)) => {
+                return if keys.is_empty() {
+                    Ok(Value::Coll(CollKind::WrappedColl {
+                        elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
+                        items: Arc::new([]),
+                    }))
+                } else {
+                    ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+                    Err(EvalError::AvlTree(format!(
+                        "Tree proof is incorrect {:?}",
+                        avl_tree_data
+                    )))
+                }
+            }
+            Err(e) => return Err(e),
+        };
         let height = tree_height(&avl_tree_data);
         let res = keys
             .into_iter()
@@ -257,7 +295,34 @@ pub(crate) static INSERT_EVAL_FN: EvalFn =
             Bytes::from(v.try_extract_into::<Vec<u8>>()?)
         };
 
-        let mut bv = create_verifier(ctx, &avl_tree_data, &proof)?;
+        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+            Ok(bv) => bv,
+            // The reference impl's verifier construction never throws: every
+            // insert fails on the no-tree verifier, which pre-v3 raises at the
+            // first failed op and from v3 fast-breaks (issue #908), leaving the
+            // None digest — so the method evaluates to None. With no entries no
+            // op runs and the digest is still None at every version
+            // (`CErgoTreeEvaluator.insert_eval`). The JVM charges that first
+            // (failing) insert before raising/breaking, so mirror the charge.
+            // Cost-limit errors from the construction charge are not
+            // construction failures — they propagate.
+            Err(EvalError::AvlTree(_)) => {
+                if entries.is_empty() {
+                    return Ok(Value::Opt(None));
+                }
+                let n_items = tree_height(&avl_tree_data).max(1);
+                ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
+                return if ctx.tree_version() >= ErgoTreeVersion::V3 {
+                    Ok(Value::Opt(None))
+                } else {
+                    Err(EvalError::AvlTree(format!(
+                        "Incorrect insert for {:?}",
+                        avl_tree_data
+                    )))
+                };
+            }
+            Err(e) => return Err(e),
+        };
         // When the tree is empty we still need to add the insert cost (Scala
         // `insert_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
         let n_items = tree_height(&avl_tree_data).max(1);
@@ -317,7 +382,26 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn =
             Bytes::from(v.try_extract_into::<Vec<u8>>()?)
         };
 
-        let mut bv = create_verifier(ctx, &avl_tree_data, &proof)?;
+        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+            Ok(bv) => bv,
+            // The reference impl's verifier construction never throws: every
+            // remove fails on the no-tree verifier (op results are ignored —
+            // `remove_eval` loops with `cfor`, no break), and the final digest
+            // is None — so the method evaluates to None
+            // (`CErgoTreeEvaluator.remove_eval`). The JVM still attempts and
+            // charges EVERY remove plus the unconditional digest read, so
+            // mirror those charges. Cost-limit errors from the construction
+            // charge are not construction failures — they propagate.
+            Err(EvalError::AvlTree(_)) => {
+                let n_items = tree_height(&avl_tree_data).max(1);
+                for _ in 0..keys.len() {
+                    ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
+                }
+                ctx.add_jit_cost(15)?;
+                return Ok(Value::Opt(None));
+            }
+            Err(e) => return Err(e),
+        };
         // When the tree is empty we still need to add the remove cost (Scala
         // `remove_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
         let n_items = tree_height(&avl_tree_data).max(1);
@@ -369,7 +453,20 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         Bytes::from(v.try_extract_into::<Vec<u8>>()?)
     };
 
-    let mut bv = create_verifier(ctx, &avl_tree_data, &proof)?;
+    let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: the lookup
+        // fails on the no-tree verifier and `contains_eval` maps the failure to
+        // false (`CErgoTreeEvaluator.contains_eval`). The JVM charges that
+        // lookup before its failure maps to false, so mirror the charge.
+        // Cost-limit errors from the construction charge are not construction
+        // failures — they propagate.
+        Err(EvalError::AvlTree(_)) => {
+            ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+            return Ok(Value::Boolean(false));
+        }
+        Err(e) => return Err(e),
+    };
     // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
     // PerItemCost(40, 10, 1) per height item (Scala `contains_eval`).
     ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
@@ -406,7 +503,25 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn =
             Bytes::from(v.try_extract_into::<Vec<u8>>()?)
         };
 
-        let mut bv = create_verifier(ctx, &avl_tree_data, &proof)?;
+        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+            Ok(bv) => bv,
+            // The reference impl's verifier construction never throws: every
+            // update fails on the no-tree verifier (`update_eval`'s forall
+            // fast-breaks at the first failure), and the final digest is None —
+            // so the method evaluates to None
+            // (`CErgoTreeEvaluator.update_eval`). The JVM still charges the
+            // first (failing) update before its forall fast-breaks, so mirror
+            // that charge. Cost-limit errors from the construction charge are
+            // not construction failures — they propagate.
+            Err(EvalError::AvlTree(_)) => {
+                if !entries.is_empty() {
+                    let n_items = tree_height(&avl_tree_data).max(1);
+                    ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+                }
+                return Ok(Value::Opt(None));
+            }
+            Err(e) => return Err(e),
+        };
         // When the tree is empty we still need to add the update cost (Scala
         // `update_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
         let n_items = tree_height(&avl_tree_data).max(1);
@@ -537,7 +652,7 @@ mod tests {
     use proptest::prelude::*;
     use sigma_test_util::force_any_val;
 
-    use crate::eval::test_util::{eval_out_wo_ctx, try_eval_out_with_version};
+    use crate::eval::test_util::{eval_out_wo_ctx, try_eval_out_with_version, try_eval_out_wo_ctx};
 
     use super::*;
     use sigma_util::{AsVecI8, AsVecU8};
@@ -1308,6 +1423,271 @@ mod tests {
         } else {
             unreachable!();
         }
+    }
+
+    /// A structurally-valid proof generated from a DIFFERENT tree, paired with
+    /// the digest of a non-empty tree: the construction-level digest mismatch
+    /// of the wrong-tree-proof family. The reference impl's verifier
+    /// construction never throws — every op fails on the no-tree verifier and
+    /// each method maps that per its own semantics (santa-eval
+    /// `AvlTree.wrong_tree_proof`).
+    fn wrong_tree_proof_fixture(tree_flags: AvlTreeFlags) -> (Expr, Constant) {
+        // tree A: non-empty (one committed insert), so its digest cannot match
+        // the empty-tree digest the wrong proof starts from
+        let mut prover_a = BatchAVLProver::new(
+            AVLTree::new(
+                |digest| Node::LabelOnly(NodeHeader::new(Some(*digest), None)),
+                1,
+                None,
+            ),
+            true,
+        );
+        prover_a
+            .perform_one_operation(&Operation::Insert(KeyValue {
+                key: Bytes::from(vec![5u8]),
+                value: Bytes::from(50u64.to_be_bytes().to_vec()),
+            }))
+            .unwrap();
+        prover_a.generate_proof();
+        let tree_a_digest = ADDigest::scorex_parse_bytes(&prover_a.digest().unwrap()).unwrap();
+
+        // proof from tree B (empty start) inserting key 1
+        let mut prover_b = BatchAVLProver::new(
+            AVLTree::new(
+                |digest| Node::LabelOnly(NodeHeader::new(Some(*digest), None)),
+                1,
+                None,
+            ),
+            true,
+        );
+        prover_b
+            .perform_one_operation(&Operation::Insert(KeyValue {
+                key: Bytes::from(vec![1u8]),
+                value: Bytes::from(10u64.to_be_bytes().to_vec()),
+            }))
+            .unwrap();
+        let wrong_proof: Constant = prover_b
+            .generate_proof()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into();
+
+        let obj = Expr::Const(
+            AvlTreeData {
+                digest: tree_a_digest,
+                tree_flags,
+                key_length: 1,
+                value_length_opt: None,
+            }
+            .into(),
+        );
+        (obj, wrong_proof)
+    }
+
+    fn pairs_coll(items: Arc<[Literal]>) -> Constant {
+        Constant {
+            tpe: SType::SColl(Arc::new(SType::STuple(STuple::pair(
+                SType::SColl(Arc::new(SType::SByte)),
+                SType::SColl(Arc::new(SType::SByte)),
+            )))),
+            v: Literal::Coll(CollKind::WrappedColl {
+                items,
+                elem_tpe: SType::STuple(STuple::pair(
+                    SType::SColl(Arc::new(SType::SByte)),
+                    SType::SColl(Arc::new(SType::SByte)),
+                )),
+            }),
+        }
+    }
+
+    fn keys_coll(items: Arc<[Literal]>) -> Constant {
+        Constant {
+            tpe: SType::SColl(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
+            v: Literal::Coll(CollKind::WrappedColl {
+                items,
+                elem_tpe: SType::SColl(Arc::new(SType::SByte)),
+            }),
+        }
+    }
+
+    #[test]
+    fn eval_avl_contains_bad_proof() {
+        let (obj, wrong_proof) = wrong_tree_proof_fixture(AvlTreeFlags::new(false, false, false));
+        let key: Constant = vec![1u8].into();
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::CONTAINS_METHOD.clone(),
+            vec![key.into(), wrong_proof.into()],
+        )
+        .unwrap()
+        .into();
+        // the failed lookup maps to false (`contains_eval`)
+        assert!(!eval_out_wo_ctx::<bool>(&expr));
+    }
+
+    #[test]
+    fn eval_avl_get_bad_proof() {
+        let (obj, wrong_proof) = wrong_tree_proof_fixture(AvlTreeFlags::new(false, false, false));
+        let key: Constant = vec![1u8].into();
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::GET_METHOD.clone(),
+            vec![key.into(), wrong_proof.into()],
+        )
+        .unwrap()
+        .into();
+        // the failed lookup raises "Tree proof is incorrect" (`get_eval`)
+        assert!(try_eval_out_wo_ctx::<Value<'_>>(&expr).is_err());
+    }
+
+    #[test]
+    fn eval_avl_get_many_bad_proof() {
+        let (obj, wrong_proof) = wrong_tree_proof_fixture(AvlTreeFlags::new(false, false, false));
+        let key1 = Literal::from(vec![1u8]);
+        let expr: Expr = MethodCall::new(
+            obj.clone(),
+            savltree::GET_MANY_METHOD.clone(),
+            vec![
+                keys_coll(Arc::new([key1])).into(),
+                wrong_proof.clone().into(),
+            ],
+        )
+        .unwrap()
+        .into();
+        // the first failed lookup raises "Tree proof is incorrect" (`getMany_eval`)
+        assert!(try_eval_out_wo_ctx::<Value<'_>>(&expr).is_err());
+
+        // with no keys no lookup runs at all: the empty collection, not an error
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::GET_MANY_METHOD.clone(),
+            vec![keys_coll(Arc::new([])).into(), wrong_proof.into()],
+        )
+        .unwrap()
+        .into();
+        let res = try_eval_out_wo_ctx::<Value<'_>>(&expr).unwrap();
+        if let Value::Coll(CollKind::WrappedColl { items, .. }) = res {
+            assert!(items.is_empty());
+        } else {
+            unreachable!();
+        }
+    }
+
+    #[test]
+    fn eval_avl_insert_bad_proof() {
+        let (obj, wrong_proof) = wrong_tree_proof_fixture(AvlTreeFlags::new(true, false, false));
+        let pair1 = Literal::Tup(mk_pair(1u8, 10u64).into());
+        let expr: Expr = MethodCall::new(
+            obj.clone(),
+            savltree::INSERT_METHOD.clone(),
+            vec![
+                pairs_coll(Arc::new([pair1])).into(),
+                wrong_proof.clone().into(),
+            ],
+        )
+        .unwrap()
+        .into();
+        // pre-v3 the first failed insert raises; from v3 it fast-breaks and the
+        // None digest makes the method evaluate to None (issue #908)
+        assert!(try_eval_out_with_version::<Value<'_>>(&expr, &force_any_val(), 0, 3).is_err());
+        assert_eq!(
+            try_eval_out_with_version::<Value<'_>>(&expr, &force_any_val(), 3, 3).unwrap(),
+            Value::Opt(None)
+        );
+
+        // with no entries no op runs and the None digest yields None at every
+        // version — no raise even pre-v3
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::INSERT_METHOD.clone(),
+            vec![pairs_coll(Arc::new([])).into(), wrong_proof.into()],
+        )
+        .unwrap()
+        .into();
+        assert_eq!(
+            try_eval_out_with_version::<Value<'_>>(&expr, &force_any_val(), 0, 3).unwrap(),
+            Value::Opt(None)
+        );
+    }
+
+    #[test]
+    fn eval_avl_update_bad_proof() {
+        let (obj, wrong_proof) = wrong_tree_proof_fixture(AvlTreeFlags::new(false, true, false));
+        let pair1 = Literal::Tup(mk_pair(1u8, 10u64).into());
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::UPDATE_METHOD.clone(),
+            vec![pairs_coll(Arc::new([pair1])).into(), wrong_proof.into()],
+        )
+        .unwrap()
+        .into();
+        // the failed update fast-breaks and the None digest yields None
+        let res = eval_out_wo_ctx::<Value>(&expr);
+        assert!(matches!(res, Value::Opt(None)));
+    }
+
+    #[test]
+    fn eval_avl_remove_bad_proof() {
+        let (obj, wrong_proof) = wrong_tree_proof_fixture(AvlTreeFlags::new(false, false, true));
+        let key1 = Literal::from(vec![1u8]);
+        let expr: Expr = MethodCall::new(
+            obj,
+            savltree::REMOVE_METHOD.clone(),
+            vec![keys_coll(Arc::new([key1])).into(), wrong_proof.into()],
+        )
+        .unwrap()
+        .into();
+        // failed removes are ignored and the None digest yields None
+        let res = eval_out_wo_ctx::<Value>(&expr);
+        assert!(matches!(res, Value::Opt(None)));
+    }
+
+    // JVM-blessed byte vectors (santa-eval `AvlTree.wrong_tree_proof` /
+    // `AvlTree.insert_wrong_tree`): a valid proof from a committed n=4 tree
+    // against the n=8 digest, carried with the args as segregated constants.
+    // The blessed sized header (`1a`/`1b` + size VLQ) is rewritten to the
+    // non-sized `12`/`13` (size-bit cleared, size dropped) because the sized
+    // parse path rejects non-SigmaProp roots — the same lenient deserialize
+    // the conformance runner applies to expression-rooted corpus trees; body
+    // bytes verbatim.
+    #[test]
+    fn eval_avl_contains_bad_proof_blessed_bytes() {
+        let tree_bytes = base16::decode("120364fb2b77372d81da43ce2d72714aec79ae5fcac20a9aff426fe6afb476a6fbc02c04072001080e204466b8f1af03542b3c35de30426ec12b04fc34fa0a8c48289ec868e1e00aec550e8f0103a4950597f640451a7f628ea42ce4525890593c75ab337afd6315122093bc6474024466b8f1af03542b3c35de30426ec12b04fc34fa0a8c48289ec868e1e00aec558f23c5ee24a49084f24812ee9dbcdc9e11974b05cad682c21e88fca866bc85ce000000005a17a002ff03b44482bbfc4a39a5f1bd1a35c8699de6c3c51cc71376cea9fe4b85a283801397ff0401dc640973000273017302").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let expr = tree.proposition().unwrap();
+        let ctx = force_any_val::<Context>();
+        let res = try_eval_out_with_version::<Value>(&expr, &ctx, 2, 2).unwrap();
+        assert!(matches!(res, Value::Boolean(false)));
+    }
+
+    #[test]
+    fn eval_avl_update_bad_proof_blessed_bytes() {
+        let tree_bytes = base16::decode("120464fb2b77372d81da43ce2d72714aec79ae5fcac20a9aff426fe6afb476a6fbc02c04072001080e200b65ce5d0a76265e6734964bf1a7620da7c4fb2659a9047a7b61869a007fb1110e08000000005a17a04d0eb10103f9859bd9b3050c599dc5b506caa4f2367f286c60a9af489e69d797ab16b9cff5020b65ce5d0a76265e6734964bf1a7620da7c4fb2659a9047a7b61869a007fb1114466b8f1af03542b3c35de30426ec12b04fc34fa0a8c48289ec868e1e00aec55000000005a17a003000335abe8a6e6c7b70addacbec9267be07ec3ac1c5a196b4438261d4a84648739c6ff03b44482bbfc4a39a5f1bd1a35c8699de6c3c51cc71376cea9fe4b85a283801397ff0403dc640d73000283013c0e0e8602730173027303").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let expr = tree.proposition().unwrap();
+        let ctx = force_any_val::<Context>();
+        let res = try_eval_out_with_version::<Value>(&expr, &ctx, 2, 2).unwrap();
+        assert!(matches!(res, Value::Opt(None)));
+    }
+
+    #[test]
+    fn eval_avl_remove_bad_proof_blessed_bytes() {
+        let tree_bytes = base16::decode("120364fb2b77372d81da43ce2d72714aec79ae5fcac20a9aff426fe6afb476a6fbc02c04072001080e208f23c5ee24a49084f24812ee9dbcdc9e11974b05cad682c21e88fca866bc85ce0eb90103a4950597f640451a7f628ea42ce4525890593c75ab337afd6315122093bc6474024466b8f1af03542b3c35de30426ec12b04fc34fa0a8c48289ec868e1e00aec558f23c5ee24a49084f24812ee9dbcdc9e11974b05cad682c21e88fca866bc85ce000000005a17a002ff02c4e67333f14133fce4ed7bbf147642b3e7b2b8324268ea6ded1be0caa2da237f000000005a17a000039594489172346c6b22ac52210d14be7fdb02f6ec52b9e525b3a9c77114374cd900ff0402dc640e73000283010e73017302").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let expr = tree.proposition().unwrap();
+        let ctx = force_any_val::<Context>();
+        let res = try_eval_out_with_version::<Value>(&expr, &ctx, 2, 2).unwrap();
+        assert!(matches!(res, Value::Opt(None)));
+    }
+
+    #[test]
+    fn eval_avl_insert_bad_proof_v3_blessed_bytes() {
+        let tree_bytes = base16::decode("130464fb2b77372d81da43ce2d72714aec79ae5fcac20a9aff426fe6afb476a6fbc02c04072001080e209a39c57d13039b50bfe4aa21b2c8238be31d133db1fbe4549b16d9b94338b4e20e08000000005a17a0320e8f0103fcbfd9e0c4781263bb161625674719024acef64654799a00c41cc148bdc4a891028f23c5ee24a49084f24812ee9dbcdc9e11974b05cad682c21e88fca866bc85cec4e67333f14133fce4ed7bbf147642b3e7b2b8324268ea6ded1be0caa2da237f000000005a17a000039594489172346c6b22ac52210d14be7fdb02f6ec52b9e525b3a9c77114374cd900ff0402dc640c73000283013c0e0e8602730173027303").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let expr = tree.proposition().unwrap();
+        let ctx = force_any_val::<Context>();
+        let res = try_eval_out_with_version::<Value>(&expr, &ctx, 3, 3).unwrap();
+        assert!(matches!(res, Value::Opt(None)));
     }
 
     fn populate_tree(entries: Vec<(Vec<u8>, Vec<u8>)>) -> BatchAVLProver {
