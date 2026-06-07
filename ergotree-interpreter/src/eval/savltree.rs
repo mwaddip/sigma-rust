@@ -25,7 +25,20 @@ use ergotree_ir::types::stype::SType;
 /// Tree height as recorded in the digest's last byte — the same source Scala's
 /// `BatchAVLVerifier.rootNodeHeight` reads (`startingDigest.last & 0xff`), used
 /// to scale per-operation verifier costs.
+///
+/// `rootNodeHeight` is assigned only AFTER reconstruction's up-front
+/// `require`s pass (`keyLength > 0`, digest length); when they fail no root is
+/// built and the height stays 0, so the JVM charges degenerate trees a
+/// zero-height walk (`CAvlTreeVerifier.treeHeight`). `keyLength` is a signed
+/// `Int` on the JVM — wire values with the high bit set are negative there.
+/// (Failures *during* proof parsing — malformed proof bytes, wrong value
+/// length — happen after the assignment and keep the digest-derived height.)
 fn tree_height(avl_tree_data: &AvlTreeData) -> u32 {
+    // 33 = ADDigest (32-byte root hash + height byte); a non-33 in-memory
+    // digest (producible via updateDigest) cannot seed reconstruction either.
+    if avl_tree_data.digest.len() != 33 || (avl_tree_data.key_length as i32) <= 0 {
+        return 0;
+    }
     avl_tree_data.digest.last().copied().unwrap_or(0) as u32
 }
 
@@ -1984,5 +1997,33 @@ mod tests {
             EXPR_OVERHEAD + 15,
             "insert on a non-insert-allowed tree charges only the flag check"
         );
+    }
+
+    /// JVM parity: `BatchAVLVerifier.rootNodeHeight` is assigned from the
+    /// digest's trailing byte only after the `keyLength > 0` and digest-length
+    /// requires; a non-positive keyLength (signed `Int` on the JVM) or a
+    /// non-33-byte digest fails reconstruction before the assignment, so the
+    /// op-cost height is 0 (`CAvlTreeVerifier.treeHeight`).
+    #[test]
+    fn tree_height_zero_when_reconstruction_cannot_start() {
+        let mut digest_bytes = vec![0u8; 33];
+        digest_bytes[32] = 4;
+        let tree = |digest: Vec<u8>, key_length: u32| AvlTreeData {
+            digest,
+            tree_flags: AvlTreeFlags::new(false, false, false),
+            key_length,
+            value_length_opt: None,
+        };
+        // a valid-shaped tree keeps its digest-derived height
+        assert_eq!(tree_height(&tree(digest_bytes.clone(), 32)), 4);
+        // keyLength 0 or negative-on-the-JVM (high bit set) => height 0
+        assert_eq!(tree_height(&tree(digest_bytes.clone(), 0)), 0);
+        assert_eq!(tree_height(&tree(digest_bytes.clone(), u32::MAX)), 0); // JVM Int -1
+        assert_eq!(tree_height(&tree(digest_bytes, 0x8000_0000)), 0); // JVM Int.MinValue
+
+        // a non-33-byte in-memory digest (via updateDigest) => height 0
+        assert_eq!(tree_height(&tree(vec![1, 2, 3], 32)), 0);
+        assert_eq!(tree_height(&tree(vec![0u8; 32], 32)), 0);
+        assert_eq!(tree_height(&tree(vec![0u8; 34], 32)), 0);
     }
 }
