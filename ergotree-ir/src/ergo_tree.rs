@@ -695,6 +695,19 @@ mod tests {
     }
 
     #[test]
+    fn deserialization_rejects_v3_header_without_size_bit_rule_1012() {
+        // SANTA Rule1012_header_size_bit vector: header byte 0x03 = version 3,
+        // size bit (0x08) NOT set. The JVM rejects at header parse (Rule-1012
+        // `CheckHeaderSizeBit`: "For version greater then 0, size bit should be
+        // set."); sigma-rust used to parse + evaluate it (to Long -1).
+        let bytes = base16::decode("03050101017300").unwrap();
+        assert!(
+            ErgoTree::sigma_parse_bytes(&bytes).is_err(),
+            "v3 header without the size bit must be rejected (Rule-1012)"
+        );
+    }
+
+    #[test]
     fn deserialization_non_parseable_root_v1() {
         // no constant segregation, Expr is invalid
         let bytes = [
