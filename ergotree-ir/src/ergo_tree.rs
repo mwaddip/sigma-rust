@@ -352,7 +352,14 @@ impl ErgoTree {
                 SigmaByteReader::new(Cursor::new(script_bytes.as_slice()), ConstantStore::empty());
             let header = ErgoTreeHeader::sigma_parse(&mut r)?;
             let (constants, body_start) = r.with_tree_version(
-                header.version(),
+                // Parse the template's constants under the OUTER evaluation's tree
+                // version, not the template header's own version. The JVM's
+                // `ErgoTreeSerializer.substituteConstants` reuses the outer
+                // `VersionContext` (no inner re-entry), so a v3-only constant
+                // (e.g. an Option) is accepted iff the OUTER tree is v3 — over- or
+                // under-accepting otherwise. The template's own header version
+                // governs only the re-emitted header byte (written verbatim below).
+                tree_version,
                 |r| -> Result<(Vec<Constant>, usize), SigmaParsingError> {
                     if header.has_size() {
                         let _ = r.get_u32()?;
@@ -396,7 +403,10 @@ impl ErgoTree {
         let body_section = {
             let mut data = Vec::new();
             let mut inner_w = SigmaByteWriter::new(&mut data, None);
-            inner_w.with_tree_version(header.version(), |inner_w| -> SigmaSerializeResult {
+            // Re-serialize the substituted constants under the OUTER tree version
+            // (same source the parse used above), matching the JVM's single outer
+            // `VersionContext` across the whole substitution.
+            inner_w.with_tree_version(tree_version, |inner_w| -> SigmaSerializeResult {
                 if header.is_constant_segregation() {
                     inner_w.put_usize_as_u32_unwrapped(constants.len())?;
                     constants
@@ -834,6 +844,41 @@ mod tests {
         let mut expected_v2 = vec![bytes[0]];
         expected_v2.extend_from_slice(&bytes[2..]);
         assert_eq!(out_v2, expected_v2, "v<=2 must drop the size slot");
+    }
+
+    #[test]
+    fn substitute_constants_parses_template_under_outer_version() {
+        // SANTA substConstants_version_source vectors: the template's constants
+        // must parse under the OUTER evaluation tree version, NOT the template
+        // header's own version (JVM `ErgoTreeSerializer.substituteConstants` reuses
+        // the outer `VersionContext`). Build a v3 template carrying an Option[Int]
+        // constant (SOption DATA is v3-gated), then substitute under each outer
+        // version. The template header is v3, so the pre-fix code (which keyed off
+        // `header.version()`) accepted both; the fix keys off the passed version.
+        let expr = Expr::Const(Constant {
+            tpe: SType::SOption(SType::SInt.into()),
+            v: Literal::Opt(Some(Box::new(Literal::Int(5)))),
+        });
+        // 0x1b = version 3 + size + constant-segregation, so the Option serializes.
+        let header = ErgoTreeHeader::new(0x1b).unwrap();
+        let bytes = ErgoTree::new(header, &expr)
+            .unwrap()
+            .sigma_serialize_bytes()
+            .unwrap();
+
+        // Outer v3: the Option type/data parse under v3 → accepted (mirrors the JVM
+        // outer-v3 vector evaluating to the substituted Coll[Byte]).
+        assert!(
+            ErgoTree::substitute_constants(bytes.clone(), &[], &[], ErgoTreeVersion::V3).is_ok(),
+            "outer v3 must parse the v3-only Option template constant"
+        );
+        // Outer v2: the v3-only Option DATA is not serializable at v2 → rejected,
+        // even though the template header claims v3 (mirrors the JVM outer-v2 vector
+        // erroring). Pre-fix this wrongly used the template header (v3) and accepted.
+        assert!(
+            ErgoTree::substitute_constants(bytes, &[], &[], ErgoTreeVersion::V2).is_err(),
+            "outer v2 must reject the v3-only Option template constant"
+        );
     }
 
     #[test]
