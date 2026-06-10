@@ -107,10 +107,13 @@ mod tests {
         assert_eq!(c, expected);
 
         // The same constant segregated in a v3 tree (the conformance vector
-        // `SOption.nonzero_data_tag`, header size bit cleared) hydrates as
-        // Some(5) through the versioned tree-parse path.
+        // `SOption.nonzero_data_tag`, stored size-bit-cleared) hydrates as Some(5).
+        // Parse via the lenient unsized entry: it restores the size slot (so
+        // Rule-1012 is satisfied) and skips the SigmaProp-root check (the tree is
+        // Int-rooted).
         let tree_bytes = base16::decode("130128020a7300").unwrap();
-        let tree = crate::ergo_tree::ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let tree = crate::ergo_tree::ErgoTree::sigma_parse_bytes_lenient_from_unsized(&tree_bytes)
+            .unwrap();
         assert_eq!(tree.get_constants().unwrap().as_slice(), &[expected]);
     }
 }

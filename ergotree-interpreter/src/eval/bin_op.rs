@@ -971,7 +971,9 @@ mod tests {
     // expression-rooted corpus trees; body bytes verbatim.
     fn eval_blessed_eq_tree(tree_hex: &str) -> Result<bool, EvalError> {
         let tree_bytes = base16::decode(tree_hex).unwrap();
-        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        // The hex is the unsized (size-bit-cleared) form; the lenient entry restores
+        // the size slot (Rule-1012-valid) and skips the SigmaProp-root check.
+        let tree = ErgoTree::sigma_parse_bytes_lenient_from_unsized(&tree_bytes).unwrap();
         let expr = tree.proposition().unwrap();
         let ctx = force_any_val::<Context>();
         try_eval_out_with_version::<bool>(&expr, &ctx, 2, 2)

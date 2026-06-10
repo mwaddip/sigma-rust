@@ -82,7 +82,6 @@ mod tests {
         use crate::eval::test_util::try_eval_out_with_version;
         use ergotree_ir::chain::context::Context;
         use ergotree_ir::ergo_tree::ErgoTree;
-        use ergotree_ir::serialization::SigmaSerializable;
         use sigma_test_util::force_any_val;
 
         fn hx(s: &str) -> alloc::vec::Vec<u8> {
@@ -91,22 +90,15 @@ mod tests {
                 .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
                 .collect()
         }
-        // The vector trees carry arbitrary-typed roots (eval-tier corpus);
-        // the sized parse path rejects non-SigmaProp roots, so clear the
-        // size bit and drop the size byte to route through the non-sized
-        // path — the same leniency the conformance runner applies.
-        fn lenient(bytes: &[u8]) -> alloc::vec::Vec<u8> {
-            let mut out = alloc::vec::Vec::with_capacity(bytes.len() - 1);
-            out.push(bytes[0] & !0x08);
-            out.extend_from_slice(&bytes[2..]); // size VLQ is 1 byte here
-            out
-        }
-
+        // The vector trees carry arbitrary-typed roots (eval-tier corpus); the
+        // sized parse path rejects non-SigmaProp roots, so use the lenient entry
+        // (skips only the root-type check) — the same leniency the conformance
+        // runner applies; the header (size bit set) keeps Rule-1012 satisfied.
         // End-to-end: parse → substitute constants → eval. The reject trees
         // may fail at either layer (Rust's `Apply::new` arg-type check fires
         // at parse, where the JVM defers to eval — both reject the spend).
         let run = |hex: &str| -> Result<i32, alloc::string::String> {
-            let tree = ErgoTree::sigma_parse_bytes(&lenient(&hx(hex)))
+            let tree = ErgoTree::sigma_parse_bytes_lenient(&hx(hex))
                 .map_err(|e| alloc::format!("parse: {e:?}"))?;
             let expr = tree
                 .proposition()
@@ -152,7 +144,6 @@ mod tests {
         use crate::eval::test_util::try_eval_out_with_version;
         use ergotree_ir::chain::context::Context;
         use ergotree_ir::ergo_tree::ErgoTree;
-        use ergotree_ir::serialization::SigmaSerializable;
         use sigma_test_util::force_any_val;
 
         fn hx(s: &str) -> alloc::vec::Vec<u8> {
@@ -161,18 +152,14 @@ mod tests {
                 .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
                 .collect()
         }
-        // { val add = {(a: Int) => {(b: Int) => a + b}}; add(3)(1) } — the
-        // vector tree (v3, segregated, sized). Clear the size bit and drop
-        // the size byte: the eval-tier corpus carries an Int-typed root,
-        // which the sized parse path rejects.
-        let bytes = {
-            let b = hx("1b200204060402d801d601d9010204d90103049a72027203dada7201017300017301");
-            let mut out = alloc::vec::Vec::with_capacity(b.len() - 1);
-            out.push(b[0] & !0x08);
-            out.extend_from_slice(&b[2..]);
-            out
-        };
-        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        // { val add = {(a: Int) => {(b: Int) => a + b}}; add(3)(1) } — the vector
+        // tree (v3, segregated). The eval-tier corpus carries an Int-typed root, so
+        // use the lenient parse (skips only the root-type check); the real header
+        // keeps Rule-1012 satisfied.
+        let tree = ErgoTree::sigma_parse_bytes_lenient(&hx(
+            "1b200204060402d801d601d9010204d90103049a72027203dada7201017300017301",
+        ))
+        .unwrap();
         let expr = tree.proposition().unwrap();
         let ctx = force_any_val::<Context>();
         assert_eq!(

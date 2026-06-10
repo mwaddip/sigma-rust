@@ -153,12 +153,9 @@ mod tests {
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
                 .collect();
-            // Clear the size bit and drop the size byte (non-SigmaProp root —
-            // the conformance runner's lenient parse path).
-            let mut lenient = Vec::with_capacity(bytes.len() - 1);
-            lenient.push(bytes[0] & !0x08);
-            lenient.extend_from_slice(&bytes[2..]);
-            let tree = ErgoTree::sigma_parse_bytes(&lenient).unwrap();
+            // Non-SigmaProp root: the lenient entry skips only the root-type check
+            // (the conformance runner's path); the real header keeps Rule-1012 happy.
+            let tree = ErgoTree::sigma_parse_bytes_lenient(&bytes).unwrap();
 
             // The vector input: var 1 = Int 0 — var 0 absent, var 1 wrong-typed;
             // both deserialize nodes sit on the dead branch and stay unsubstituted.
