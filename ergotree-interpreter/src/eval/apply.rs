@@ -319,50 +319,55 @@ mod tests {
     }
 
     // Parity gap: Scala charges ADD_TO_ENV_COST (5 JIT) on every env
-    // insertion. Apply binds each lambda arg into the interpreter env, so an
-    // N-arg application must pay 5×N ADD_TO_ENV on top of Apply=Fixed(30),
-    // FuncValue=Fixed(5), and the per-arg value eval. Pre-fix the binding
-    // loop charged 0, undercharging every user-lambda application by 5×N.
+    // insertion — one per application, since only unary lambdas evaluate
+    // (FuncValue.eval rejects other arities at closure creation, so an N-ary
+    // probe is unrepresentable; a curried chain is the JVM-legal equivalent).
+    // Pre-fix the binding charged 0, undercharging every application by 5.
     #[test]
     fn apply_charges_add_to_env_per_arg_binding() {
         use crate::eval::test_util::try_eval_out;
         use ergotree_ir::chain::context::Context;
         use sigma_test_util::force_any_val;
 
-        // Apply a FuncValue of `n_args` Int params (body ignores them and
-        // returns a Bool const) to `n_args` Int constants; return JIT cost.
-        let run = |n_args: u32| -> u64 {
+        // Curried chain of `depth` unary lambdas, fully applied:
+        // depth 1: ((x1:Int) => true)(1)
+        // depth 2: ((x1:Int) => (x2:Int) => true)(1)(1)
+        let run = |depth: u32| -> u64 {
             let ctx = force_any_val::<Context>();
             let before = ctx.jit_cost_value();
-            let args: alloc::vec::Vec<FuncArg> = (1..=n_args)
-                .map(|i| FuncArg {
-                    idx: i.into(),
-                    tpe: SType::SInt,
-                })
-                .collect();
-            let arg_exprs: alloc::vec::Vec<Expr> =
-                (1..=n_args).map(|_| Expr::Const(1i32.into())).collect();
-            let apply: Expr = Apply::new(
-                FuncValue::new(args, Expr::Const(true.into())).into(),
-                arg_exprs,
-            )
-            .unwrap()
-            .into();
+            let mut func: Expr = Expr::Const(true.into());
+            for i in (1..=depth).rev() {
+                func = FuncValue::new(
+                    vec![FuncArg {
+                        idx: i.into(),
+                        tpe: SType::SInt,
+                    }],
+                    func,
+                )
+                .into();
+            }
+            let mut apply: Expr = func;
+            for _ in 0..depth {
+                apply = Apply::new(apply, vec![Expr::Const(1i32.into())])
+                    .unwrap()
+                    .into();
+            }
             let _: bool = try_eval_out(&apply, &ctx).unwrap();
             ctx.jit_cost_value() - before
         };
 
-        // Each extra arg adds: arg Const eval (5) + ADD_TO_ENV_COST (5) = 10.
-        // Apply (30), FuncValue (5) and the body Const (5) are identical
-        // across both runs, so they cancel in the delta.
+        // Each extra application layer adds: Apply (30) + FuncValue closure
+        // (5) + arg Const eval (5) + ADD_TO_ENV_COST (5) = 45; dropping the
+        // per-binding charge would red this at 40.
         let delta_1 = run(1);
         let delta_2 = run(2);
         assert_eq!(
             delta_2 - delta_1,
-            10,
+            45,
             "Apply must charge ADD_TO_ENV_COST (5 JIT) per lambda-arg binding \
-             on top of the per-arg value eval (5); got {} JIT delta between a \
-             2-arg and 1-arg application, expected 10 (pre-fix would be 5).",
+             on top of Apply (30), the closure (5), and the arg value eval (5); \
+             got {} JIT delta between a depth-2 and depth-1 curried application \
+             chain, expected 45 (a dropped binding charge would give 40).",
             delta_2 - delta_1,
         );
     }
