@@ -42,6 +42,17 @@ impl Evaluable for Atleast {
             })
             .collect::<Result<Vec<SigmaBoolean>, TryExtractFromError>>()?;
 
+        // Mirror Scala `CSigmaDslBuilder.atLeast` (sigma/data/CSigmaDslBuilder.scala): the
+        // children-count cap (`MaxChildrenCountForAtLeastOp = 255`) is checked BEFORE
+        // `AtLeast.reduce`, so it precedes the degenerate-bound short-circuits below. A
+        // `ConcreteCollection` carries a u16 count, so >255 children are wire-constructible.
+        if input.len() > 255 {
+            return Err(EvalError::Misc(format!(
+                "Atleast: expected input elements count ({}) should not exceed 255",
+                input.len()
+            )));
+        }
+
         // Mirror Scala `AtLeast.reduce` (sigma/ast/trees.scala) degenerate-bound handling,
         // applied before constructing a CTHRESHOLD:
         //   bound <= 0            => TrueProp  (always satisfied)
@@ -126,6 +137,17 @@ mod tests {
         )
     }
 
+    fn n_sigmaprops_coll(n: usize) -> Literal {
+        let one: Literal = force_any_val::<SigmaProp>().into();
+        Literal::Coll(
+            CollKind::from_collection(
+                SType::SSigmaProp,
+                core::iter::repeat_n(one, n).collect::<Arc<[Literal]>>(),
+            )
+            .unwrap(),
+        )
+    }
+
     fn atleast_expr(bound: i32, items: Literal) -> Expr {
         Atleast::new(
             bound.into(),
@@ -149,6 +171,26 @@ mod tests {
             let res: SigmaBoolean = try_eval_out_wo_ctx::<SigmaProp>(&expr).unwrap().into();
             assert!(matches!(res, SigmaBoolean::TrivialProp(false)));
         }
+    }
+
+    // Scala `CSigmaDslBuilder.atLeast`: the 255-children cap is checked BEFORE
+    // `AtLeast.reduce`, so it precedes (overrides) the degenerate-bound short-circuits.
+    // `atLeast(0, 256 props)` errors even though `bound <= 0` would otherwise be TrueProp.
+    #[test]
+    fn children_count_cap_precedes_degenerate_bound() {
+        let too_many = n_sigmaprops_coll(256);
+        for bound in [0i32, 2] {
+            let expr = atleast_expr(bound, too_many.clone());
+            assert!(
+                try_eval_out_wo_ctx::<SigmaProp>(&expr).is_err(),
+                "256 children must error before the degenerate bound={bound} reduction"
+            );
+        }
+        // Cap is exclusive at 255: 255 children with `bound <= 0` still reduces to TrueProp.
+        let at_cap = n_sigmaprops_coll(255);
+        let expr = atleast_expr(0, at_cap);
+        let res: SigmaBoolean = try_eval_out_wo_ctx::<SigmaProp>(&expr).unwrap().into();
+        assert!(matches!(res, SigmaBoolean::TrivialProp(true)));
     }
 
     // testnet block 184,137: `atLeast(1, Coll[SigmaProp]())` — bound 1 > size 0 => FalseProp.
