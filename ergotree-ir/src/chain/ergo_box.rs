@@ -77,6 +77,11 @@ pub struct ErgoBox {
     pub transaction_id: TxId,
     /// number of box (from 0 to total number of boxes the transaction with transactionId created - 1)
     pub index: u16,
+    /// Exact serialized bytes retained when this box was parsed off the wire (`None` for boxes
+    /// built from fields, which serialize canonically). Mirrors the reference impl's
+    /// `ErgoBox._bytes`: `ErgoBox.bytes` returns this slice verbatim, so a box carrying a
+    /// non-canonically-encoded value keeps its on-the-wire byte image (and thus `id`).
+    pub(crate) serialized_bytes: Option<Vec<u8>>,
 }
 
 // Mirror the reference impl's `ErgoBox.equals` (ErgoBox.scala:188-191), which compares the
@@ -121,6 +126,7 @@ impl ErgoBox {
             creation_height,
             transaction_id,
             index,
+            serialized_bytes: None,
         };
         let box_id = box_with_zero_id.calc_box_id()?;
         Ok(ErgoBox {
@@ -132,6 +138,18 @@ impl ErgoBox {
     /// Box id (Blake2b256 hash of serialized box)
     pub fn box_id(&self) -> BoxId {
         self.box_id
+    }
+
+    /// Serialized box bytes. For a box parsed off the wire this is the exact retained input
+    /// slice (`ErgoBox._bytes`); for a box built from fields it is the canonical serialization.
+    /// `ExtractBytes` (`Box.bytes`) surfaces this, so non-canonically-encoded inputs keep their
+    /// on-the-wire byte image. (Note `bytesWithoutRef`/`ErgoBoxCandidate` has no retained slice
+    /// and always re-serializes canonically — see `ErgoBoxCandidate`.)
+    pub fn bytes(&self) -> Result<Vec<u8>, SigmaSerializationError> {
+        match &self.serialized_bytes {
+            Some(bytes) => Ok(bytes.clone()),
+            None => self.sigma_serialize_bytes(),
+        }
     }
 
     /// Create ErgoBox from ErgoBoxCandidate by adding transaction id
@@ -150,6 +168,7 @@ impl ErgoBox {
             creation_height: box_candidate.creation_height,
             transaction_id,
             index,
+            serialized_bytes: None,
         };
         let box_id = box_with_zero_id.calc_box_id()?;
         Ok(ErgoBox {
@@ -229,9 +248,10 @@ impl SigmaSerializable for ErgoBox {
     }
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         // Mirror `ErgoBox.sigmaSerializer.parse` (ErgoBox.scala:214-225): retain the exact
-        // consumed input slice and compute `id` over it, instead of re-serializing the decoded
-        // box. This preserves the on-the-wire identity of boxes carrying non-canonically-encoded
-        // (but accepted) values, so `id`/equality match the reference impl on such inputs.
+        // consumed input slice, compute `id` over it, and keep it (`serialized_bytes`) so
+        // `ErgoBox.bytes` returns it verbatim — instead of re-serializing the decoded box. This
+        // preserves the on-the-wire identity and byte image of boxes carrying
+        // non-canonically-encoded (but accepted) values, matching the reference impl.
         let start = r.position()?;
         let box_candidate = ErgoBoxCandidate::parse_body_with_indexed_digests(None, r)?;
         let tx_id = TxId::sigma_parse(r)?;
@@ -250,6 +270,7 @@ impl SigmaSerializable for ErgoBox {
             creation_height: box_candidate.creation_height,
             transaction_id: tx_id,
             index,
+            serialized_bytes: Some(box_bytes),
         })
     }
 }
@@ -617,6 +638,9 @@ mod tests {
         let garbage_id: BoxId = Digest32::from(*blake2b256_hash(&garbage_bytes)).into();
         assert_eq!(box_canon.box_id(), canon_id);
         assert_eq!(box_garbage.box_id(), garbage_id);
+        // `bytes()` likewise returns the retained slice verbatim (the `Box.bytes` basis).
+        assert_eq!(box_garbage.bytes().unwrap(), garbage_bytes);
+        assert_eq!(box_canon.bytes().unwrap(), canon_bytes);
         // Different ids => unequal boxes...
         assert_ne!(box_canon.box_id(), box_garbage.box_id());
         assert_ne!(box_canon, box_garbage);
