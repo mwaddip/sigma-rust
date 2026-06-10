@@ -1,4 +1,5 @@
 use crate::eval::Env;
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use ergotree_ir::mir::global_vars::GlobalVars;
 use ergotree_ir::mir::value::Value;
@@ -42,6 +43,14 @@ impl Evaluable for GlobalVars {
                 ctx.add_jit_cost(20)?; // MinerPubkey = Fixed(20)
                 Ok(ctx.pre_header.miner_pk.sigma_serialize_bytes()?.into())
             }
+            GlobalVars::LastBlockUtxoRootHash => {
+                // Same as the `Context.LastBlockUtxoRootHash` property eval
+                // (`LAST_BLOCK_UTXO_ROOT_HASH_EVAL_FN`) — the two wire forms of
+                // the property must agree on the value; the op form charges only
+                // the op's fixed cost.
+                ctx.add_jit_cost(15)?; // LastBlockUtxoRootHash = Fixed(15)
+                Ok(Value::AvlTree(Box::from(ctx.last_block_utxo_root.clone())))
+            }
             GlobalVars::GroupGenerator => {
                 ctx.add_jit_cost(10)?; // GroupGenerator = Fixed(10)
                 Ok(ergo_chain_types::ec_point::generator().into())
@@ -61,6 +70,11 @@ mod tests {
     use ergoscript_compiler::script_env::ScriptEnv;
     use ergotree_ir::chain::context::Context;
     use ergotree_ir::chain::ergo_box::ErgoBox;
+    use ergotree_ir::ergo_tree::ErgoTree;
+    use ergotree_ir::mir::avl_tree_data::AvlTreeData;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::property_call::PropertyCall;
+    use ergotree_ir::types::scontext;
     use sigma_test_util::force_any_val;
 
     use super::*;
@@ -108,5 +122,38 @@ mod tests {
             eval_out::<EcPoint>(&GlobalVars::GroupGenerator.into(), &ctx),
             ergo_chain_types::ec_point::generator()
         );
+    }
+
+    #[test]
+    fn eval_last_block_utxo_root_hash_op_form_blessed_bytes() {
+        // `10 00 a6` — a v0 constant-segregated tree whose root is the bare
+        // dedicated op code 0xa6 (`LastBlockUtxoRootHash`), the way the JVM
+        // serializes the op form (`Context.op_forms.json ::
+        // lastblockutxoroothash-opform`). The op form and the
+        // `CONTEXT.LastBlockUtxoRootHash` PropertyCall form must evaluate to
+        // the same AvlTree; cost follows the wire shape — the op form charges
+        // the op's Fixed(15), the PropertyCall form the method machinery (20).
+        let ctx = force_any_val::<Context>();
+        let tree = ErgoTree::sigma_parse_bytes(&[0x10, 0x00, 0xa6]).unwrap();
+        let expr = tree.proposition().unwrap();
+        let before = ctx.jit_cost_value();
+        assert_eq!(
+            eval_out::<AvlTreeData>(&expr, &ctx),
+            ctx.last_block_utxo_root
+        );
+        assert_eq!(ctx.jit_cost_value() - before, 15);
+
+        let property_form: Expr = PropertyCall::new(
+            Expr::Context,
+            scontext::LAST_BLOCK_UTXO_ROOT_HASH_PROPERTY.clone(),
+        )
+        .unwrap()
+        .into();
+        let before = ctx.jit_cost_value();
+        assert_eq!(
+            eval_out::<AvlTreeData>(&property_form, &ctx),
+            ctx.last_block_utxo_root
+        );
+        assert_eq!(ctx.jit_cost_value() - before, 20);
     }
 }
