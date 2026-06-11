@@ -259,7 +259,7 @@ impl SigmaSerializable for ErgoBox {
         let end = r.position()?;
         r.seek(SeekFrom::Start(start))?;
         let mut box_bytes = alloc::vec![0u8; (end - start) as usize];
-        r.read_exact(&mut box_bytes)?;
+        r.get_bytes_into(&mut box_bytes)?;
         let box_id: BoxId = Digest32::from(*blake2b256_hash(&box_bytes)).into();
         Ok(ErgoBox {
             box_id,
