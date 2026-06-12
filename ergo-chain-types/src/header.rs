@@ -249,11 +249,19 @@ pub struct AutolykosSolution {
     /// encodes the sign and absolute-value of the value separately, which is incompatible with the
     /// JSON representation used by Ergo. ASSUMPTION: we assume that `pow_distance` encoded as a
     /// `u64`.
+    ///
+    /// `None` (the post-binary-parse shape of Autolykos v2 solutions, where the JVM materializes
+    /// `dForV2 = 0` instead — `AutolykosSolution.scala:37,105`) is OMITTED on serialize rather
+    /// than emitted as `"d": null`: both this crate's deserializer and the JVM decoder
+    /// (`c.downField("d").as[Option[BigInt]].getOrElse(dForV2)`, `AutolykosSolution.scala:53-55`)
+    /// treat an absent `d` as the v2 default, which keeps the JSON round-trip the identity.
+    /// An explicit `"d": null` is accepted on parse the same way circe's `Option` decoder does.
     #[cfg_attr(
         feature = "json",
         serde(
             default,
             rename = "d",
+            skip_serializing_if = "Option::is_none",
             serialize_with = "crate::json::autolykos_solution::bigint_as_str",
             deserialize_with = "crate::json::autolykos_solution::bigint_from_serde_json_number"
         )
@@ -446,6 +454,13 @@ mod tests {
         fn ser_roundtrip(v in any::<Header>()) {
             assert_eq![scorex_serialize_roundtrip(&v), v]
         }
+
+        #[test]
+        fn json_roundtrip(v in any::<Header>()) {
+            let json = serde_json::to_string(&v).unwrap();
+            let parsed: Header = serde_json::from_str(&json).unwrap();
+            assert_eq![parsed, v]
+        }
     }
 
     #[test]
@@ -555,5 +570,71 @@ mod tests {
         // encoding would append an extra `00` (total 76); the trailing byte is the length `0`.
         assert_eq!(data.len(), super::EcPoint::GROUP_SIZE * 2 + 8 + 1);
         assert_eq!(*data.last().unwrap(), 0u8);
+    }
+
+    /// An Autolykos v2 solution in post-binary-parse shape (`pow_distance == None`; the
+    /// JVM materializes `dForV2 = 0` there instead) must OMIT `d` in JSON rather than emit
+    /// `"d": null` — the deserializer (like the JVM's, which fills `dForV2` for an absent
+    /// `d`) treats the missing key as the v2 default, making the round-trip the identity.
+    /// Regression: the serializer used to emit `"d": null`, which its own deserializer
+    /// rejected.
+    #[test]
+    fn autolykos_v2_solution_json_omits_d_and_roundtrips() {
+        let sol = super::AutolykosSolution {
+            miner_pk: Box::new(
+                super::EcPoint::from_base16_str(
+                    "02b3a06d6eaa8671431ba1db4dd427a77f75a5c2acbd71bfb725d38adc2b55f669"
+                        .to_string(),
+                )
+                .unwrap(),
+            ),
+            pow_onetime_pk: Some(Box::new(crate::ec_point::generator())),
+            nonce: vec![0x59, 0x39, 0xEC, 0xFE, 0xE6, 0xB0, 0xD7, 0xF4],
+            pow_distance: None,
+        };
+        let json = serde_json::to_value(&sol).unwrap();
+        assert!(json.get("d").is_none());
+        let parsed: super::AutolykosSolution = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, sol);
+    }
+
+    /// An explicit `"d": null` (as emitted by previous versions of this crate) is accepted
+    /// as an absent distance, the same way the JVM decoder's
+    /// `c.downField("d").as[Option[BigInt]]` (`AutolykosSolution.scala:53`) maps `null`
+    /// through circe's `Option` decoder.
+    #[test]
+    fn autolykos_solution_json_d_null_is_accepted() {
+        let json = r#"{
+            "pk": "02b3a06d6eaa8671431ba1db4dd427a77f75a5c2acbd71bfb725d38adc2b55f669",
+            "w": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            "n": "5939ecfee6b0d7f4",
+            "d": null
+        }"#;
+        let sol: super::AutolykosSolution = serde_json::from_str(json).unwrap();
+        assert_eq!(sol.pow_distance, None);
+    }
+
+    /// JVM-shaped v2 powSolutions fixture: the node's encoder always emits all four fields
+    /// (`AutolykosSolution.scala:39-46`), with `w` = the group generator (`wForV2`) and
+    /// `"d": 0` as a raw JSON number (`dForV2` through `bigIntEncoder`,
+    /// `ApiCodecs.scala:66-68`). Must parse, and re-serializing must produce JSON that
+    /// parses back to the same solution.
+    #[test]
+    fn autolykos_solution_json_jvm_v2_fixture() {
+        let json = r#"{
+            "pk": "02b3a06d6eaa8671431ba1db4dd427a77f75a5c2acbd71bfb725d38adc2b55f669",
+            "w": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            "n": "5939ecfee6b0d7f4",
+            "d": 0
+        }"#;
+        let sol: super::AutolykosSolution = serde_json::from_str(json).unwrap();
+        assert_eq!(sol.pow_distance, Some(BigUint::from(0u8)));
+        assert_eq!(
+            sol.pow_onetime_pk,
+            Some(Box::new(crate::ec_point::generator()))
+        );
+        let reencoded = serde_json::to_string(&sol).unwrap();
+        let reparsed: super::AutolykosSolution = serde_json::from_str(&reencoded).unwrap();
+        assert_eq!(reparsed, sol);
     }
 }
