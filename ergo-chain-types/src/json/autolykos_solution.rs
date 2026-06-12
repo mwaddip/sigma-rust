@@ -26,7 +26,12 @@ where
         .map(From::from)
 }
 
-/// Serialize `BigInt` as a string
+/// Serialize `BigInt` as a string.
+///
+/// `None` is never reached in practice: the `d` field is
+/// `skip_serializing_if = "Option::is_none"`, mirroring how an absent
+/// distance round-trips (the JVM decoder fills `dForV2` for a missing
+/// `d`, `AutolykosSolution.scala:53-55`).
 pub(crate) fn bigint_as_str<S>(value: &Option<BigUint>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -34,7 +39,7 @@ where
     if let Some(value) = value {
         serializer.serialize_str(&value.to_string())
     } else {
-        serializer.serialize_unit()
+        serializer.serialize_none()
     }
 }
 
@@ -42,6 +47,11 @@ where
 /// need to do this because the JSON specification allows for arbitrarily-large numbers, a feature
 /// that Autolykos makes use of to encode the PoW-distance (d) parameter. Note that we also need to
 /// use `serde_json` with the `arbitrary_precision` feature for this to work.
+///
+/// An explicit `null` is accepted as `None`, matching the JVM decoder, where
+/// `c.downField("d").as[Option[BigInt]]` (`AutolykosSolution.scala:53`) maps
+/// both an absent and a `null` `d` to the `dForV2` default via circe's
+/// `Option` decoder.
 pub(crate) fn bigint_from_serde_json_number<'de, D>(
     deserializer: D,
 ) -> Result<Option<BigUint>, D::Error>
@@ -50,8 +60,9 @@ where
 {
     use serde::de::Error;
 
-    match DeserializeBigIntFrom::deserialize(deserializer) {
-        Ok(s) => match s {
+    match Option::<DeserializeBigIntFrom>::deserialize(deserializer) {
+        Ok(None) => Ok(None),
+        Ok(Some(s)) => match s {
             DeserializeBigIntFrom::String(s) => BigUint::from_str(&s)
                 .map(Some)
                 .map_err(|e| Error::custom(e.to_string())),
