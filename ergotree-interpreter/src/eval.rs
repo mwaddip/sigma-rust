@@ -181,8 +181,34 @@ pub(crate) fn check_value_type(tpe: &SType) -> Result<(), EvalError> {
     }
 }
 
+/// Reject a self-box `ContextExtension` whose key set leaves the signed-`Byte`
+/// range (any key `>= 0x80`), mirroring the JVM's `ErgoLikeContext.toSigmaContext`
+/// (`ErgoLikeContext.scala:140-146`): it builds `contextVars` as
+/// `new Array(maxKey + 1)` indexed by the SIGNED key, so a key `>= 0x80`
+/// (signed-negative) crashes context construction — `NegativeArraySizeException`
+/// (all keys negative ⇒ negative array size) or `ArrayIndexOutOfBoundsException`
+/// (a negative index) — BEFORE any bytecode runs, and the spend never validates.
+/// sigma-rust stores keys as unsigned `u8` and resolves them lazily at `GetVar`,
+/// so without this guard it would ACCEPT a `>= 0x80` key where the JVM rejects —
+/// a consensus fork on the attacker-supplied spending extension. The rejection is
+/// on key PRESENCE (a `GetVar`-free tree still rejects), not on the read. This is
+/// the top-level self extension only; the per-input `getVarFromInput` path masks
+/// the id with `& 0xff` by design and is intentionally not affected.
+fn validate_self_extension_key_domain(ctx: &Context) -> Result<(), EvalError> {
+    if let Some(&bad_key) = ctx.extension.values.keys().find(|&&k| k > 0x7f) {
+        return Err(EvalError::Misc(format!(
+            "ContextExtension key {bad_key} is outside the signed-Byte range 0..=127 \
+             that context construction accepts (>= 0x80 crashes the JVM vars array)"
+        )));
+    }
+    Ok(())
+}
+
 /// Evaluate the given expression by reducing it to SigmaBoolean value.
 pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResult, EvalError> {
+    // The JVM rejects a `>= 0x80` self-extension key at context construction,
+    // before any bytecode; mirror that here at the reduction boundary.
+    validate_self_extension_key_domain(ctx)?;
     // Track cost as a delta from the caller's accumulator state so the per-call cost
     // reported in ReductionResult stays meaningful while the ctx accumulator grows
     // cumulatively across repeated reduce_to_crypto invocations on the same Context
@@ -673,6 +699,12 @@ pub mod test_util {
         expr: &Expr,
         ctx: &'ctx Context<'ctx>,
     ) -> Result<T, EvalError> {
+        // The eval-tier mirror of `reduce_to_crypto`'s context-construction guard:
+        // a self extension key >= 0x80 crashes JVM context construction before any
+        // bytecode, so reject it here too. This entry is the one the conformance
+        // runner drives, so it must surface the same key-domain verdict the node
+        // path does (without it the runner would never exercise the rejection).
+        super::validate_self_extension_key_domain(ctx)?;
         // Mirror `Interpreter.fullReduction`: a deserialize-bearing segregated
         // tree is reduced from its constants-substituted proposition (Constant
         // visits, JitCost 5), not the lazy placeholder form (ConstantPlaceholder
@@ -780,6 +812,68 @@ mod test {
             v1: 1
         "#]]
         .assert_eq(&res.diag.to_string());
+    }
+
+    // The JVM rejects a self-box ContextExtension with any key >= 0x80 at context
+    // construction (the signed-key vars array crashes), before any bytecode. Mirror:
+    // both the node entry (reduce_to_crypto) and the eval-tier entry
+    // (try_eval_with_deserialize) reject on key PRESENCE — a GetVar-free `true` tree
+    // still rejects — with 0x7f the accepted boundary and 0x80/0xff rejected.
+    #[test]
+    fn self_extension_key_above_0x7f_rejected_at_construction() {
+        use crate::eval::test_util::{try_eval_out, try_eval_with_deserialize};
+        use ergotree_ir::chain::context_extension::ContextExtension;
+        use ergotree_ir::mir::constant::Constant;
+        use ergotree_ir::mir::get_var::GetVar;
+        use ergotree_ir::mir::value::Value;
+
+        // GetVar-free trivial tree: reduces to TrivialProp(true) when the context is
+        // accepted, so any rejection is purely the key-domain guard.
+        let true_expr: Expr = Expr::Const(true.into());
+        let tree: ErgoTree = true_expr.clone().try_into().unwrap();
+
+        let ctx_with_key = |key: u8| -> Context<'static> {
+            let mut ext = ContextExtension::empty();
+            ext.values.insert(key, Constant::from(1i32));
+            let mut ctx = force_any_val::<Context>();
+            ctx.extension = Box::leak(Box::new(ext));
+            ctx
+        };
+
+        // 0x7f (127) — the boundary — accepts on both the node and eval-tier entries.
+        assert_eq!(
+            reduce_to_crypto(&tree, &ctx_with_key(0x7f))
+                .unwrap()
+                .sigma_prop,
+            SigmaBoolean::TrivialProp(true)
+        );
+        assert_eq!(
+            try_eval_with_deserialize::<Value>(&true_expr, &ctx_with_key(0x7f)).unwrap(),
+            Value::Boolean(true)
+        );
+        // 0x80 (128) and 0xff (255) — out of the signed-Byte range — reject on both.
+        assert!(reduce_to_crypto(&tree, &ctx_with_key(0x80)).is_err());
+        assert!(reduce_to_crypto(&tree, &ctx_with_key(0xff)).is_err());
+        assert!(try_eval_with_deserialize::<Value>(&true_expr, &ctx_with_key(0x80)).is_err());
+        assert!(try_eval_with_deserialize::<Value>(&true_expr, &ctx_with_key(0xff)).is_err());
+        // An empty self extension is unaffected.
+        let mut ctx_empty = force_any_val::<Context>();
+        ctx_empty.extension = Box::leak(Box::new(ContextExtension::empty()));
+        assert!(reduce_to_crypto(&tree, &ctx_empty).is_ok());
+
+        // Guard-rail: the READ is not over-rejected — GetVar of a >= 0x80 id with the
+        // key ABSENT (so it never reaches the construction check) stays None.
+        let get_var_0x80: Expr = GetVar {
+            var_id: 0x80,
+            var_tpe: SType::SInt,
+        }
+        .into();
+        let mut ctx_no_var = force_any_val::<Context>();
+        ctx_no_var.extension = Box::leak(Box::new(ContextExtension::empty()));
+        assert_eq!(
+            try_eval_out::<Value>(&get_var_0x80, &ctx_no_var).unwrap(),
+            Value::Opt(None)
+        );
     }
 
     #[test]
