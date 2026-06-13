@@ -2,6 +2,7 @@ use crate::eval::EvalError;
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
+use alloc::vec::Vec;
 use ergotree_ir::chain::ergo_box::ErgoBox;
 use ergotree_ir::chain::ergo_box::RegisterId;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
@@ -74,6 +75,51 @@ pub(crate) static TOKENS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         .tokens_raw()
         .into();
     Ok(res)
+};
+
+// The accessor method-forms (PropertyCall 99:2..6) dispatch through the same box
+// accessors as their op-form twins (ExtractScriptBytes/ExtractBytes/ExtractBytesWithNoRef/
+// ExtractId/ExtractCreationInfo) and charge the op-form's `costKind`; the MethodCall/
+// PropertyCall envelope (Fixed(4)) is charged by the call site, so the full-tree cost is
+// `receiver(ConstantPlaceholder 1) + envelope(4) + op-form costKind` (JVM
+// `MethodCall.eval` -> `invokeFixed`, methods.scala SBoxMethods).
+
+pub(crate) static PROPOSITION_BYTES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+    ctx.add_jit_cost(10)?; // ExtractScriptBytes = Fixed(10)
+    Ok(obj
+        .try_extract_into::<Ref<'_, ErgoBox>>()?
+        .script_bytes()?
+        .into())
+};
+
+pub(crate) static BYTES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+    ctx.add_jit_cost(12)?; // ExtractBytes = Fixed(12)
+                           // `Box.bytes` returns the parse-retained wire slice (the reference impl's
+                           // `ErgoBox.bytes`), so a non-canonically-encoded box keeps its on-the-wire
+                           // image — unlike `bytesWithoutRef`, which re-serializes canonically.
+    Ok(obj.try_extract_into::<Ref<'_, ErgoBox>>()?.bytes()?.into())
+};
+
+pub(crate) static BYTES_WITHOUT_REF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+    ctx.add_jit_cost(12)?; // ExtractBytesWithNoRef = Fixed(12)
+    Ok(obj
+        .try_extract_into::<Ref<'_, ErgoBox>>()?
+        .bytes_without_ref()?
+        .into())
+};
+
+pub(crate) static ID_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+    ctx.add_jit_cost(12)?; // ExtractId = Fixed(12)
+    let bytes: Vec<i8> = obj.try_extract_into::<Ref<'_, ErgoBox>>()?.box_id().into();
+    Ok(bytes.into())
+};
+
+pub(crate) static CREATION_INFO_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+    ctx.add_jit_cost(16)?; // ExtractCreationInfo = Fixed(16)
+    Ok(obj
+        .try_extract_into::<Ref<'_, ErgoBox>>()?
+        .creation_info()
+        .into())
 };
 
 #[allow(clippy::unwrap_used)]
@@ -302,6 +348,98 @@ mod tests {
             try_eval_out_with_version::<Option<i32>>(&expr, &ctx, 3, 3).is_err(),
             "present register of the wrong type must error"
         );
+    }
+
+    // End-to-end over the blessed `Box.accessor_method_form` vectors (sigma-state 6.0.3,
+    // santa:authored-sbox-method-form). Each tree is a self-contained ErgoTree whose box
+    // receiver is `ConstantPlaceholder(0)`; evaluated through the lazy-constants path
+    // (`root_expr` + `with_constants`, the same path the conformance runner uses) so the
+    // reported cost is the JVM's full-tree `ConstantPlaceholder(1) + MethodCall/PropertyCall
+    // envelope(4) + op-form costKind`. The byte-basis trio (bytes/bytesWithoutRef/id) reuses
+    // the `Box.bytes_byte_basis` op-form twins' box (non-canonical `00‖aa×32` R4 GE): `.bytes`
+    // and `.id` are the parse-RETAINED wire slice, `.bytesWithoutRef` is the CANONICAL
+    // re-serialization (the asymmetry). Version pin {activated 2, ergoTree 0}.
+    #[test]
+    fn eval_accessor_method_forms_blessed_vectors() {
+        use crate::eval::test_util::try_eval_with_deserialize;
+        use ergotree_ir::mir::constant::TryExtractFrom;
+
+        fn run<T: TryExtractFrom<Value<'static>> + 'static>(tree_hex: &str) -> (T, u64) {
+            let bytes = base16::decode(tree_hex).unwrap();
+            let tree = ErgoTree::sigma_parse_bytes_lenient(&bytes).unwrap();
+            let root = tree.root_expr().unwrap();
+            let constants = tree.constants().unwrap();
+            let mut ctx = force_any_val::<Context>();
+            ctx.pre_header.version = 3; // activated 2 (+1 block-version convention)
+            ctx.tree_version.set(ErgoTreeVersion::V0); // ergoTree 0
+            let eval_ctx = ctx.with_constants(constants);
+            let before = eval_ctx.jit_cost_value();
+            let v = try_eval_with_deserialize::<T>(root, &eval_ctx).unwrap();
+            let cost = eval_ctx.jit_cost_value() - before;
+            (v, cost)
+        }
+
+        // value (99:1) — the already-registered control; must stay green at 13.
+        let (value, cost) = run::<i64>("100163c0843d10010101d1730000000107000000000000000000000000000000000000000000000000000000000000000000111111111111111111111111111111111111111111111111111111111111111100db63017300");
+        assert_eq!(value, 1_000_000);
+        assert_eq!(cost, 13);
+
+        // propositionBytes (99:2) = CP(1)+envelope(4)+ExtractScriptBytes(10)
+        let (pb, cost) = run::<Vec<i8>>("100163c0843d10010101d1730000000107000000000000000000000000000000000000000000000000000000000000000000111111111111111111111111111111111111111111111111111111111111111100db63027300");
+        assert_eq!(pb, vec![16, 1, 1, 1, -47, 115, 0]);
+        assert_eq!(cost, 15);
+
+        // bytes (99:3) — the parse-RETAINED slice (0x00‖aa×32 R4 survives); byte-matches
+        // the op-form Box.bytes_byte_basis retained twin. CP(1)+envelope(4)+ExtractBytes(12)
+        let (bytes, cost) = run::<Vec<i8>>("100163c0843d10010101d173000000010700aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa111111111111111111111111111111111111111111111111111111111111111100db63037300");
+        assert_eq!(
+            bytes,
+            vec![
+                -64, -124, 61, 16, 1, 1, 1, -47, 115, 0, 0, 0, 1, 7, 0, -86, -86, -86, -86, -86,
+                -86, -86, -86, -86, -86, -86, -86, -86, -86, -86, -86, -86, -86, -86, -86, -86,
+                -86, -86, -86, -86, -86, -86, -86, -86, -86, -86, -86, 17, 17, 17, 17, 17, 17, 17,
+                17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+                17, 17, 17, 17, 0
+            ]
+        );
+        assert_eq!(cost, 17);
+
+        // bytesWithoutRef (99:4) — the CANONICAL re-serialization (R4 GE normalized to 00×33,
+        // no txid/index ref); distinct from .bytes above. CP(1)+envelope(4)+ExtractBytesWithNoRef(12)
+        let (bwr, cost) = run::<Vec<i8>>("100163c0843d10010101d173000000010700aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa111111111111111111111111111111111111111111111111111111111111111100db63047300");
+        assert_eq!(
+            bwr,
+            vec![
+                -64, -124, 61, 16, 1, 1, 1, -47, 115, 0, 0, 0, 1, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
+        assert_eq!(cost, 17);
+
+        // id (99:5) — blake2b256 of the RETAINED slice. CP(1)+envelope(4)+ExtractId(12)
+        let (id, cost) = run::<Vec<i8>>("100163c0843d10010101d173000000010700aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa111111111111111111111111111111111111111111111111111111111111111100db63057300");
+        assert_eq!(
+            id,
+            vec![
+                -119, 61, -98, 90, 67, -3, -45, 97, 115, -94, -113, -118, -12, 3, 125, -121, -47,
+                12, 125, 85, -68, 60, -13, -112, -22, 121, 65, 67, -86, -63, -11, -84
+            ]
+        );
+        assert_eq!(cost, 17);
+
+        // creationInfo (99:6) — (height, txid‖index bytes). CP(1)+envelope(4)+ExtractCreationInfo(16)
+        let (ci, cost) = run::<(i32, Vec<i8>)>("100163c0843d10010101d1730000000107000000000000000000000000000000000000000000000000000000000000000000111111111111111111111111111111111111111111111111111111111111111100db63067300");
+        assert_eq!(
+            ci,
+            (
+                0i32,
+                vec![
+                    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+                    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 0, 0
+                ]
+            )
+        );
+        assert_eq!(cost, 21);
     }
 
     // getRegV5 (method id 7) deserializes but has no eval — mirroring the JVM,
