@@ -118,24 +118,38 @@ pub(crate) fn eq_with_cost<'ctx>(
                 return Ok(false);
             }
             let (base, per_chunk, chunk_size) = coll_eq_cost(l_coll);
-            ctx.add_per_item_jit_cost(base, per_chunk, chunk_size, n as u32)?;
-            // COA leaf-element colls are bulk-compared (the per-item cost above
-            // is the whole charge, mirroring JVM `equalCOA_*`). Composite-
-            // element colls (Coll/Tuple/Option/SigmaProp -- the `coll_eq_cost`
-            // default arm) recurse `eq_with_cost` per element, charging the
-            // nested MatchType + per-item, as JVM's generic `equalColls` does
-            // (DataValueComparer.scala:201-238).
+            // Both JVM coll-eq paths short-circuit the *per-item cost* on the
+            // first mismatch. `addSeqCost(costKind){ block }` charges
+            // `costKind.cost(i)`, where the block returns `i` = the number of
+            // items actually compared (CErgoTreeEvaluator.scala:412;
+            // `equalCOA_Prim`/`equalColls` both loop `while (i < len && okEqual)`
+            // and return `i`). So the per-item charge is on the *compared count*
+            // (first-mismatch index + 1, or the full length when equal), NOT the
+            // full operand length. (h28931 colleq cost divergence.)
             if is_coa_coll(l_coll) {
+                // COA leaf colls: JVM `equalCOA_*` bulk-compares and returns the
+                // compared count. Derive it from the first mismatch; the result
+                // stays the proven `lv == rv`.
+                let compared = coll_eq_compared_count(l_coll, r_coll);
+                ctx.add_per_item_jit_cost(base, per_chunk, chunk_size, compared)?;
                 Ok(lv == rv)
             } else {
+                // Composite element colls: JVM generic `equalColls` recurses per
+                // element (nested costs accrue during the loop) and charges
+                // `EQ_Coll` on the compared count *after* the loop.
                 let l_items = l_coll.as_vec();
                 let r_items = r_coll.as_vec();
+                let mut compared: u32 = 0;
+                let mut all_equal = true;
                 for (l, r) in l_items.iter().zip(r_items.iter()) {
+                    compared += 1;
                     if !eq_with_cost(l, r, ctx)? {
-                        return Ok(false);
+                        all_equal = false;
+                        break;
                     }
                 }
-                Ok(true)
+                ctx.add_per_item_jit_cost(base, per_chunk, chunk_size, compared)?;
+                Ok(all_equal)
             }
         }
 
@@ -281,6 +295,31 @@ fn is_coa_coll(coll: &CollKind<Value<'_>>) -> bool {
                 | SType::SPreHeader
                 | SType::SHeader
         ),
+    }
+}
+
+/// JVM coll-eq per-item cost short-circuits on the first mismatch: the count it
+/// charges is the number of items examined before the result is decided —
+/// `first_mismatch_index + 1`, or the full length when the operands are equal
+/// (`equalCOA_Prim`/`equalColls` return this `i`). Returns that count for a COA
+/// (leaf) collection pair already known to have equal length. Mixed collection
+/// kinds cannot occur for a COA element type (`Coll[Byte]` is always native,
+/// every other leaf type always wrapped with a matching element type); the `n`
+/// fallback keeps the prior full-length charge for that unreachable shape.
+fn coll_eq_compared_count(l: &CollKind<Value<'_>>, r: &CollKind<Value<'_>>) -> u32 {
+    let first_mismatch = match (l, r) {
+        (
+            CollKind::NativeColl(NativeColl::CollByte(la)),
+            CollKind::NativeColl(NativeColl::CollByte(ra)),
+        ) => la.iter().zip(ra.iter()).position(|(a, b)| a != b),
+        (CollKind::WrappedColl { items: li, .. }, CollKind::WrappedColl { items: ri, .. }) => {
+            li.iter().zip(ri.iter()).position(|(a, b)| a != b)
+        }
+        _ => None,
+    };
+    match first_mismatch {
+        Some(idx) => idx as u32 + 1,
+        None => l.len() as u32,
     }
 }
 
@@ -525,5 +564,79 @@ mod tests {
         let (res, cost) = case(dlog, cand);
         assert!(!res.unwrap());
         assert_eq!(cost, 2);
+    }
+
+    #[test]
+    fn coll_eq_coa_early_mismatch_charges_compared_count() {
+        // h28931 class: an equal-length COA eq that mismatches early charges the
+        // per-item cost on the *compared count* (first-mismatch index + 1), not
+        // the full length. Coll[Long]: base=15, per_chunk=2, cs=48.
+        //   mismatch @ idx 0  -> compared 1  -> chunks(1)=1  -> 1 + 15 + 2 = 18
+        //   mismatch @ idx 47 -> compared 48 -> chunks(48)=1 -> 1 + 15 + 2 = 18
+        //   mismatch @ idx 48 -> compared 49 -> chunks(49)=2 -> 1 + 15 + 4 = 20
+        // Pre-fix every case charged chunks(full len)=chunks(49)=2 -> 20, so the
+        // early-mismatch cases over-charged by 2.
+        let cost = |len: usize, mismatch_at: usize| -> (bool, u64) {
+            let ctx = force_any_val::<Context>();
+            let l: Arc<[Value<'_>]> =
+                Arc::from((0..len as i64).map(Value::Long).collect::<Vec<Value<'_>>>());
+            let mut r_vec: Vec<Value<'_>> = (0..len as i64).map(Value::Long).collect();
+            r_vec[mismatch_at] = Value::Long(-1); // -1 is never equal to its index
+            let r: Arc<[Value<'_>]> = Arc::from(r_vec);
+            let lv = Value::Coll(CollKind::WrappedColl {
+                elem_tpe: SType::SLong,
+                items: l,
+            });
+            let rv = Value::Coll(CollKind::WrappedColl {
+                elem_tpe: SType::SLong,
+                items: r,
+            });
+            let before = ctx.jit_cost_value();
+            let eq = eq_with_cost(&lv, &rv, &ctx).unwrap();
+            (eq, ctx.jit_cost_value() - before)
+        };
+        assert_eq!(cost(49, 0), (false, 18));
+        assert_eq!(cost(49, 47), (false, 18));
+        assert_eq!(cost(49, 48), (false, 20)); // last item: compared == full length
+    }
+
+    #[test]
+    fn coll_eq_generic_early_mismatch_charges_compared_count() {
+        // Composite-element coll: the generic `EQ_Coll` per-item cost is charged
+        // on the compared count *after* recursing, and recursion short-circuits
+        // at the first unequal element. Outer Coll[Coll[Int]] of length 3 whose
+        // element 0 already differs (elements 1 and 2 are never reached):
+        //   outer MatchType                                            = 1
+        //   recurse element 0: inner Coll[Int] [1,2,3] vs [9,2,3],
+        //     mismatch @ idx 0 -> compared 1 -> 15+2: MatchType 1 + 17 = 18
+        //   outer EQ_Coll on compared count 1 (base 10, per_chunk 2, cs 1):
+        //     chunks(1)=1 -> 10 + 2                                    = 12
+        //   total                                                      = 31
+        // Pre-fix charged EQ_Coll on the full length 3 (=16) BEFORE recursing,
+        // for a total of 35.
+        let ctx = force_any_val::<Context>();
+        let inner_l: Value<'_> = Value::Coll(CollKind::WrappedColl {
+            elem_tpe: SType::SInt,
+            items: Arc::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+        });
+        let inner_r: Value<'_> = Value::Coll(CollKind::WrappedColl {
+            elem_tpe: SType::SInt,
+            items: Arc::from(vec![Value::Int(9), Value::Int(2), Value::Int(3)]),
+        });
+        let other: Value<'_> = Value::Coll(CollKind::WrappedColl {
+            elem_tpe: SType::SInt,
+            items: Arc::from(vec![Value::Int(7), Value::Int(8), Value::Int(9)]),
+        });
+        let outer_l: Value<'_> = Value::Coll(CollKind::WrappedColl {
+            elem_tpe: SType::SColl(Arc::new(SType::SInt)),
+            items: Arc::from(vec![inner_l, other.clone(), other.clone()]),
+        });
+        let outer_r: Value<'_> = Value::Coll(CollKind::WrappedColl {
+            elem_tpe: SType::SColl(Arc::new(SType::SInt)),
+            items: Arc::from(vec![inner_r, other.clone(), other]),
+        });
+        let before = ctx.jit_cost_value();
+        assert!(!eq_with_cost(&outer_l, &outer_r, &ctx).unwrap());
+        assert_eq!(ctx.jit_cost_value() - before, 31);
     }
 }
