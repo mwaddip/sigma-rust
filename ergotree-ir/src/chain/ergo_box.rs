@@ -607,9 +607,15 @@ mod tests {
         let c = windowed_candidate(Some(tokens), NonMandatoryRegisters::empty());
         let bytes = c.sigma_serialize_bytes().unwrap();
         assert!(bytes.len() > ErgoBox::MAX_BOX_SIZE);
-        // a token read starts past the window: same verdict the count cap used
-        // to give, now by the JVM's mechanism
-        assert!(ErgoBoxCandidate::sigma_parse_bytes(&bytes).is_err());
+        // a token read starts past the window (rule 1014): rejected, AND surfaced as
+        // the typed soft-forkable position-limit error so the sized-`ErgoTree` degrade
+        // gate can tell it apart from a hard EOF — it degrades position-limit but
+        // rejects EOF. This is the reachable channel for a box-as-constant overrun.
+        let err = ErgoBoxCandidate::sigma_parse_bytes(&bytes).unwrap_err();
+        assert!(
+            err.is_position_limit_exceeded(),
+            "expected position-limit error, got {err:?}"
+        );
     }
 
     #[test]
