@@ -470,7 +470,12 @@ mod tests {
             suffix_head: proof.suffix_head.clone(),
             suffix_tail: proof.suffix_tail.clone(),
         };
-        assert!(proof.is_better_than(&disconnected_proof).unwrap());
+        assert_eq!(
+            proof.is_better_than(&disconnected_proof),
+            Err(ergo_nipopow::NipopowProofError::InvalidProofStructure(
+                "connections"
+            ))
+        );
     }
 
     #[test]

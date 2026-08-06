@@ -4,7 +4,7 @@ use ergo_chain_types::{
     },
     Header,
 };
-use num_traits::ToPrimitive;
+use num_traits::{ToPrimitive, Zero};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
 
@@ -82,6 +82,9 @@ impl NipopowAlgos {
     ///
     /// [`KMZ17`]: https://fc20.ifca.ai/preproceedings/74.pdf
     pub fn best_arg(&self, chain: &[&Header], m: u32) -> Result<usize, AutolykosPowSchemeError> {
+        if m == 0 {
+            return Err(AutolykosPowSchemeError::OutOfBounds);
+        }
         // Little helper struct for loop below
         struct Acc {
             level: u32,
@@ -125,10 +128,12 @@ impl NipopowAlgos {
         if !genesis_header {
             // Order of the secp256k1 elliptic curve
             let order = order_bigint();
+            let decoded_target = decode_compact_bits(header.n_bits);
+            if decoded_target.is_zero() {
+                return Err(AutolykosPowSchemeError::OutOfBounds);
+            }
             #[allow(clippy::unwrap_used)]
-            let required_target = (order / decode_compact_bits(header.n_bits))
-                .to_f64()
-                .unwrap();
+            let required_target = (order / decoded_target).to_f64().unwrap();
             #[allow(clippy::unwrap_used)]
             let real_target = self.pow_scheme.pow_hit(header)?.to_f64().unwrap();
             let level = required_target.log2() - real_target.log2();
@@ -172,22 +177,24 @@ impl NipopowAlgos {
         k: u32,
         m: u32,
     ) -> Result<NipopowProof, NipopowProofError> {
-        if k == 0 {
-            return Err(NipopowProofError::ZeroKParameter);
-        }
-        if chain.len() < ((k + m) as usize) {
+        NipopowProof::validate_parameters(m, k)?;
+        let k_usize = k as usize;
+        let m_usize = m as usize;
+        // Both values are at most MAX_NIPOPOW_PROOF_ELEMENTS, so this sum is
+        // bounded before it participates in arithmetic or slicing.
+        if chain.len() < k_usize + m_usize {
             return Err(NipopowProofError::ChainTooShort);
         }
         if chain[0].header.height != 1 {
             return Err(NipopowProofError::NonAnchoredChain);
         }
 
-        let suffix = chain[(chain.len() - (k as usize))..].to_vec();
+        let suffix = chain[(chain.len() - k_usize)..].to_vec();
         let suffix_head = suffix[0].clone();
         let suffix_tail: Vec<Header> = suffix[1..].iter().map(|p| p.header.clone()).collect();
         #[allow(clippy::unwrap_used)]
-        let max_level: i32 = if chain.len() > (k as usize) {
-            (chain[..(chain.len() - (k as usize))]
+        let max_level: i32 = if chain.len() > k_usize {
+            (chain[..(chain.len() - k_usize)]
                 .last()
                 .unwrap()
                 .interlinks
@@ -205,15 +212,15 @@ impl NipopowAlgos {
                 // C[:−k]{B:}↑µ
                 let mut sub_chain = vec![];
 
-                for p in &chain[..(chain.len() - (k as usize))] {
+                for p in &chain[..(chain.len() - k_usize)] {
                     let max_level = self.max_level_of(&p.header)?;
                     if max_level >= level && p.header.height >= anchoring_point.header.height {
                         sub_chain.push(p.clone());
                     }
                 }
 
-                if (m as usize) < sub_chain.len() {
-                    stack.push((sub_chain[sub_chain.len() - (m as usize)].clone(), level - 1));
+                if m_usize < sub_chain.len() {
+                    stack.push((sub_chain[sub_chain.len() - m_usize].clone(), level - 1));
                 } else {
                     stack.push((anchoring_point, level - 1));
                 }
@@ -263,9 +270,8 @@ impl NipopowAlgos {
         k: u32,
         m: u32,
     ) -> Result<NipopowProof, NipopowProofError> {
-        if k == 0 {
-            return Err(NipopowProofError::ZeroKParameter);
-        }
+        NipopowProof::validate_parameters(m, k)?;
+        // Both values are bounded before this sum participates in arithmetic.
         if reader.headers_height() < k + m {
             return Err(NipopowProofError::ChainTooShort);
         }
@@ -613,6 +619,20 @@ fn prove_prefix<R: PopowHeaderReader + ?Sized>(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "arbitrary")]
+    use proptest::{strategy::Strategy, strategy::ValueTree, test_runner::TestRunner};
+
+    #[cfg(feature = "arbitrary")]
+    fn arbitrary_header() -> Option<Header> {
+        use proptest::arbitrary::any;
+
+        let mut runner = TestRunner::default();
+        any::<Box<Header>>()
+            .new_tree(&mut runner)
+            .ok()
+            .map(|tree| *tree.current())
+    }
+
     fn blockid(byte: u8) -> BlockId {
         BlockId(Digest32::from([byte; 32]))
     }
@@ -648,5 +668,42 @@ mod tests {
     fn pack_interlinks_empty_returns_empty() {
         let packed = NipopowAlgos::pack_interlinks(vec![]);
         assert!(packed.is_empty());
+    }
+
+    #[test]
+    fn best_arg_rejects_zero_m_without_looping() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (sender, receiver) = mpsc::channel();
+        let _worker =
+            std::thread::spawn(move || sender.send(NipopowAlgos::default().best_arg(&[], 0)));
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Err(AutolykosPowSchemeError::OutOfBounds))
+        );
+    }
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn max_level_rejects_zero_decoded_target() -> Result<(), &'static str> {
+        let mut header = arbitrary_header().ok_or("Header strategy must produce a value")?;
+        header.height = 2;
+        header.n_bits = 0;
+
+        assert_eq!(
+            NipopowAlgos::default().max_level_of(&header),
+            Err(AutolykosPowSchemeError::OutOfBounds)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prove_rejects_parameter_sum_overflow_before_slicing() {
+        assert_eq!(
+            NipopowAlgos::default().prove(&[], u32::MAX, 1),
+            Err(NipopowProofError::InvalidKParameter(u32::MAX))
+        );
     }
 }
