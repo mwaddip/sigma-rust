@@ -131,7 +131,7 @@ impl NipopowAlgos {
                 .unwrap();
             #[allow(clippy::unwrap_used)]
             let real_target = self.pow_scheme.pow_hit(header)?.to_f64().unwrap();
-            let level = required_target.log2() - real_target.log2();
+            let level = log2_via_ln(required_target) - log2_via_ln(real_target);
             Ok(level as i32)
         } else {
             Ok(i32::MAX)
@@ -480,6 +480,16 @@ fn kv_to_leaf(kv: &([u8; 2], Vec<u8>)) -> Vec<u8> {
         .chain(kv.1.iter().copied())
         .collect()
 }
+
+/// Computes a base-2 logarithm using the JVM reference's arithmetic shape.
+///
+/// The reference uses `Math.log(x) / Math.log(2)`. This avoids the known
+/// integer-boundary divergence from `f64::log2`, but does not claim general
+/// bit-exact parity across math-library implementations.
+fn log2_via_ln(x: f64) -> f64 {
+    x.ln() / core::f64::consts::LN_2
+}
+
 // creates a MerkleTree from a key/value pair of extension section
 fn extension_merkletree(kv: &[([u8; 2], Vec<u8>)]) -> ergo_merkle_tree::MerkleTree {
     let leafs = kv
@@ -609,6 +619,23 @@ fn prove_prefix<R: PopowHeaderReader + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The secp256k1 order and order / 32 both round to exact powers of two
+    /// when converted to `f64`. OpenJDK 17 evaluates the corresponding level
+    /// as 4.999999999999972 and truncates it to 4, while native `f64::log2`
+    /// evaluates it as exactly 5.
+    #[test]
+    fn log2_via_ln_matches_jvm_boundary_vector() {
+        let required_target = 2f64.powi(256);
+        let real_target = 2f64.powi(251);
+
+        assert_eq!(log2_via_ln(real_target), 251.00000000000003);
+        let reference_level = log2_via_ln(required_target) - log2_via_ln(real_target);
+        assert_eq!(reference_level as i32, 4);
+
+        let native_level = required_target.log2() - real_target.log2();
+        assert_eq!(native_level as i32, 5);
+    }
 
     fn blockid(byte: u8) -> BlockId {
         BlockId(Digest32::from([byte; 32]))
