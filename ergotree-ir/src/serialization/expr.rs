@@ -84,6 +84,12 @@ impl Expr {
     /// Parse expression from byte stream. This function should be used instead of
     /// `sigma_parse` when tag byte is already read for look-ahead
     pub fn parse_with_tag<R: SigmaByteRead>(r: &mut R, tag: u8) -> Result<Self, SigmaParsingError> {
+        // `ValueSerializer.deserialize` (sigmastate v6.0.6 `ValueSerializer.scala:396-409`):
+        // every value is one nesting level, released only on success (`r.level =
+        // r.level - 1`, no `finally`), so a level a failed nested parse leaves behind
+        // stays on the reader.
+        let depth = r.level();
+        r.set_level(depth + 1)?;
         let res = if tag <= OpCode::LAST_CONSTANT_CODE.value() {
             let constant = Constant::parse_with_tag(r, tag)?;
             Ok(Expr::Const(constant))
@@ -203,7 +209,9 @@ impl Expr {
                 ))),
             }
         };
-        res
+        let expr = res?;
+        r.set_level(r.level().saturating_sub(1))?;
+        Ok(expr)
     }
 }
 
@@ -539,5 +547,42 @@ mod tests {
         let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
         let addr = encoder.parse_address_from_str(p2s_addr_str).unwrap();
         addr.script().unwrap().proposition().unwrap();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod depth_limit_tests {
+    //! JVM parity: every value is one nesting level (sigmastate v6.0.6
+    //! `ValueSerializer.deserialize`, `ValueSerializer.scala:396-409`), up to
+    //! `MaxTreeDepth` = 110 per reader.
+    use super::*;
+    use alloc::vec::Vec;
+
+    /// `LogicalNot^k(true)`: k values, then the constant's value and its data level.
+    fn logical_not_chain(k: usize) -> Vec<u8> {
+        let mut e: Expr = Expr::Const(true.into());
+        for _ in 0..k {
+            e = LogicalNot { input: e.into() }.into();
+        }
+        e.sigma_serialize_bytes().unwrap()
+    }
+
+    #[test]
+    fn nested_values_reach_exactly_max_tree_depth() {
+        // A debug build takes ~40 KB of stack per expression level here (a release
+        // build ~2 KB), more than the default test thread holds at this depth.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                assert!(Expr::sigma_parse_bytes(&logical_not_chain(108)).is_ok());
+                assert!(matches!(
+                    Expr::sigma_parse_bytes(&logical_not_chain(109)),
+                    Err(SigmaParsingError::DeserializeCallDepthExceeded(111))
+                ));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

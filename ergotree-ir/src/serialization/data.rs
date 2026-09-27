@@ -197,8 +197,14 @@ impl DataSerializer {
         r: &mut R,
     ) -> Result<Literal, SigmaParsingError> {
         // for reference see http://github.com/ScorexFoundation/sigmastate-interpreter/blob/25251c1313b0131835f92099f02cef8a5d932b5e/sigmastate/src/main/scala/sigmastate/serialization/DataSerializer.scala#L84-L84
+        // Every data value is one nesting level, released only on success
+        // (sigmastate v6.0.6 `CoreDataSerializer.deserialize`,
+        // `CoreDataSerializer.scala:94-148`, and the Box/Header arms of
+        // `DataSerializer.deserialize`, `DataSerializer.scala:31-49`).
+        let depth = r.level();
+        r.set_level(depth + 1)?;
         use SType::*;
-        Ok(match tpe {
+        let literal = match tpe {
             SBoolean => Literal::Boolean(r.get_u8()? != 0),
             SByte => Literal::Byte(r.get_i8()?),
             SShort => Literal::Short(r.get_i16()?),
@@ -311,6 +317,67 @@ impl DataSerializer {
                     TypeCode::SGLOBAL.value(),
                 ))
             }
-        })
+        };
+        r.set_level(r.level().saturating_sub(1))?;
+        Ok(literal)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod depth_limit_tests {
+    //! JVM parity: every data value is one nesting level (sigmastate v6.0.6
+    //! `CoreDataSerializer.deserialize`, `CoreDataSerializer.scala:94-148`), up to
+    //! `MaxTreeDepth` = 110 per reader. A constant read on its own, as a segregated
+    //! tree constant is, counts data levels only.
+    use crate::mir::constant::Constant;
+    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+    use alloc::vec::Vec;
+
+    /// `Coll^n[Byte]` constant (n ≥ 2): type `0c`×(n−2) `1a`, data `01`×(n−1) `00`.
+    fn coll_n_byte(n: usize) -> Vec<u8> {
+        let mut bytes = vec![0x0c; n - 2];
+        bytes.push(0x1a);
+        bytes.extend(vec![0x01; n - 1]);
+        bytes.push(0x00);
+        bytes
+    }
+
+    /// `Coll^n[Int]` constant (n ≥ 2) whose innermost `Coll[Int]` is empty or holds
+    /// one `Int` 0: type `0c`×(n−2) `1c`, data `01`×(n−1) then the innermost.
+    fn coll_n_int(n: usize, innermost_holds_an_int: bool) -> Vec<u8> {
+        let mut bytes = vec![0x0c; n - 2];
+        bytes.push(0x1c);
+        bytes.extend(vec![0x01; n - 1]);
+        if innermost_holds_an_int {
+            bytes.extend([0x01, 0x00]);
+        } else {
+            bytes.push(0x00);
+        }
+        bytes
+    }
+
+    fn depth_exceeded(r: Result<Constant, SigmaParsingError>) -> bool {
+        matches!(r, Err(SigmaParsingError::DeserializeCallDepthExceeded(111)))
+    }
+
+    #[test]
+    fn nested_coll_of_bytes_reaches_exactly_max_tree_depth() {
+        // Coll[Byte] reads its bytes in bulk, so Coll^n[Byte] takes n levels.
+        assert!(Constant::sigma_parse_bytes(&coll_n_byte(110)).is_ok());
+        assert!(depth_exceeded(Constant::sigma_parse_bytes(&coll_n_byte(
+            111
+        ))));
+    }
+
+    #[test]
+    fn each_element_of_a_non_byte_coll_is_one_more_level() {
+        // Coll[Int] reads each element as a data value: one level past the collection.
+        assert!(Constant::sigma_parse_bytes(&coll_n_int(109, true)).is_ok());
+        assert!(depth_exceeded(Constant::sigma_parse_bytes(&coll_n_int(
+            110, true
+        ))));
+        // An empty innermost Coll[Int] reads no element.
+        assert!(Constant::sigma_parse_bytes(&coll_n_int(110, false)).is_ok());
     }
 }

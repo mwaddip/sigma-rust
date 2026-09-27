@@ -81,7 +81,14 @@ impl SigmaSerializable for ContextExtension {
                     "Negative id of context extension variable: {idx}"
                 )));
             }
+            // The JVM reads the value with `getValue` (sigmastate v6.0.6
+            // `ContextExtension.scala:61`), so it takes one value level
+            // (`ValueSerializer.deserialize`, `ValueSerializer.scala:396-409`) on top of the
+            // constant's data levels, released only on success.
+            let depth = r.level();
+            r.set_level(depth + 1)?;
             let value = Constant::sigma_parse(r)?;
+            r.set_level(r.level().saturating_sub(1))?;
             value.tpe.check_v6_type()?;
             values.insert(idx as u8, value);
         }
@@ -339,5 +346,120 @@ mod parse_bounds_tests {
                 "key {key}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod depth_limit_tests {
+    //! JVM parity: the extension reads each value with `getValue` (sigmastate v6.0.6
+    //! `ContextExtension.scala:61`), so a value takes one value level
+    //! (`ValueSerializer.deserialize`, `ValueSerializer.scala:396-409`) on top of its
+    //! data levels, up to `MaxTreeDepth` = 110 per reader.
+    use super::*;
+    use crate::chain::ergo_box::box_value::BoxValue;
+    use crate::chain::ergo_box::{ErgoBox, NonMandatoryRegisters};
+    use crate::chain::tx_id::TxId;
+    use crate::ergo_tree::ErgoTree;
+    use crate::has_opcode::HasStaticOpCode;
+    use crate::serialization::op_code::OpCode;
+    use crate::serialization::sigma_byte_writer::SigmaByteWriter;
+    use crate::sigma_protocol::sigma_boolean::cand::Cand;
+    use alloc::vec::Vec;
+    use sigma_ser::vlq_encode::WriteSigmaVlqExt;
+
+    /// `Coll^n[Byte]` constant (n ≥ 2): type `0c`×(n−2) `1a`, data `01`×(n−1) `00`.
+    fn coll_n_byte(n: usize) -> Vec<u8> {
+        let mut bytes = vec![0x0c; n - 2];
+        bytes.push(0x1a);
+        bytes.extend(vec![0x01; n - 1]);
+        bytes.push(0x00);
+        bytes
+    }
+
+    /// A `SigmaProp` constant of `k` nested CANDs around `TrueProp`,
+    /// `CAND(CAND(… CAND(true, true) …, true), true)`.
+    fn cand_chain(k: usize) -> Vec<u8> {
+        let and = Cand::OP_CODE.value();
+        let t = OpCode::TRIVIAL_PROP_TRUE.value();
+        let mut bytes = vec![0x08]; // SSigmaProp type code
+        for _ in 0..k {
+            bytes.extend([and, 2]);
+        }
+        bytes.extend([t, t]);
+        bytes.extend(vec![t; k - 1]);
+        bytes
+    }
+
+    /// A `Box` constant whose tree is size-flagged (header `0x18`) and holds one
+    /// segregated constant `Coll^n[Byte]`, with a `SigmaProp(true)` root.
+    fn box_with_deep_tree_constant(n: usize) -> Constant {
+        let mut body = vec![1];
+        body.extend(coll_n_byte(n));
+        body.extend([0x08, OpCode::TRIVIAL_PROP_TRUE.value()]);
+        let mut tree_bytes = Vec::new();
+        {
+            let mut w = SigmaByteWriter::new(&mut tree_bytes, None);
+            w.put_u8(0x18).unwrap();
+            w.put_u32(body.len() as u32).unwrap();
+            body.iter().for_each(|b| w.put_u8(*b).unwrap());
+        }
+        // On its own reader the tree takes n levels, within the limit here.
+        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)));
+        ErgoBox::new(
+            BoxValue::SAFE_USER_MIN,
+            tree,
+            None,
+            NonMandatoryRegisters::empty(),
+            0,
+            TxId::zero(),
+            0,
+        )
+        .unwrap()
+        .into()
+    }
+
+    /// Wire bytes of the one-entry extension `{1: value}`.
+    fn extension(value: Vec<u8>) -> Vec<u8> {
+        let mut bytes = vec![1, 1];
+        bytes.extend(value);
+        bytes
+    }
+
+    fn depth_exceeded(r: Result<ContextExtension, SigmaParsingError>) -> bool {
+        matches!(r, Err(SigmaParsingError::DeserializeCallDepthExceeded(111)))
+    }
+
+    #[test]
+    fn extension_value_takes_a_value_level() {
+        // Coll^n[Byte]: a value level and n data levels.
+        assert!(ContextExtension::sigma_parse_bytes(&extension(coll_n_byte(109))).is_ok());
+        assert!(depth_exceeded(ContextExtension::sigma_parse_bytes(
+            &extension(coll_n_byte(110))
+        )));
+    }
+
+    #[test]
+    fn extension_sigma_prop_takes_a_value_level() {
+        // A value level, a data level, k CAND levels and the innermost leaf: k + 3.
+        assert!(ContextExtension::sigma_parse_bytes(&extension(cand_chain(107))).is_ok());
+        assert!(depth_exceeded(ContextExtension::sigma_parse_bytes(
+            &extension(cand_chain(108))
+        )));
+    }
+
+    #[test]
+    fn extension_box_tree_continues_from_the_box_level() {
+        // A value level and the Box data level (`DataSerializer.scala:31-49`), then the
+        // box's size-flagged tree on the same counter: its constant reaches 2 + n.
+        let ext_bytes = |n| {
+            let value = box_with_deep_tree_constant(n);
+            extension(value.sigma_serialize_bytes().unwrap())
+        };
+        assert!(ContextExtension::sigma_parse_bytes(&ext_bytes(108)).is_ok());
+        assert!(depth_exceeded(ContextExtension::sigma_parse_bytes(
+            &ext_bytes(109)
+        )));
     }
 }

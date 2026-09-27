@@ -193,9 +193,17 @@ impl ErgoTree {
                 r.get_bytes_into(buf.as_mut_slice())?;
                 let mut inner_r =
                     SigmaByteReader::new(Cursor::new(&mut buf[..]), ConstantStore::empty());
-                match inner_r.with_tree_version(header.version(), |inner_r| {
+                // sigmastate parses the tree on the box's own reader
+                // (`ErgoBoxCandidate.scala:194`), so that reader's one nesting level runs
+                // through it: the inner reader starts at the outer level and hands back the
+                // level it ends at, including any a failed (degraded) parse left behind, as
+                // sigmastate never restores them.
+                inner_r.set_level(r.level())?;
+                let res = inner_r.with_tree_version(header.version(), |inner_r| {
                     ErgoTree::sigma_parse_sized(inner_r, header, check_root_tpe)
-                }) {
+                });
+                r.set_level(inner_r.level())?;
+                match res {
                     Ok(parsed_tree) => Ok(parsed_tree.into()),
                     Err(error) => {
                         // Mirror sigma-state `ErgoTreeSerializer.deserializeErgoTree`:
@@ -204,10 +212,10 @@ impl ErgoTree {
                         // failure escapes the fallback and REJECTS instead of
                         // degrading to `Unparsed`: a non-soft-forkable data type code
                         // (rule 1009 `CheckSerializableTypeCode` does not fire), an
-                        // invalid EC point, EOF/truncation, or a VLQ overflow — the
-                        // JVM's `SerializerException` / `IllegalArgumentException` /
-                        // `IOException`. Position-limit (rule 1014) is the one
-                        // soft-forkable wire error and still degrades. See
+                        // invalid EC point, EOF/truncation, a VLQ overflow, or nesting
+                        // deeper than `MaxTreeDepth` — the JVM's `SerializerException` /
+                        // `IllegalArgumentException` / `IOException`. Position-limit (rule
+                        // 1014) is the one soft-forkable wire error and still degrades. See
                         // `SigmaParsingError::escapes_sized_tree_degrade`.
                         if let ErgoTreeError::SigmaParsingError(e) = &error {
                             if e.escapes_sized_tree_degrade() {
@@ -1176,6 +1184,8 @@ mod tests {
             SigmaParsingError::VlqEncode(VlqEncodingError::VlqDecodingFailed),
             // non-soft-forkable data type code (rule 1009, prior round)
             SigmaParsingError::NonSerializableTypeCode(104),
+            // nesting deeper than MaxTreeDepth (DeserializeCallDepthExceeded)
+            SigmaParsingError::DeserializeCallDepthExceeded(111),
         ];
         for e in &rejects {
             assert!(e.escapes_sized_tree_degrade(), "should reject: {e:?}");
@@ -1268,5 +1278,165 @@ mod tests {
                                       // no body bytes follow
         let result = ErgoTree::sigma_parse_bytes(&data);
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod depth_limit_tests {
+    //! JVM parity: sigmastate parses a box's tree on the box's own reader
+    //! (`ErgoBoxCandidate.scala:194`), so the reader's one nesting level
+    //! (`CoreByteReader.level`, capped at `MaxTreeDepth` = 110) runs through the tree
+    //! (sigmastate v6.0.6 `ErgoTreeSerializer.deserializeErgoTree`, `:141-215`). The
+    //! size-flagged `UnparsedErgoTree` fallback wraps only a `ValidationException`, and
+    //! `DeserializeCallDepthExceeded` is a `SerializerException`, so a too-deep tree
+    //! rejects. A degrade does not restore the level: whatever the failed parse reached
+    //! stays on the reader.
+    use super::*;
+    use crate::chain::ergo_box::box_value::BoxValue;
+    use crate::chain::ergo_box::{ErgoBox, NonMandatoryRegisters};
+    use crate::chain::tx_id::TxId;
+    use crate::serialization::op_code::OpCode;
+    use crate::serialization::sigma_byte_reader::from_bytes;
+
+    /// Output 0's tree in SANTA `Transaction.degraded_tree_depth_leak`: size-flagged v3,
+    /// `BoolToSigmaProp(LogicalNot^8(0xfd))`. Opcode 0xfd (`CollRotateRight`) has no
+    /// serializer, so the parse fails at level 10 and the tree degrades to `Unparsed`.
+    const DEGRADING_TREE: &str = "0b0ad1efefefefefefefeffd";
+
+    /// `Coll^n[Byte]` constant (n ≥ 2): type `0c`×(n−2) `1a`, data `01`×(n−1) `00`.
+    fn coll_n_byte(n: usize) -> Vec<u8> {
+        let mut bytes = vec![0x0c; n - 2];
+        bytes.push(0x1a);
+        bytes.extend(vec![0x01; n - 1]);
+        bytes.push(0x00);
+        bytes
+    }
+
+    /// Tree bytes: `header`, the VLQ body size, then `body`.
+    fn sized_tree(header: u8, body: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut w = SigmaByteWriter::new(&mut bytes, None);
+            w.put_u8(header).unwrap();
+            w.put_u32(body.len() as u32).unwrap();
+            body.iter().for_each(|b| w.put_u8(*b).unwrap());
+        }
+        bytes
+    }
+
+    /// Size-flagged, constant-segregated tree (header `0x18`) with the one segregated
+    /// constant `constant` and a `SigmaProp(true)` root.
+    fn tree_with_constant(constant: &[u8]) -> Vec<u8> {
+        let mut body = vec![1];
+        body.extend_from_slice(constant);
+        body.extend([0x08, OpCode::TRIVIAL_PROP_TRUE.value()]);
+        sized_tree(0x18, &body)
+    }
+
+    /// Serialized `Box` constant whose tree is `tree_bytes`.
+    fn box_constant(tree_bytes: &[u8]) -> Vec<u8> {
+        let b = ErgoBox::new(
+            BoxValue::SAFE_USER_MIN,
+            ErgoTree::sigma_parse_bytes(tree_bytes).unwrap(),
+            None,
+            NonMandatoryRegisters::empty(),
+            0,
+            TxId::zero(),
+            0,
+        )
+        .unwrap();
+        Constant::from(b).sigma_serialize_bytes().unwrap()
+    }
+
+    fn depth_exceeded<T>(r: Result<T, SigmaParsingError>) -> bool {
+        matches!(r, Err(SigmaParsingError::DeserializeCallDepthExceeded(111)))
+    }
+
+    #[test]
+    fn size_flagged_tree_too_deep_rejects_instead_of_degrading() {
+        // Constant 0 = true, root BoolToSigmaProp(LogicalNot^m(placeholder 0)): m + 2 levels.
+        let tree = |m: usize| {
+            let mut body = vec![1, 0x01, 0x01];
+            body.push(OpCode::BOOL_TO_SIGMA_PROP.value());
+            body.extend(vec![OpCode::LOGICAL_NOT.value(); m]);
+            body.extend([OpCode::CONSTANT_PLACEHOLDER.value(), 0]);
+            sized_tree(0x18, &body)
+        };
+        // A debug build takes ~40 KB of stack per expression level.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                assert!(matches!(
+                    ErgoTree::sigma_parse_bytes(&tree(108)),
+                    Ok(ErgoTree::Parsed(_))
+                ));
+                assert!(depth_exceeded(ErgoTree::sigma_parse_bytes(&tree(109))));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn size_flagged_tree_continues_from_the_outer_level() {
+        // At outer level 2 (a Box in an extension value), the constant reaches 2 + n.
+        let parse_at_level_2 = |n: usize| {
+            let bytes = tree_with_constant(&coll_n_byte(n));
+            let mut r = from_bytes(&bytes);
+            r.set_level(2).unwrap();
+            let tree = ErgoTree::sigma_parse(&mut r);
+            (tree, r.level())
+        };
+        let (tree, level) = parse_at_level_2(108);
+        assert!(matches!(tree, Ok(ErgoTree::Parsed(_))));
+        assert_eq!(level, 2, "a parsed tree releases every level it took");
+        assert!(depth_exceeded(parse_at_level_2(109).0));
+    }
+
+    #[test]
+    fn degraded_tree_leaves_its_levels_on_the_reader() {
+        // SANTA `Transaction.degraded_tree_depth_leak`: output 0's tree degrades at level
+        // 10, and output 1's R4 Coll^n[Byte] (a value level and n data levels) starts there.
+        let parse_tree_then_value = |n: usize| {
+            let mut bytes = base16::decode(DEGRADING_TREE.as_bytes()).unwrap();
+            bytes.extend(coll_n_byte(n));
+            let mut r = from_bytes(&bytes);
+            let tree = ErgoTree::sigma_parse(&mut r).unwrap();
+            assert!(matches!(tree, ErgoTree::Unparsed { .. }));
+            assert_eq!(r.level(), 10);
+            Expr::sigma_parse(&mut r)
+        };
+        assert!(parse_tree_then_value(99).is_ok());
+        assert!(depth_exceeded(parse_tree_then_value(100)));
+    }
+
+    #[test]
+    fn degrade_inside_a_parsed_tree_leaks_through_it() {
+        // A Box constant (one data level) whose own size-flagged tree degrades at 1 + 10,
+        // inside a size-flagged tree that parses: the Box data level is released
+        // (`r.level = r.level - 1`), the 10 leaked levels stay.
+        let degrading = base16::decode(DEGRADING_TREE.as_bytes()).unwrap();
+        let bytes = tree_with_constant(&box_constant(&degrading));
+        let mut r = from_bytes(&bytes);
+        assert!(matches!(
+            ErgoTree::sigma_parse(&mut r),
+            Ok(ErgoTree::Parsed(_))
+        ));
+        assert_eq!(r.level(), 10);
+    }
+
+    #[test]
+    fn depth_error_escapes_nested_size_flagged_trees() {
+        // A Box constant whose size-flagged tree holds Coll^110[Byte] (110 levels on its
+        // own reader) inside another size-flagged tree: 1 + 110 rejects both trees
+        // instead of degrading either.
+        let inner = tree_with_constant(&coll_n_byte(110));
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&inner),
+            Ok(ErgoTree::Parsed(_))
+        ));
+        let outer = tree_with_constant(&box_constant(&inner));
+        assert!(depth_exceeded(ErgoTree::sigma_parse_bytes(&outer)));
     }
 }
