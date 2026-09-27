@@ -316,13 +316,16 @@ fn run_parity_check_paths(tx_path: &Path, cost_path: &Path, hdr_path: &Path) -> 
                 }
             };
 
-            // Storage rent check: empty proof + age >= STORAGE_RENT_PERIOD -> cost=0
+            // Storage rent check: empty proof + age >= STORAGE_RENT_PERIOD -> StorageContractCost
             let input_box = &input_boxes[input_idx];
             let proof = &tx.inputs.as_slice()[input_idx].spending_proof.proof;
             if matches!(proof, ProofBytes::Empty)
                 && height >= input_box.creation_height + STORAGE_RENT_PERIOD
             {
-                // Storage rent spending, no script evaluation needed
+                // Storage rent spending, no script evaluation needed. It costs
+                // `StorageContractCost` = 50 block units (`ErgoInterpreter.scala:81`,
+                // `wallet/protocol/Constants.scala:21`), in JIT units here.
+                running_jit += 50 * 10;
                 continue;
             }
 
