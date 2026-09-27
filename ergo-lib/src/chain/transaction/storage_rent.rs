@@ -122,8 +122,9 @@ pub(crate) fn check_expired_box(
     let correct_creation_height = output.creation_height == current_height;
     // `output.value >= box.value - storageFee` (`:47`)
     let correct_out_value = output.value.as_i64() >= box_value.wrapping_sub(storage_fee);
-    // every register except R0 (value) and R3 (reference) preserved (`:50-52`);
-    // deferred like the reference's `lazy val`, since it reads every register
+    // every register except R0 (value) and R3 (reference) preserved, as
+    // `box.get(rId) == output.get(rId)` (`:50-52`); deferred like the reference's
+    // `lazy val`, since it reads every register
     let correct_registers = || {
         (0..=9u8)
             .map(RegisterId::try_from)
@@ -131,7 +132,19 @@ pub(crate) fn check_expired_box(
             .all(|id| {
                 id == RegisterId::R0
                     || id == RegisterId::R3
-                    || self_box.get_register(id) == output.get_register(id)
+                    || match id {
+                        // `ErgoBox.get` returns R4..R9 as stored: a Tuple expression
+                        // is its own node (sigmastate `values.scala:807`) and never
+                        // equals a Constant (`ConstantNode.equals`, `:356`), so the
+                        // stored register values are compared, not their Constants
+                        RegisterId::NonMandatoryRegisterId(reg) => {
+                            self_box.additional_registers.get(reg)
+                                == output.additional_registers.get(reg)
+                        }
+                        RegisterId::MandatoryRegisterId(_) => {
+                            self_box.get_register(id) == output.get_register(id)
+                        }
+                    }
             })
     };
     // `:54`
@@ -240,9 +253,15 @@ mod tests {
     use crate::wallet::signing::make_context;
     use ergotree_ir::chain::context_extension::ContextExtension;
     use ergotree_ir::chain::ergo_box::box_value::BoxValue;
+    use ergotree_ir::chain::ergo_box::{
+        ErgoBoxCandidate, EvaluatedTuple, NonMandatoryRegisterId, NonMandatoryRegisters,
+        RegisterValue,
+    };
+    use ergotree_ir::chain::tx_id::TxId;
     use ergotree_ir::ergo_tree::ErgoTree;
     use ergotree_ir::mir::constant::Constant;
     use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::tuple::Tuple;
     use sigma_test_util::force_any_val;
 
     /// Live mainnet storageFeeFactor, and `Parameters::default()`.
@@ -330,6 +349,82 @@ mod tests {
         let mut other_script = recreated(&b, 5_000_000_000 - fee, H);
         other_script.ergo_tree = ErgoTree::try_from(Expr::Const(Constant::from(false))).unwrap();
         assert!(!check_expired_box(&b, &other_script, 100, H, FACTOR));
+    }
+
+    // ---- check_expired_box: R4..R9 compared as `ErgoBox.get` values ----
+
+    /// `b` with its non-mandatory registers replaced by `regs`.
+    fn with_regs(b: &ErgoBox, regs: NonMandatoryRegisters) -> ErgoBox {
+        ErgoBox::new(
+            b.value,
+            b.ergo_tree.clone(),
+            b.tokens.clone(),
+            regs,
+            b.creation_height,
+            TxId::zero(),
+            0,
+        )
+        .unwrap()
+    }
+
+    /// The value `(1, 2)` as a register holding a Tuple expression, and as one
+    /// holding the equal tuple Constant.
+    fn tuple_expr_and_constant() -> (RegisterValue, RegisterValue) {
+        let tuple = Tuple::new(vec![Expr::Const(1i32.into()), Expr::Const(2i32.into())]).unwrap();
+        let et = EvaluatedTuple::new(tuple).unwrap();
+        let constant = et.as_constant().clone();
+        (
+            RegisterValue::ParsedTupleExpr(et),
+            RegisterValue::Parsed(constant),
+        )
+    }
+
+    #[test]
+    fn tuple_expr_register_is_not_preserved_by_the_equal_tuple_constant() {
+        // JVM: the input's R4 is a `Tuple` node, the output's a `ConstantNode`, and
+        // they are never equal (`values.scala:356`, `:807`).
+        let (expr, constant) = tuple_expr_and_constant();
+        let regs = NonMandatoryRegisters::try_from(vec![expr]).unwrap();
+        let self_box = with_regs(&expired_box(5_000_000_000, 0, 0), regs);
+        // Both encodings survive the wire: the input's R4 parses back as a Tuple
+        // expression ...
+        let self_box =
+            ErgoBox::sigma_parse_bytes(&self_box.sigma_serialize_bytes().unwrap()).unwrap();
+        assert!(matches!(
+            self_box
+                .additional_registers
+                .get(NonMandatoryRegisterId::R4),
+            Some(RegisterValue::ParsedTupleExpr(_))
+        ));
+        // ... and the output's as a Constant.
+        let mut out = recreated(&self_box, 5_000_000_000, H);
+        out.additional_registers = NonMandatoryRegisters::try_from(vec![constant]).unwrap();
+        let out_bytes = ErgoBoxCandidate::from(out).sigma_serialize_bytes().unwrap();
+        let out_candidate = ErgoBoxCandidate::sigma_parse_bytes(&out_bytes).unwrap();
+        let out = ErgoBox::from_box_candidate(&out_candidate, TxId::zero(), 0).unwrap();
+        assert!(matches!(
+            out.additional_registers.get(NonMandatoryRegisterId::R4),
+            Some(RegisterValue::Parsed(_))
+        ));
+        assert!(!check_expired_box(&self_box, &out, 100, H, FACTOR));
+    }
+
+    #[test]
+    fn same_tuple_expr_register_is_preserved() {
+        let (expr, _) = tuple_expr_and_constant();
+        let regs = NonMandatoryRegisters::try_from(vec![expr]).unwrap();
+        let self_box = with_regs(&expired_box(5_000_000_000, 0, 0), regs);
+        let out = recreated(&self_box, 5_000_000_000, H);
+        assert!(check_expired_box(&self_box, &out, 100, H, FACTOR));
+    }
+
+    #[test]
+    fn same_constant_register_is_preserved() {
+        let (_, constant) = tuple_expr_and_constant();
+        let regs = NonMandatoryRegisters::try_from(vec![constant]).unwrap();
+        let self_box = with_regs(&expired_box(5_000_000_000, 0, 0), regs);
+        let out = recreated(&self_box, 5_000_000_000, H);
+        assert!(check_expired_box(&self_box, &out, 100, H, FACTOR));
     }
 
     // ---- the gate and the fallback arms ----
