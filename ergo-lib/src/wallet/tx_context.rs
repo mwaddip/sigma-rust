@@ -7,10 +7,14 @@ use hashbrown::HashMap;
 use crate::chain::ergo_state_context::ErgoStateContext;
 use crate::chain::parameters::Parameters;
 use crate::chain::transaction::ergo_transaction::{ErgoTransaction, TxValidationError};
-use crate::chain::transaction::storage_rent::try_spend_storage_rent;
+use crate::chain::transaction::storage_rent::{
+    storage_rent_verdict, StorageRentVerdict, STORAGE_CONTRACT_COST,
+};
 use crate::chain::transaction::{Transaction, TransactionError};
 use crate::ergotree_ir::chain::ergo_box::BoxId;
+use ergotree_interpreter::eval::env::Env;
 use ergotree_interpreter::eval::reduce_to_crypto;
+use ergotree_interpreter::eval::ReductionDiagnosticInfo;
 use ergotree_interpreter::sigma_protocol::crypto_cost::estimate_crypto_cost;
 use ergotree_interpreter::sigma_protocol::verifier::{
     verify_signature, VerificationResult, VerifierError,
@@ -234,9 +238,38 @@ impl TransactionContext<Transaction> {
                 .get_input_box(&input.box_id)
                 .ok_or(TransactionContextError::InputBoxNotFound(input_idx))?;
 
-            // Storage rent bypass: consensus-exempted from script eval + sigma verification.
-            if try_spend_storage_rent(input, input_box, state_context, &context).is_some() {
-                continue;
+            // Storage-rent branch of `ErgoInterpreter.verify`, costed as in
+            // `ErgoTransaction.verifyInput` (`ErgoTransaction.scala:110-160`): the
+            // verdict first (`txScriptValidation`), then the running cost against the
+            // block limit (`bsBlockTransactionsCost`).
+            match storage_rent_verdict(&input.spending_proof.proof, state_context, &context) {
+                StorageRentVerdict::Verdict(false) => {
+                    return Err(TxValidationError::ReducedToFalse(
+                        input_idx,
+                        VerificationResult {
+                            result: false,
+                            cost: STORAGE_CONTRACT_COST,
+                            diag: ReductionDiagnosticInfo {
+                                env: Env::empty(),
+                                pretty_printed_expr: None,
+                            },
+                        },
+                    ));
+                }
+                StorageRentVerdict::Verdict(true) => {
+                    let remaining_block = max_block_cost.saturating_sub(total_cost);
+                    if STORAGE_CONTRACT_COST > remaining_block {
+                        return Err(TxValidationError::VerifierError(
+                            input_idx,
+                            VerifierError::EvalError(
+                                CostLimitExceeded(remaining_block.saturating_mul(10)).into(),
+                            ),
+                        ));
+                    }
+                    total_cost += STORAGE_CONTRACT_COST;
+                    continue;
+                }
+                StorageRentVerdict::NotApplicable => {}
             }
 
             // The JVM verifies each input with a FRESH interpreter whose
@@ -944,5 +977,86 @@ mod test {
                 other => panic!("Expected validation to fail, got {other:?}")
             }
         });
+    }
+
+    // ---- storage-rent cost in the JIT validate loop (eni only; upstream: #876) ----
+    mod storage_rent_cost {
+        use super::super::compute_tx_init_cost;
+        use crate::chain::parameters::Parameter;
+        use crate::chain::transaction::ergo_transaction::TxValidationError;
+        use crate::chain::transaction::storage_rent::test_support::{
+            expired_box, recreated, tx_spending,
+        };
+        use crate::chain::transaction::storage_rent::{STORAGE_CONTRACT_COST, STORAGE_PERIOD};
+
+        #[test]
+        fn rent_input_is_charged_storage_contract_cost() {
+            let b = expired_box(5_000_000_000, 0, 0);
+            let p = STORAGE_PERIOD;
+            let (tx_ctx, sc) = tx_spending(
+                std::slice::from_ref(&b),
+                &[Some(0)],
+                &[recreated(&b, 5_000_000_000, p)],
+                p,
+            );
+            let init = compute_tx_init_cost(
+                &tx_ctx.spending_tx,
+                tx_ctx.boxes_to_spend.as_slice(),
+                &sc.parameters,
+            );
+            assert_eq!(tx_ctx.validate(&sc).unwrap(), init + STORAGE_CONTRACT_COST);
+        }
+
+        #[test]
+        fn two_rent_inputs_cost_100() {
+            let (b0, b1) = (
+                expired_box(5_000_000_000, 0, 0),
+                expired_box(3_000_000_000, 0, 1),
+            );
+            let p = STORAGE_PERIOD;
+            let outs = [
+                recreated(&b0, 5_000_000_000, p),
+                recreated(&b1, 3_000_000_000, p),
+            ];
+            let (tx_ctx, sc) = tx_spending(&[b0, b1], &[Some(0), Some(1)], &outs, p);
+            let init = compute_tx_init_cost(
+                &tx_ctx.spending_tx,
+                tx_ctx.boxes_to_spend.as_slice(),
+                &sc.parameters,
+            );
+            assert_eq!(
+                tx_ctx.validate(&sc).unwrap(),
+                init + 2 * STORAGE_CONTRACT_COST
+            );
+        }
+
+        #[test]
+        fn rent_cost_is_checked_against_the_block_limit() {
+            let b = expired_box(5_000_000_000, 0, 0);
+            let p = STORAGE_PERIOD;
+            let (tx_ctx, mut sc) = tx_spending(
+                std::slice::from_ref(&b),
+                &[Some(0)],
+                &[recreated(&b, 5_000_000_000, p)],
+                p,
+            );
+            let init = compute_tx_init_cost(
+                &tx_ctx.spending_tx,
+                tx_ctx.boxes_to_spend.as_slice(),
+                &sc.parameters,
+            );
+            let limit = |sc: &mut crate::chain::ergo_state_context::ErgoStateContext, v: u64| {
+                sc.parameters
+                    .parameters_table
+                    .insert(Parameter::MaxBlockCost, v as i32);
+            };
+            limit(&mut sc, init + STORAGE_CONTRACT_COST);
+            assert_eq!(tx_ctx.validate(&sc).unwrap(), init + STORAGE_CONTRACT_COST);
+            limit(&mut sc, init + STORAGE_CONTRACT_COST - 1);
+            assert!(matches!(
+                tx_ctx.validate(&sc),
+                Err(TxValidationError::VerifierError(0, _))
+            ));
+        }
     }
 }
