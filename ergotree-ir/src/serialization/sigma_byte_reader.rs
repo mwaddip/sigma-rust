@@ -3,10 +3,15 @@ use crate::ergo_tree::ErgoTreeVersion;
 
 use super::constant_store::ConstantStore;
 use super::val_def_type_store::ValDefTypeStore;
+use super::SigmaParsingError;
 use core3::io::Cursor;
 use core3::io::Read;
 use core3::io::Seek;
 use sigma_ser::vlq_encode::ReadSigmaVlqExt;
+
+/// Maximum nesting level of value deserialization on one reader
+/// (sigmastate `SigmaConstants.MaxTreeDepth`, the default `maxTreeDepth` of every reader)
+pub const MAX_TREE_DEPTH: usize = 110;
 
 /// Implementation of SigmaByteRead
 pub struct SigmaByteReader<R> {
@@ -16,6 +21,7 @@ pub struct SigmaByteReader<R> {
     val_def_type_store: ValDefTypeStore,
     was_deserialize: bool,
     version: ErgoTreeVersion,
+    level: usize,
 }
 
 impl<R: Read> SigmaByteReader<R> {
@@ -28,6 +34,7 @@ impl<R: Read> SigmaByteReader<R> {
             val_def_type_store: ValDefTypeStore::new(),
             was_deserialize: false,
             version: ErgoTreeVersion::V0,
+            level: 0,
         }
     }
 
@@ -44,6 +51,7 @@ impl<R: Read> SigmaByteReader<R> {
             val_def_type_store: ValDefTypeStore::new(),
             was_deserialize: false,
             version: ErgoTreeVersion::MAX_SCRIPT_VERSION,
+            level: 0,
         }
     }
 }
@@ -94,6 +102,13 @@ pub trait SigmaByteRead: ReadSigmaVlqExt {
 
     /// Maximum ErgoTree version that deserializer can handle.
     fn tree_version(&self) -> ErgoTreeVersion;
+
+    /// Current nesting level of value deserialization (sigmastate `CoreByteReader.level`)
+    fn level(&self) -> usize;
+
+    /// Set the nesting level. A level above [`MAX_TREE_DEPTH`] fails the parse
+    /// (sigmastate v6.0.6 `CoreByteReader.level_=`, `CoreByteReader.scala:127-131`).
+    fn set_level(&mut self, level: usize) -> Result<(), SigmaParsingError>;
 }
 
 impl<R: Read> Read for SigmaByteReader<R> {
@@ -157,5 +172,37 @@ impl<R: ReadSigmaVlqExt> SigmaByteRead for SigmaByteReader<R> {
 
     fn tree_version(&self) -> ErgoTreeVersion {
         self.version
+    }
+
+    fn level(&self) -> usize {
+        self.level
+    }
+
+    fn set_level(&mut self, level: usize) -> Result<(), SigmaParsingError> {
+        if level > MAX_TREE_DEPTH {
+            return Err(SigmaParsingError::DeserializeCallDepthExceeded(level));
+        }
+        self.level = level;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod level_tests {
+    use super::*;
+
+    #[test]
+    fn set_level_allows_max_tree_depth_and_rejects_above() {
+        // `CoreByteReader.level_=` (`CoreByteReader.scala:127-131`): 110 is allowed,
+        // 111 fails and leaves the level where it was.
+        let mut r = from_bytes([0u8; 0]);
+        assert_eq!(r.level(), 0);
+        r.set_level(MAX_TREE_DEPTH).unwrap();
+        assert!(matches!(
+            r.set_level(MAX_TREE_DEPTH + 1),
+            Err(SigmaParsingError::DeserializeCallDepthExceeded(111))
+        ));
+        assert_eq!(r.level(), MAX_TREE_DEPTH);
     }
 }

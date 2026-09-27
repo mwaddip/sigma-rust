@@ -85,6 +85,14 @@ pub enum SigmaParsingError {
     /// Tuple items out of bounds
     #[error("Tuple items out of bounds: {0}")]
     TupleItemsOutOfBounds(usize),
+    /// Nested value deserialization went deeper than
+    /// [`MAX_TREE_DEPTH`](crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH)
+    /// (sigmastate `DeserializeCallDepthExceeded`)
+    #[error(
+        "nested value deserialization call depth({0}) exceeds allowed maximum {max}",
+        max = crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH
+    )]
+    DeserializeCallDepthExceeded(usize),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
