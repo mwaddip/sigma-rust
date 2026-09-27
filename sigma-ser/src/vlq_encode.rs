@@ -259,6 +259,19 @@ pub trait ReadSigmaVlqExt: io::Read + io::Seek + PositionLimit {
         Ok(slice[0])
     }
 
+    /// Read the next byte without consuming it and without the position-limit check,
+    /// as the reference impl's `peekByte` (`CoreByteReader.scala:41`): a peek past the
+    /// limit still reads (only the read after it trips rule 1014), and a peek past the
+    /// end of the input is an EOF error.
+    #[allow(clippy::seek_from_current)]
+    fn peek_u8(&mut self) -> Result<u8, io::Error> {
+        let position = self.seek(io::SeekFrom::Current(0))?;
+        let mut slice = [0u8; 1];
+        self.read_exact(&mut slice)?;
+        self.seek(io::SeekFrom::Start(position))?;
+        Ok(slice[0])
+    }
+
     /// Read and decode using VLQ and ZigZag value written with [`WriteSigmaVlqExt::put_i16`]
     fn get_i16(&mut self) -> Result<i16, VlqEncodingError> {
         Self::get_u64(self).and_then(|v| {
@@ -1206,6 +1219,23 @@ mod tests {
         r.get_bytes_into(&mut buf).unwrap();
         // the next chunk starts at 10 > 4
         assert!(r.get_bytes_into(&mut buf[..2]).is_err());
+    }
+
+    #[test]
+    fn peek_u8_skips_the_position_check_and_consumes_nothing() {
+        // the reference impl's `peekByte` is unchecked (`CoreByteReader.scala:41`)
+        let mut r = LimitedCursor::new(vec![7, 8]);
+        r.set_position_limit(0);
+        assert_eq!(r.get_u8().unwrap(), 7); // starts at 0 == limit
+        assert_eq!(r.peek_u8().unwrap(), 8); // at 1 > limit, the peek still reads
+        assert_eq!(r.peek_u8().unwrap(), 8); // and consumed nothing
+        assert_eq!(r.get_u8().unwrap_err().kind(), io::ErrorKind::InvalidData);
+        // past the end of the input a peek is an EOF error
+        let mut r = LimitedCursor::new(vec![]);
+        assert_eq!(
+            r.peek_u8().unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]

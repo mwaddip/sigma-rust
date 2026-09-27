@@ -90,7 +90,14 @@ impl Expr {
         // stays on the reader.
         let depth = r.level();
         r.set_level(depth + 1)?;
-        let res = if tag <= OpCode::LAST_CONSTANT_CODE.value() {
+        let expr = Self::parse_tagged(r, tag)?;
+        r.set_level(r.level().saturating_sub(1))?;
+        Ok(expr)
+    }
+
+    /// The value after its first byte `tag`, without its nesting level
+    fn parse_tagged<R: SigmaByteRead>(r: &mut R, tag: u8) -> Result<Self, SigmaParsingError> {
+        if tag <= OpCode::LAST_CONSTANT_CODE.value() {
             let constant = Constant::parse_with_tag(r, tag)?;
             Ok(Expr::Const(constant))
         } else {
@@ -204,10 +211,7 @@ impl Expr {
                     o.shift()
                 ))),
             }
-        };
-        let expr = res?;
-        r.set_level(r.level().saturating_sub(1))?;
-        Ok(expr)
+        }
     }
 }
 
@@ -306,8 +310,17 @@ impl SigmaSerializable for Expr {
     }
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
+        // `ValueSerializer.deserialize` (`ValueSerializer.scala:396-409`) takes the value's
+        // level, then peeks its first byte without the position check
+        // (`CoreByteReader.scala:41`): past the end of the input that is a hard error, not
+        // the soft rule-1014 one, and only the read after the peek checks the position.
+        let depth = r.level();
+        r.set_level(depth + 1)?;
+        r.peek_u8()?;
         let tag = r.get_u8()?;
-        Self::parse_with_tag(r, tag)
+        let expr = Self::parse_tagged(r, tag)?;
+        r.set_level(r.level().saturating_sub(1))?;
+        Ok(expr)
     }
 }
 

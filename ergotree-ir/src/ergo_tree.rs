@@ -233,6 +233,10 @@ impl ErgoTree {
     /// Reasonable limit for the number of constants allowed in the ErgoTree
     pub const MAX_CONSTANTS_COUNT: usize = 4096;
 
+    /// A tree's read window, from its first byte (sigmastate
+    /// `SigmaConstants.MaxPropositionBytes`, the `maxTreeSizeBytes` a box passes)
+    pub const MAX_PROPOSITION_SIZE: usize = 4096;
+
     /// get Expr out of ErgoTree
     pub fn proposition(&self) -> Result<Expr, ErgoTreeError> {
         let tree = self.parsed_tree()?.clone();
@@ -385,8 +389,15 @@ impl SigmaSerializable for ErgoTree {
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let start_pos = r.position()?;
+        // A tree reads within its own window, `MaxPropositionSize` from its first byte,
+        // which replaces the enclosing one (a box's `MaxBoxSize` window). The enclosing
+        // window comes back after the tree, parsed or degraded; sigmastate reads the header
+        // before that `try`/`finally`, so a failed header leaves the tree's window in place
+        // (`ErgoTreeSerializer.scala:141-145`, `:210-212`).
+        let previous_limit = r.position_limit();
+        r.set_position_limit(start_pos.saturating_add(ErgoTree::MAX_PROPOSITION_SIZE as u64));
         let header = ErgoTreeHeader::sigma_parse(r)?;
-        r.with_tree_version(header.version(), |r| {
+        let tree = r.with_tree_version(header.version(), |r| {
             // sigmastate parses the body on the box's own reader
             // (`ErgoBoxCandidate.scala:194`) and carries on wherever the body ends. The
             // declared size is read but only bounds the raw bytes of a tree that degrades
@@ -436,7 +447,9 @@ impl SigmaSerializable for ErgoTree {
                     })
                 }
             }
-        })
+        });
+        r.set_position_limit(previous_limit);
+        tree
     }
 }
 
@@ -1202,5 +1215,107 @@ mod declared_size_tests {
         assert!(matches!(parsed, ErgoTree::Unparsed { .. }));
         assert_eq!(r.constant_store().get(0).unwrap().tpe, SType::SInt);
         assert!(!r.was_deserialize());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tree_window_tests {
+    //! JVM parity: a tree reads within its own window, `MaxPropositionSize` (4096) bytes
+    //! from its first byte, which replaces the enclosing window (a box's `MaxBoxSize`) and
+    //! gives it back after the tree (sigmastate v6.0.6 `ErgoTreeSerializer.scala:141-145`,
+    //! `:210-212`). A read starting past the window trips rule 1014: a size-flagged tree
+    //! degrades, an unsized one is rejected. The first byte of a value is peeked without
+    //! the check (`CoreByteReader.scala:41`), so a value starting past the end of the input
+    //! is a hard error, never a degrade.
+    use super::*;
+    use crate::serialization::op_code::OpCode;
+    use crate::serialization::sigma_byte_reader::from_bytes;
+    use sigma_ser::vlq_encode::PositionLimit;
+
+    /// `Coll[Byte]` constant of `n` bytes: type `0e`, VLQ `n`, then `n` bytes.
+    fn coll_byte(n: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut w = SigmaByteWriter::new(&mut bytes, None);
+            w.put_u8(0x0e).unwrap();
+            w.put_u32(n).unwrap();
+            (0..n).for_each(|_| w.put_u8(1).unwrap());
+        }
+        bytes
+    }
+
+    /// `BoolToSigmaProp(EQ(left, right))`
+    fn eq_body(left: &[u8], right: &[u8]) -> Vec<u8> {
+        let mut body = vec![OpCode::BOOL_TO_SIGMA_PROP.value(), OpCode::EQ.value()];
+        body.extend_from_slice(left);
+        body.extend_from_slice(right);
+        body
+    }
+
+    /// Size-flagged v0 tree (`08`) declaring `declared` (a one-byte VLQ), then `body`.
+    fn sized(declared: u8, body: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0x08, declared];
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    #[test]
+    fn body_read_past_the_tree_window_degrades_a_sized_tree() {
+        // The left operand's bulk read starts at 7 and runs to 4097; the right operand's
+        // first read then starts past the window, which ends 4096 bytes after byte 0.
+        let bytes = sized(5, &eq_body(&coll_byte(4090), &coll_byte(1)));
+        let mut r = from_bytes(&bytes);
+        match ErgoTree::sigma_parse(&mut r).unwrap() {
+            ErgoTree::Unparsed { tree_bytes, error } => {
+                // the header, the size and the declared 5 bytes
+                assert_eq!(tree_bytes, bytes[..7]);
+                assert!(matches!(
+                    error,
+                    ErgoTreeError::SigmaParsingError(e) if e.is_position_limit_exceeded()
+                ));
+            }
+            ErgoTree::Parsed(_) => panic!("must degrade"),
+        }
+        assert_eq!(r.position().unwrap(), 7);
+        assert_eq!(
+            r.position_limit(),
+            u64::MAX,
+            "the enclosing window comes back"
+        );
+    }
+
+    #[test]
+    fn body_read_past_the_tree_window_rejects_an_unsized_tree() {
+        let mut bytes = vec![0x00];
+        bytes.extend(eq_body(&coll_byte(4090), &coll_byte(1)));
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&bytes),
+            Err(e) if e.is_position_limit_exceeded()
+        ));
+    }
+
+    #[test]
+    fn tree_window_replaces_the_enclosing_window_and_gives_it_back() {
+        // An enclosing window of 3 would stop this 24-byte tree; the tree reads under its
+        // own window instead, and the reader is back under the enclosing one afterwards.
+        let bytes = sized(22, &eq_body(&coll_byte(8), &coll_byte(8)));
+        let mut r = from_bytes(&bytes);
+        r.set_position_limit(3);
+        let tree = ErgoTree::sigma_parse(&mut r).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)));
+        assert_eq!(r.position_limit(), 3);
+    }
+
+    #[test]
+    fn value_past_the_end_of_input_rejects_even_past_the_window() {
+        // The right operand would start at 4097: past the window and past the end of the
+        // input. Its first byte is peeked unchecked, so this is the hard end-of-input
+        // error, not the soft window trip that would degrade the tree.
+        let bytes = sized(5, &eq_body(&coll_byte(4090), &[]));
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&bytes),
+            Err(SigmaParsingError::Io(_))
+        ));
     }
 }
