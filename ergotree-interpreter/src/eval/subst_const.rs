@@ -147,32 +147,42 @@ mod tests {
 
         let x: Value = try_eval_out_wo_ctx(&subst_const).unwrap();
         if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) = x {
-            let new_ergo_tree = ErgoTree::sigma_parse_bytes(&b.as_vec_u8()).unwrap();
-            assert_eq!(new_ergo_tree.constants_len().unwrap(), 1);
-            assert_eq!(new_ergo_tree.get_constant(0).unwrap().unwrap(), new.into());
+            // The template's root is not a `SigmaProp`, which a tree parse rejects (rule
+            // 1001) but SubstConstants never parses: compare the bytes with the tree built
+            // from the new constant.
+            let expected = ErgoTree::new(ErgoTreeHeader::v0(true), &Expr::Const(new.into()))
+                .unwrap()
+                .sigma_serialize_bytes()
+                .unwrap();
+            assert_eq!(b.as_vec_u8(), expected);
         } else {
             unreachable!();
         }
     }
 
-    fn test_3_substitutions(original: (i32, i32, i32), new: (i32, i32, i32)) {
-        let (o0, o1, o2) = original;
-        let (n0, n1, n2) = new;
-        let expr = Expr::BinOp(
+    /// `a + b * c`, three `Int` constants
+    fn plus_times(a: i32, b: i32, c: i32) -> Expr {
+        Expr::BinOp(
             BinOp {
                 kind: BinOpKind::Arith(ArithOp::Plus),
-                left: Box::new(Expr::Const(o0.into())),
+                left: Box::new(Expr::Const(a.into())),
                 right: Box::new(Expr::BinOp(
                     BinOp {
                         kind: BinOpKind::Arith(ArithOp::Multiply),
-                        left: Box::new(Expr::Const(o1.into())),
-                        right: Box::new(Expr::Const(o2.into())),
+                        left: Box::new(Expr::Const(b.into())),
+                        right: Box::new(Expr::Const(c.into())),
                     }
                     .into(),
                 )),
             }
             .into(),
-        );
+        )
+    }
+
+    fn test_3_substitutions(original: (i32, i32, i32), new: (i32, i32, i32)) {
+        let (o0, o1, o2) = original;
+        let (n0, n1, n2) = new;
+        let expr = plus_times(o0, o1, o2);
         let ergo_tree = ErgoTree::new(ErgoTreeHeader::v0(true), &expr).unwrap();
         assert_eq!(ergo_tree.constants_len().unwrap(), 3);
         assert_eq!(ergo_tree.get_constant(0).unwrap().unwrap(), o0.into());
@@ -197,11 +207,13 @@ mod tests {
 
         let x: Value = try_eval_out_wo_ctx(&subst_const).unwrap();
         if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) = x {
-            let new_ergo_tree = ErgoTree::sigma_parse_bytes(&b.as_vec_u8()).unwrap();
-            assert_eq!(new_ergo_tree.constants_len().unwrap(), 3);
-            assert_eq!(new_ergo_tree.get_constant(0).unwrap().unwrap(), n2.into());
-            assert_eq!(new_ergo_tree.get_constant(1).unwrap().unwrap(), n0.into());
-            assert_eq!(new_ergo_tree.get_constant(2).unwrap().unwrap(), n1.into());
+            // As in `test_single_substitution`. Positions [1, 2, 0] take n0, n1 and n2,
+            // so the constants become [n2, n0, n1].
+            let expected = ErgoTree::new(ErgoTreeHeader::v0(true), &plus_times(n2, n0, n1))
+                .unwrap()
+                .sigma_serialize_bytes()
+                .unwrap();
+            assert_eq!(b.as_vec_u8(), expected);
         } else {
             unreachable!();
         }

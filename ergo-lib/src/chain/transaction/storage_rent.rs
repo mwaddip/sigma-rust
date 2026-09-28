@@ -171,9 +171,13 @@ pub(crate) mod test_support {
 
     /// A small (≈45-byte, so no fee wrap) expired box with a trivially-true script.
     pub(crate) fn expired_box(nano: u64, creation_height: u32, index: u16) -> ErgoBox {
+        // `sigmaProp(true)` as a segregated constant: a root the JVM parses (rule 1001)
+        let root = Expr::Const(Constant::from(
+            ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp::new(true.into()),
+        ));
         ErgoBox::new(
             BoxValue::try_from(nano).unwrap(),
-            ErgoTree::try_from(Expr::Const(Constant::from(true))).unwrap(),
+            ErgoTree::new(ergotree_ir::ergo_tree::ErgoTreeHeader::v0(true), &root).unwrap(),
             None,
             NonMandatoryRegisters::empty(),
             creation_height,
