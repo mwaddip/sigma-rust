@@ -4,7 +4,8 @@ use super::SigmaSerializationError;
 use crate::ergo_tree::ErgoTreeVersion;
 use crate::serialization::SigmaSerializeResult;
 use crate::serialization::{
-    sigma_byte_reader::SigmaByteRead, SigmaParsingError, SigmaSerializable,
+    sigma_byte_reader::{SigmaByteRead, MAX_TREE_DEPTH},
+    SigmaParsingError, SigmaSerializable,
 };
 use crate::types::stuple;
 use crate::types::stype::SType;
@@ -181,13 +182,39 @@ impl SType {
         r: &mut R,
         c: u8,
     ) -> Result<Self, SigmaParsingError> {
+        Self::parse_with_tag_at_depth(r, c, 0)
+    }
+
+    /// Parse a type nested `depth` deep: 0 for the outermost type, one more for every
+    /// type nested in it (collection and option elements, tuple items, a function's
+    /// domain, range and type parameters).
+    ///
+    /// TEMPORARY BOUND, until a protocol-level limit is defined: a type nested deeper
+    /// than [`MAX_TREE_DEPTH`] fails with [`SigmaParsingError::TypeDepthExceeded`].
+    fn parse_at_depth<R: SigmaByteRead>(
+        r: &mut R,
+        depth: usize,
+    ) -> Result<Self, SigmaParsingError> {
+        if depth > MAX_TREE_DEPTH {
+            return Err(SigmaParsingError::TypeDepthExceeded(depth));
+        }
+        let c = r.get_u8()?;
+        Self::parse_with_tag_at_depth(r, c, depth)
+    }
+
+    fn parse_with_tag_at_depth<R: SigmaByteRead>(
+        r: &mut R,
+        c: u8,
+        depth: usize,
+    ) -> Result<Self, SigmaParsingError> {
         use SType::*;
+        let nested = depth + 1;
         if c < TypeCode::TUPLE_TYPECODE {
             let (container, embeddable) = TypeCode::unpack_tag(c)?;
             let mut stype = || {
                 embeddable
                     .map(|e| e.get_embeddable_type(r.tree_version()))
-                    .unwrap_or_else(|| SType::sigma_parse(r))
+                    .unwrap_or_else(|| SType::parse_at_depth(r, nested))
             };
             Ok(match container {
                 None => {
@@ -201,26 +228,30 @@ impl SType {
                 Some(TypeCode::NESTED_COLL) => SColl(SColl(stype()?.into()).into()),
                 Some(TypeCode::OPTION) => SOption(stype()?.into()),
                 Some(TypeCode::OPTION_COLL) => SOption(SColl(stype()?.into()).into()),
-                Some(TypeCode::TUPLE_PAIR1) => {
-                    STuple(stuple::STuple::pair(stype()?, SType::sigma_parse(r)?))
-                }
+                Some(TypeCode::TUPLE_PAIR1) => STuple(stuple::STuple::pair(
+                    stype()?,
+                    SType::parse_at_depth(r, nested)?,
+                )),
                 Some(TypeCode::TUPLE_PAIR2) if embeddable.is_none() => {
                     STuple(stuple::STuple::triple(
                         stype()?,
-                        SType::sigma_parse(r)?,
-                        SType::sigma_parse(r)?,
+                        SType::parse_at_depth(r, nested)?,
+                        SType::parse_at_depth(r, nested)?,
                     ))
                 }
                 Some(TypeCode::TUPLE_PAIR2) => {
                     let stype = stype()?;
-                    STuple(stuple::STuple::pair(SType::sigma_parse(r)?, stype))
+                    STuple(stuple::STuple::pair(
+                        SType::parse_at_depth(r, nested)?,
+                        stype,
+                    ))
                 }
                 Some(TypeCode::TUPLE_PAIR_SYMMETRIC) if embeddable.is_none() => {
                     STuple(stuple::STuple::quadruple(
                         stype()?,
-                        SType::sigma_parse(r)?,
-                        SType::sigma_parse(r)?,
-                        SType::sigma_parse(r)?,
+                        SType::parse_at_depth(r, nested)?,
+                        SType::parse_at_depth(r, nested)?,
+                        SType::parse_at_depth(r, nested)?,
                     ))
                 }
                 Some(TypeCode::TUPLE_PAIR_SYMMETRIC) => {
@@ -236,7 +267,7 @@ impl SType {
                     let len = r.get_u8()?;
                     let mut items = Vec::with_capacity(len as usize);
                     for _ in 0..len {
-                        items.push(SType::sigma_parse(r)?);
+                        items.push(SType::parse_at_depth(r, nested)?);
                     }
                     STuple(stuple::STuple::try_from(items)?)
                 }
@@ -255,13 +286,13 @@ impl SType {
                 TypeCode::SFUNC if r.tree_version() >= ErgoTreeVersion::V3 => {
                     let t_dom_len = r.get_u8()?;
                     let t_dom = (0..t_dom_len)
-                        .map(|_| SType::sigma_parse(r))
+                        .map(|_| SType::parse_at_depth(r, nested))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let t_range = SType::sigma_parse(r)?;
+                    let t_range = SType::parse_at_depth(r, nested)?;
                     let tpe_params_len = r.get_u8()?;
                     let mut tpe_params = vec![];
                     for _ in 0..tpe_params_len {
-                        let tpe = SType::sigma_parse(r)?;
+                        let tpe = SType::parse_at_depth(r, nested)?;
                         if let SType::STypeVar(typevar) = tpe {
                             tpe_params.push(STypeParam { ident: typevar });
                         } else {
@@ -500,8 +531,7 @@ impl SigmaSerializable for SType {
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         // for reference see http://github.com/ScorexFoundation/sigmastate-interpreter/blob/25251c1313b0131835f92099f02cef8a5d932b5e/sigmastate/src/main/scala/sigmastate/serialization/TypeSerializer.scala#L118-L118
-        let c = r.get_u8()?;
-        Self::parse_with_tag(r, c)
+        Self::parse_at_depth(r, 0)
     }
 }
 
@@ -659,5 +689,59 @@ mod tests {
             };
             roundtrip_new_feature(&SType::SFunc(sfunc), ErgoTreeVersion::V3);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod type_depth_tests {
+    use super::*;
+    use crate::serialization::sigma_byte_reader::from_bytes;
+
+    /// `Coll[...Coll[Byte]...]` with `Byte` nested `depth` deep
+    fn nested_colls(depth: usize) -> Vec<u8> {
+        let mut bytes = vec![TypeCode::COLL.value(); depth];
+        bytes.push(TypeCode::SBYTE.value());
+        bytes
+    }
+
+    #[test]
+    fn a_type_nested_max_tree_depth_deep_parses_and_one_deeper_fails() {
+        let expected = (0..MAX_TREE_DEPTH).fold(SType::SByte, |t, _| SType::SColl(t.into()));
+        assert_eq!(
+            SType::sigma_parse_bytes(&nested_colls(MAX_TREE_DEPTH)).unwrap(),
+            expected
+        );
+        assert!(matches!(
+            SType::sigma_parse_bytes(&nested_colls(MAX_TREE_DEPTH + 1)),
+            Err(SigmaParsingError::TypeDepthExceeded(111))
+        ));
+    }
+
+    #[test]
+    fn every_nested_type_is_one_level_deeper() {
+        // The nesting cycles through every kind that counts: a collection or option
+        // element, a tuple item, and a function's domain and range.
+        let wrappers: [fn(Vec<u8>) -> Vec<u8>; 6] = [
+            |t| [vec![0x0c], t].concat(),                         // Coll[t]
+            |t| [vec![0x24], t].concat(),                         // Option[t]
+            |t| [vec![0x3c], t, vec![0x04]].concat(),             // (t, Int)
+            |t| [vec![0x60, 0x03], t, vec![0x04, 0x04]].concat(), // (t, Int, Int)
+            |t| [vec![0x70, 0x01], t, vec![0x04, 0x00]].concat(), // (t) => Int
+            |t| [vec![0x70, 0x01, 0x04], t, vec![0x00]].concat(), // (Int) => t
+        ];
+        let nested = |depth: usize| {
+            (0..depth)
+                .rev()
+                .fold(vec![0x04], |t, level| wrappers[level % wrappers.len()](t))
+        };
+        let parse = |bytes: Vec<u8>| {
+            from_bytes(bytes).with_tree_version(ErgoTreeVersion::V3, SType::sigma_parse)
+        };
+        assert!(parse(nested(MAX_TREE_DEPTH)).is_ok());
+        assert!(matches!(
+            parse(nested(MAX_TREE_DEPTH + 1)),
+            Err(SigmaParsingError::TypeDepthExceeded(111))
+        ));
     }
 }

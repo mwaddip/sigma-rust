@@ -93,6 +93,14 @@ pub enum SigmaParsingError {
         max = crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH
     )]
     DeserializeCallDepthExceeded(usize),
+    /// A type nested deeper than
+    /// [`MAX_TREE_DEPTH`](crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH). A
+    /// temporary bound, until a protocol-level limit is defined.
+    #[error(
+        "type nesting depth({0}) exceeds allowed maximum {max}",
+        max = crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH
+    )]
+    TypeDepthExceeded(usize),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -186,7 +194,8 @@ impl SigmaParsingError {
     /// which is excluded so it still degrades. Soft-forkable type/opcode/method
     /// errors live in other variants and keep degrading (not listed here).
     /// Nesting deeper than `MaxTreeDepth` escapes too: the JVM's
-    /// `DeserializeCallDepthExceeded` is a `SerializerException`.
+    /// `DeserializeCallDepthExceeded` is a `SerializerException`. A type nested deeper
+    /// than `MaxTreeDepth` (the temporary `TypeDepthExceeded` bound) escapes as well.
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -198,6 +207,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::Io(_)
                 | SigmaParsingError::VlqEncode(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
+                | SigmaParsingError::TypeDepthExceeded(_)
         )
     }
 }
