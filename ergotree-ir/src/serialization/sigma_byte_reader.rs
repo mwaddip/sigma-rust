@@ -113,6 +113,13 @@ pub trait SigmaByteRead: ReadSigmaVlqExt {
     /// Set the nesting level. A level above [`MAX_TREE_DEPTH`] fails the parse
     /// (sigmastate v6.0.6 `CoreByteReader.level_=`, `CoreByteReader.scala:127-131`).
     fn set_level(&mut self, level: usize) -> Result<(), SigmaParsingError>;
+
+    /// Call `f` with the parse state a new reader over the same stream starts with:
+    /// level 0, empty constant and `ValDef` type stores, the deserialize flag clear
+    /// (sigmastate `SigmaByteReader`/`CoreByteReader` construction). The previous state
+    /// comes back after `f`, whatever `f` returned. Position, position limit, tree
+    /// version and placeholder substitution are left as they are.
+    fn with_fresh_parse_state<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T;
 }
 
 impl<R: Read> Read for SigmaByteReader<R> {
@@ -201,6 +208,19 @@ impl<R: ReadSigmaVlqExt> SigmaByteRead for SigmaByteReader<R> {
         self.level = level;
         Ok(())
     }
+
+    fn with_fresh_parse_state<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let constant_store = core::mem::replace(&mut self.constant_store, ConstantStore::empty());
+        let val_def_type_store = core::mem::take(&mut self.val_def_type_store);
+        let was_deserialize = core::mem::replace(&mut self.was_deserialize, false);
+        let level = core::mem::replace(&mut self.level, 0);
+        let res = f(self);
+        self.constant_store = constant_store;
+        self.val_def_type_store = val_def_type_store;
+        self.was_deserialize = was_deserialize;
+        self.level = level;
+        res
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +240,32 @@ mod level_tests {
             Err(SigmaParsingError::DeserializeCallDepthExceeded(111))
         ));
         assert_eq!(r.level(), MAX_TREE_DEPTH);
+    }
+
+    #[test]
+    fn with_fresh_parse_state_starts_fresh_and_restores() {
+        use crate::mir::val_def::ValId;
+        use crate::types::stype::SType;
+
+        let mut r = from_bytes([0u8; 0]);
+        r.set_level(7).unwrap();
+        r.set_constant_store(ConstantStore::new(vec![1i32.into()]));
+        r.val_def_type_store().insert(ValId(1), SType::SInt);
+        r.set_deserialize(true);
+        r.with_fresh_parse_state(|r| {
+            assert_eq!(r.level(), 0);
+            assert!(r.constant_store().get(0).is_none());
+            assert!(r.val_def_type_store().get(&ValId(1)).is_none());
+            assert!(!r.was_deserialize());
+            r.set_level(3).unwrap();
+            r.set_constant_store(ConstantStore::new(vec![true.into()]));
+            r.val_def_type_store().insert(ValId(2), SType::SBoolean);
+            r.set_deserialize(true);
+        });
+        assert_eq!(r.level(), 7);
+        assert_eq!(r.constant_store().get(0).unwrap().tpe, SType::SInt);
+        assert_eq!(r.val_def_type_store().get(&ValId(1)), Some(&SType::SInt));
+        assert!(r.val_def_type_store().get(&ValId(2)).is_none());
+        assert!(r.was_deserialize());
     }
 }
