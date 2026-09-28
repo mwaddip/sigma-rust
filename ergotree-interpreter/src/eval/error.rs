@@ -195,10 +195,12 @@ impl EvalError {
     /// True if the root cause is a cost-limit error. `enrich_err` wraps every
     /// error — including `CostError` — in `Spanned` at each eval node
     /// boundary, so a bare-variant match misses wrapped cost errors; this
-    /// unwraps the span layers before matching.
+    /// unwraps the span layers (and the deserialize-substitution carrier)
+    /// before matching.
     pub fn is_cost_error(&self) -> bool {
         match self {
             EvalError::CostError(_) => true,
+            EvalError::SubstDeserializeError(SubstDeserializeError::CostLimitExceeded(_)) => true,
             EvalError::Spanned(e) => e.error.is_cost_error(),
             EvalError::SpannedWithSource(e) => e.error.is_cost_error(),
             _ => false,
