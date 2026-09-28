@@ -477,7 +477,6 @@ mod tests {
         use crate::eval::test_util::try_eval_out;
         use ergotree_ir::chain::context::Context;
         use ergotree_ir::ergo_tree::ErgoTree;
-        use ergotree_ir::serialization::SigmaSerializable;
         use sigma_test_util::force_any_val;
         fn hx(s: &str) -> alloc::vec::Vec<u8> {
             (0..s.len())
@@ -515,7 +514,7 @@ mod tests {
             ), // Plus(Long 1, BigInt 2)
         ];
         for (hex, expected, expected_cost) in cases {
-            let tree = ErgoTree::sigma_parse_bytes(&hx(hex)).expect("parse tree");
+            let tree = ErgoTree::sigma_parse_bytes_lenient(&hx(hex)).expect("parse tree");
             let expr = tree.proposition().expect("tree proposition");
             let ctx = force_any_val::<Context>();
             let before = ctx.jit_cost_value();

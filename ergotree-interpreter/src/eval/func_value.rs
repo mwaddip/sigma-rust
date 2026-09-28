@@ -46,7 +46,6 @@ mod tests {
     use crate::eval::test_util::try_eval_out_with_version;
     use ergotree_ir::chain::context::Context;
     use ergotree_ir::ergo_tree::ErgoTree;
-    use ergotree_ir::serialization::SigmaSerializable;
     use sigma_test_util::force_any_val;
 
     fn hx(s: &str) -> alloc::vec::Vec<u8> {
@@ -63,7 +62,7 @@ mod tests {
     fn non_unary_lambda_rejects_at_closure_creation() {
         let ctx = force_any_val::<Context>();
         let run = |hex: &str| -> Result<i32, alloc::string::String> {
-            let tree = ErgoTree::sigma_parse_bytes(&hx(hex))
+            let tree = ErgoTree::sigma_parse_bytes_lenient(&hx(hex))
                 .map_err(|e| alloc::format!("parse: {e:?}"))?;
             let expr = tree
                 .proposition()
