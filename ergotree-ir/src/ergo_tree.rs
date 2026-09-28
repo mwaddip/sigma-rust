@@ -1211,6 +1211,8 @@ mod tests {
             SigmaParsingError::NonSerializableTypeCode(104),
             // nesting deeper than MaxTreeDepth (DeserializeCallDepthExceeded)
             SigmaParsingError::DeserializeCallDepthExceeded(111),
+            // a type nested deeper than MaxTreeDepth (the temporary type bound)
+            SigmaParsingError::TypeDepthExceeded(111),
         ];
         for e in &rejects {
             assert!(e.escapes_sized_tree_degrade(), "should reject: {e:?}");
@@ -1401,6 +1403,19 @@ mod depth_limit_tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn size_flagged_tree_with_a_too_deep_type_rejects_instead_of_degrading() {
+        // A constant of type Coll^111[Byte], an empty outer collection: its `Byte` is nested
+        // 111 deep, past the temporary type bound, which escapes the degrade as the value
+        // cap does.
+        let mut constant = vec![0x0c; 111];
+        constant.extend([0x02, 0x00]);
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&tree_with_constant(&constant)),
+            Err(SigmaParsingError::TypeDepthExceeded(111))
+        ));
     }
 
     #[test]
