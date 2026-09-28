@@ -255,7 +255,10 @@ mod tests {
     fn fixture(input_count: usize, reduction_count: usize) -> ReducedTransaction {
         let output = ErgoBoxCandidateBuilder::new(
             BoxValue::SAFE_USER_MIN,
-            ErgoTree::try_from(Expr::Const(Constant::from(true))).unwrap(),
+            ErgoTree::try_from(Expr::Const(Constant::from(
+                ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp::new(true.into()),
+            )))
+            .unwrap(),
             0,
         )
         .build()

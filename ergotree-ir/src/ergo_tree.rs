@@ -146,7 +146,8 @@ impl ErgoTree {
     /// `ErgoTreeSerializer.deserializeErgoTree` does (`ErgoTreeSerializer.scala:153-186`).
     /// The tree's constant store is in place for the root and the reader's previous store
     /// comes back only once the tree parsed; the deserialize flag comes back after the
-    /// root. A failed parse leaves both as the failure left them.
+    /// root. A failed parse leaves both as the failure left them. `check_root_tpe` is
+    /// sigmastate's `checkType` (rule 1001, `:173-175`), which every tree parse sets.
     fn sigma_parse_body<R: SigmaByteRead>(
         r: &mut R,
         header: ErgoTreeHeader,
@@ -510,20 +511,17 @@ impl SigmaSerializable for ErgoTree {
             // sigmastate parses the body on the box's own reader
             // (`ErgoBoxCandidate.scala:194`) and carries on wherever the body ends. The
             // declared size is read but only bounds the raw bytes of a tree that degrades
-            // (`ErgoTreeSerializer.scala:141-215`); the root type is checked for a
-            // size-flagged tree, whose failure degrades.
+            // (`ErgoTreeSerializer.scala:141-215`).
             let tree_size = if header.has_size() {
                 Some(r.get_u32()?)
             } else {
                 None
             };
             let body_pos = r.position()?;
-            match (
-                ErgoTree::sigma_parse_body(r, header, tree_size.is_some()),
-                tree_size,
-            ) {
+            match (ErgoTree::sigma_parse_body(r, header, true), tree_size) {
                 (Ok(parsed_tree), _) => Ok(parsed_tree.into()),
-                // An unsized tree cannot degrade: its body error rejects it (`:204-207`).
+                // An unsized tree cannot degrade: its body error rejects it (`:204-207`),
+                // a root that is not a `SigmaProp` included.
                 (Err(ErgoTreeError::SigmaParsingError(e)), None) => Err(e),
                 (Err(error), None) => Err(SigmaParsingError::Misc(error.to_string())),
                 (Err(error), Some(tree_size)) => {
@@ -1532,5 +1530,40 @@ mod tree_window_tests {
             ErgoTree::sigma_parse_bytes(&bytes),
             Err(SigmaParsingError::Io(_))
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod root_type_tests {
+    //! JVM parity: sigmastate checks every tree's root type (rule 1001
+    //! `CheckDeserializedScriptIsSigmaProp`, `ErgoTreeSerializer.scala:173-175`). A
+    //! size-flagged tree with a non-`SigmaProp` root degrades; an unsized one cannot, so
+    //! it is rejected (`:204-207`).
+    use super::*;
+
+    #[test]
+    fn unsized_tree_with_a_sigma_prop_root_parses() {
+        let tree = ErgoTree::sigma_parse_bytes(&[0x00, 0x08, 0xd3]).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)));
+    }
+
+    #[test]
+    fn unsized_tree_with_a_non_sigma_prop_root_rejects() {
+        // `Int` 1
+        assert!(ErgoTree::sigma_parse_bytes(&[0x00, 0x04, 0x02]).is_err());
+    }
+
+    #[test]
+    fn sized_tree_with_a_non_sigma_prop_root_degrades() {
+        let bytes = [0x08, 0x02, 0x04, 0x02];
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert_eq!(
+            tree,
+            ErgoTree::Unparsed {
+                tree_bytes: bytes.to_vec(),
+                error: ErgoTreeError::RootTpeError(SType::SInt),
+            }
+        );
     }
 }

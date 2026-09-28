@@ -553,7 +553,10 @@ mod tests {
     /// the MAX_BOX_SIZE window (123 minimal tokens fit for any tree <= 31
     /// bytes; 124 cross for any tree).
     fn small_tree() -> ErgoTree {
-        let tree = ErgoTree::try_from(Expr::Const(true.into())).unwrap();
+        // `sigmaProp(true)` as a segregated constant: a root the JVM parses (rule 1001)
+        let root =
+            Expr::Const(crate::sigma_protocol::sigma_boolean::SigmaProp::new(true.into()).into());
+        let tree = ErgoTree::new(crate::ergo_tree::ErgoTreeHeader::v0(true), &root).unwrap();
         assert!(tree.sigma_serialize_bytes().unwrap().len() <= 31);
         tree
     }
