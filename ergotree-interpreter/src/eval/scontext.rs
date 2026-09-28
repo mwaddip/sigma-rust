@@ -38,6 +38,15 @@ pub(crate) static SELF_BOX_INDEX_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| 
             obj
         )));
     }
+    // JVM bug compatibility: selfBoxIndex always returned -1 before JIT
+    // activation (v5.0). The bug was `eq` (reference equality) instead of
+    // `==` (value equality) in CostingDataContext.scala — a global impl
+    // bug, not per-script semantics. Fixed in v5.x for ALL scripts.
+    // Gate: activated_script_version (block level), NOT tree_version.
+    // See: https://github.com/ScorexFoundation/sigmastate-interpreter/issues/603
+    if ctx.activated_script_version() < ergotree_ir::ergo_tree::ErgoTreeVersion::V2 {
+        return Ok(Value::Int(-1));
+    }
     let box_index = ctx
         .inputs
         .iter()
@@ -132,9 +141,11 @@ pub(crate) static GET_VAR_FROM_INPUT_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, arg
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::eval::test_util::eval_out;
+    use core::cell::Cell;
     use ergo_chain_types::{Header, PreHeader};
     use ergotree_ir::chain::context::Context;
     use ergotree_ir::chain::ergo_box::ErgoBox;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
     use ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
     use ergotree_ir::mir::constant::TryExtractFrom;
     use ergotree_ir::mir::expr::Expr;
@@ -147,27 +158,71 @@ mod tests {
     use ergotree_ir::types::stype_param::STypeVar;
     use sigma_test_util::force_any_val;
 
-    fn make_ctx_inputs_includes_self_box() -> Context<'static> {
+    fn make_ctx_inputs_includes_self_box(
+        tree_version: ErgoTreeVersion,
+        pre_header_version: u8,
+    ) -> Context<'static> {
         let ctx = force_any_val::<Context>();
         let self_box = &*Box::leak(Box::new(force_any_val::<ErgoBox>()));
         let inputs = vec![&*Box::leak(Box::new(force_any_val::<ErgoBox>())), self_box]
             .try_into()
             .unwrap();
+        let pre_header = PreHeader {
+            version: pre_header_version,
+            ..ctx.pre_header.clone()
+        };
         Context {
             height: 0u32,
             self_box,
             inputs,
+            pre_header,
+            tree_version: Cell::new(tree_version),
             ..ctx
         }
     }
 
     #[test]
-    fn eval_self_box_index() {
+    fn eval_self_box_index_v2_tree() {
         let expr: Expr =
             PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
                 .unwrap()
                 .into();
-        let context = make_ctx_inputs_includes_self_box();
+        // V2 tree in v5+ block (pre_header.version=3 → activated=V2): real index.
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V2, 3);
+        assert_eq!(eval_out::<i32>(&expr, &context), 1);
+    }
+
+    #[test]
+    fn eval_self_box_index_v0_tree_pre_v5() {
+        let expr: Expr =
+            PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
+                .unwrap()
+                .into();
+        // V0 tree in pre-v5 block (pre_header.version=1 → activated=V0): -1.
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V0, 1);
+        assert_eq!(eval_out::<i32>(&expr, &context), -1);
+    }
+
+    #[test]
+    fn eval_self_box_index_v1_tree_pre_v5() {
+        let expr: Expr =
+            PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
+                .unwrap()
+                .into();
+        // V1 tree in pre-v5 block (pre_header.version=1 → activated=V0): -1.
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V1, 1);
+        assert_eq!(eval_out::<i32>(&expr, &context), -1);
+    }
+
+    #[test]
+    fn eval_self_box_index_v0_tree_v5_context() {
+        let expr: Expr =
+            PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
+                .unwrap()
+                .into();
+        // V0 tree in v5+ block (pre_header.version=3 → activated=V2): real index.
+        // JVM bug #603 was a global impl bug fixed in v5.x for ALL scripts.
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V0, 3);
         assert_eq!(eval_out::<i32>(&expr, &context), 1);
     }
 
