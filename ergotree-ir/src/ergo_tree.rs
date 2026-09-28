@@ -1132,6 +1132,23 @@ mod tests {
     }
 
     #[test]
+    fn function_type_code_before_v3_degrades_a_sized_tree_and_rejects_an_unsized_one() {
+        // One segregated constant of type code 112, `(Int) => Int` from ErgoTree v3. Before
+        // v3 sigmastate's `CheckTypeCode` rejects the code with a soft-forkable
+        // `ValidationException`: a v2 sized tree degrades to `Unparsed` and re-serializes
+        // byte-identical, a v0 unsized one is rejected.
+        let sized = base16::decode("1a080170010404007300").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&sized).unwrap();
+        assert!(matches!(tree, ErgoTree::Unparsed { .. }));
+        assert_eq!(tree.sigma_serialize_bytes().unwrap(), sized);
+        let unsized_tree = base16::decode("100170010404007300").unwrap();
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&unsized_tree),
+            Err(SigmaParsingError::InvalidTypeCode(112))
+        ));
+    }
+
+    #[test]
     fn sized_tree_rejects_malformed_ec_point_pk() {
         // SANTA wire reject vector `ErgoTree.sheader_constant_v3_malformed_pk_reject`:
         // a v3 + size + const-seg tree with one segregated `SHeader` constant whose
