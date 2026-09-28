@@ -302,7 +302,8 @@ mod tests {
         ctx: &Context<'static>,
     ) -> T {
         let tree_bytes = base16::decode(tree_hex).unwrap();
-        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        // Unsized (size-bit-cleared) fixture: restore the size slot + skip the root check.
+        let tree = ErgoTree::sigma_parse_bytes_lenient_from_unsized(&tree_bytes).unwrap();
         let expr = tree.proposition().unwrap();
         try_eval_out_with_version::<T>(&expr, ctx, 2, 2).unwrap()
     }

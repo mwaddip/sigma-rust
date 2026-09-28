@@ -643,7 +643,6 @@ mod tests {
             method_call::MethodCall,
             value::CollKind,
         },
-        serialization::SigmaSerializable,
         types::{savltree, stuple::STuple, stype::SType},
     };
     use proptest::prelude::*;
@@ -1068,7 +1067,7 @@ mod tests {
     #[test]
     fn eval_avl_insert_or_update_bad_proof_blessed_bytes() {
         let tree_bytes = base16::decode("130464fb2b77372d81da43ce2d72714aec79ae5fcac20a9aff426fe6afb476a6fbc02c04072001080e209a39c57d13039b50bfe4aa21b2c8238be31d133db1fbe4549b16d9b94338b4e20e08000000005a17a0320e8f0103fcbfd9e0c4781263bb161625674719024acef64654799a00c41cc148bdc4a891028f23c5ee24a49084f24812ee9dbcdc9e11974b05cad682c21e88fca866bc85cec4e67333f14133fce4ed7bbf147642b3e7b2b8324268ea6ded1be0caa2da237f000000005a17a000039594489172346c6b22ac52210d14be7fdb02f6ec52b9e525b3a9c77114374cd900ff0402dc641073000283013c0e0e8602730173027303").unwrap();
-        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let tree = ErgoTree::sigma_parse_bytes_lenient_from_unsized(&tree_bytes).unwrap();
         let expr = tree.proposition().unwrap();
         let ctx = force_any_val::<Context>();
         let res = try_eval_out_with_version::<Value>(&expr, &ctx, 3, 3).unwrap();
@@ -1869,7 +1868,7 @@ mod tests {
     #[test]
     fn eval_avl_contains_bad_proof_blessed_bytes() {
         let tree_bytes = base16::decode("120364fb2b77372d81da43ce2d72714aec79ae5fcac20a9aff426fe6afb476a6fbc02c04072001080e204466b8f1af03542b3c35de30426ec12b04fc34fa0a8c48289ec868e1e00aec550e8f0103a4950597f640451a7f628ea42ce4525890593c75ab337afd6315122093bc6474024466b8f1af03542b3c35de30426ec12b04fc34fa0a8c48289ec868e1e00aec558f23c5ee24a49084f24812ee9dbcdc9e11974b05cad682c21e88fca866bc85ce000000005a17a002ff03b44482bbfc4a39a5f1bd1a35c8699de6c3c51cc71376cea9fe4b85a283801397ff0401dc640973000273017302").unwrap();
-        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let tree = ErgoTree::sigma_parse_bytes_lenient_from_unsized(&tree_bytes).unwrap();
         let expr = tree.proposition().unwrap();
         let ctx = force_any_val::<Context>();
         let res = try_eval_out_with_version::<Value>(&expr, &ctx, 2, 2).unwrap();
@@ -1879,7 +1878,7 @@ mod tests {
     #[test]
     fn eval_avl_update_bad_proof_blessed_bytes() {
         let tree_bytes = base16::decode("120464fb2b77372d81da43ce2d72714aec79ae5fcac20a9aff426fe6afb476a6fbc02c04072001080e200b65ce5d0a76265e6734964bf1a7620da7c4fb2659a9047a7b61869a007fb1110e08000000005a17a04d0eb10103f9859bd9b3050c599dc5b506caa4f2367f286c60a9af489e69d797ab16b9cff5020b65ce5d0a76265e6734964bf1a7620da7c4fb2659a9047a7b61869a007fb1114466b8f1af03542b3c35de30426ec12b04fc34fa0a8c48289ec868e1e00aec55000000005a17a003000335abe8a6e6c7b70addacbec9267be07ec3ac1c5a196b4438261d4a84648739c6ff03b44482bbfc4a39a5f1bd1a35c8699de6c3c51cc71376cea9fe4b85a283801397ff0403dc640d73000283013c0e0e8602730173027303").unwrap();
-        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let tree = ErgoTree::sigma_parse_bytes_lenient_from_unsized(&tree_bytes).unwrap();
         let expr = tree.proposition().unwrap();
         let ctx = force_any_val::<Context>();
         let res = try_eval_out_with_version::<Value>(&expr, &ctx, 2, 2).unwrap();
@@ -1889,7 +1888,7 @@ mod tests {
     #[test]
     fn eval_avl_remove_bad_proof_blessed_bytes() {
         let tree_bytes = base16::decode("120364fb2b77372d81da43ce2d72714aec79ae5fcac20a9aff426fe6afb476a6fbc02c04072001080e208f23c5ee24a49084f24812ee9dbcdc9e11974b05cad682c21e88fca866bc85ce0eb90103a4950597f640451a7f628ea42ce4525890593c75ab337afd6315122093bc6474024466b8f1af03542b3c35de30426ec12b04fc34fa0a8c48289ec868e1e00aec558f23c5ee24a49084f24812ee9dbcdc9e11974b05cad682c21e88fca866bc85ce000000005a17a002ff02c4e67333f14133fce4ed7bbf147642b3e7b2b8324268ea6ded1be0caa2da237f000000005a17a000039594489172346c6b22ac52210d14be7fdb02f6ec52b9e525b3a9c77114374cd900ff0402dc640e73000283010e73017302").unwrap();
-        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let tree = ErgoTree::sigma_parse_bytes_lenient_from_unsized(&tree_bytes).unwrap();
         let expr = tree.proposition().unwrap();
         let ctx = force_any_val::<Context>();
         let res = try_eval_out_with_version::<Value>(&expr, &ctx, 2, 2).unwrap();
@@ -1899,7 +1898,7 @@ mod tests {
     #[test]
     fn eval_avl_insert_bad_proof_v3_blessed_bytes() {
         let tree_bytes = base16::decode("130464fb2b77372d81da43ce2d72714aec79ae5fcac20a9aff426fe6afb476a6fbc02c04072001080e209a39c57d13039b50bfe4aa21b2c8238be31d133db1fbe4549b16d9b94338b4e20e08000000005a17a0320e8f0103fcbfd9e0c4781263bb161625674719024acef64654799a00c41cc148bdc4a891028f23c5ee24a49084f24812ee9dbcdc9e11974b05cad682c21e88fca866bc85cec4e67333f14133fce4ed7bbf147642b3e7b2b8324268ea6ded1be0caa2da237f000000005a17a000039594489172346c6b22ac52210d14be7fdb02f6ec52b9e525b3a9c77114374cd900ff0402dc640c73000283013c0e0e8602730173027303").unwrap();
-        let tree = ErgoTree::sigma_parse_bytes(&tree_bytes).unwrap();
+        let tree = ErgoTree::sigma_parse_bytes_lenient_from_unsized(&tree_bytes).unwrap();
         let expr = tree.proposition().unwrap();
         let ctx = force_any_val::<Context>();
         let res = try_eval_out_with_version::<Value>(&expr, &ctx, 3, 3).unwrap();
