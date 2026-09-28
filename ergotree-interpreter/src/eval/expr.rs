@@ -17,9 +17,11 @@ impl Evaluable for Expr {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        //ctx.cost_accum.add_cost_of(self)?;
         let res = match self {
-            Expr::Const(c) => Ok(Value::from(c.v.clone())),
+            Expr::Const(c) => {
+                ctx.add_jit_cost(5)?; // Constant = Fixed(5)
+                Ok(Value::from(c.v.clone()))
+            }
             Expr::SubstConstants(op) => op.expr().eval(env, ctx),
             Expr::ByteArrayToLong(op) => op.expr().eval(env, ctx),
             Expr::ByteArrayToBigInt(op) => op.expr().eval(env, ctx),
@@ -32,8 +34,14 @@ impl Evaluable for Expr {
             Expr::MethodCall(op) => op.expr().eval(env, ctx),
             Expr::PropertyCall(op) => op.expr().eval(env, ctx),
             Expr::BinOp(op) => op.expr().eval(env, ctx),
-            Expr::Global => Ok(Value::Global),
-            Expr::Context => Ok(Value::Context),
+            Expr::Global => {
+                ctx.add_jit_cost(5)?; // Global = Fixed(5)
+                Ok(Value::Global)
+            }
+            Expr::Context => {
+                ctx.add_jit_cost(1)?; // Context = Fixed(1)
+                Ok(Value::Context)
+            }
             Expr::OptionGet(v) => v.expr().eval(env, ctx),
             Expr::Apply(op) => op.eval(env, ctx),
             Expr::FuncValue(op) => op.eval(env, ctx),
@@ -41,9 +49,25 @@ impl Evaluable for Expr {
             Expr::BlockValue(op) => op.expr().eval(env, ctx),
             Expr::SelectField(op) => op.eval(env, ctx),
             Expr::ExtractAmount(op) => op.eval(env, ctx),
-            Expr::ConstPlaceholder(_) => Err(EvalError::UnexpectedExpr(
-                ("ConstPlaceholder is not supported").to_string(),
-            )),
+            Expr::ConstPlaceholder(cp) => {
+                ctx.add_jit_cost(1)?; // ConstantPlaceholder = Fixed(1) per Scala
+                let constant = ctx
+                    .constants
+                    .and_then(|cs| cs.get(cp.id as usize))
+                    .ok_or_else(|| {
+                        EvalError::UnexpectedExpr(format!(
+                            "ConstPlaceholder({}): constant not found",
+                            cp.id
+                        ))
+                    })?;
+                // Mirror the JVM `ConstantPlaceholder.eval`, which `checkType`s the
+                // resolved constant (values.scala:412): an unsupported (arity != 2)
+                // tuple type is rejected ("Unsupported tuple type"). Placeholders are
+                // resolved here at eval on the lazy constants path, so the check
+                // happens here rather than at substitution.
+                crate::eval::check_value_type(&constant.tpe)?;
+                Ok(Value::from(constant.v.clone()))
+            }
             Expr::Collection(op) => op.eval(env, ctx),
             Expr::ValDef(_) => Err(EvalError::UnexpectedExpr(
                 ("ValDef should be evaluated in BlockValue").to_string(),
@@ -105,5 +129,75 @@ impl<T: Evaluable> Evaluable for Spanned<T> {
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
         self.expr.eval(env, ctx)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use ergotree_ir::mir::constant::Constant;
+    use ergotree_ir::mir::constant::ConstantPlaceholder;
+    use ergotree_ir::types::stype::SType;
+    use sigma_test_util::force_any_val;
+
+    #[test]
+    fn eval_const_placeholder_with_constants_in_ctx() {
+        let expr = Expr::ConstPlaceholder(ConstantPlaceholder {
+            id: 0,
+            tpe: SType::SInt,
+        });
+        let constants = vec![Constant::from(42i32)];
+        let base_ctx = force_any_val::<Context>();
+        let ctx = base_ctx.with_constants(&constants);
+        let mut env = Env::empty();
+        let result = expr.eval(&mut env, &ctx).unwrap();
+        assert_eq!(result, Value::from(42i32));
+    }
+
+    #[test]
+    fn eval_const_placeholder_without_constants_errors() {
+        let expr = Expr::ConstPlaceholder(ConstantPlaceholder {
+            id: 0,
+            tpe: SType::SInt,
+        });
+        let ctx = force_any_val::<Context>();
+        let mut env = Env::empty();
+        assert!(expr.eval(&mut env, &ctx).is_err());
+    }
+
+    #[test]
+    fn eval_const_placeholder_rejects_unsupported_tuple_type() {
+        use ergotree_ir::mir::constant::Literal;
+        use ergotree_ir::types::stuple::{STuple, TupleItems};
+
+        // The JVM `ConstantPlaceholder.eval` checkTypes the resolved constant
+        // (values.scala:412), so a segregated constant of an arity-3 tuple type
+        // is rejected ("Unsupported tuple type") rather than returned.
+        let triple_tpe = SType::STuple(STuple::triple(
+            SType::SBoolean,
+            SType::SBoolean,
+            SType::SBoolean,
+        ));
+        let triple = Constant {
+            tpe: triple_tpe.clone(),
+            v: Literal::Tup(
+                TupleItems::try_from(vec![
+                    Literal::Boolean(true),
+                    Literal::Boolean(true),
+                    Literal::Boolean(true),
+                ])
+                .unwrap(),
+            ),
+        };
+        let expr = Expr::ConstPlaceholder(ConstantPlaceholder {
+            id: 0,
+            tpe: triple_tpe,
+        });
+        let constants = vec![triple];
+        let base_ctx = force_any_val::<Context>();
+        let ctx = base_ctx.with_constants(&constants);
+        let mut env = Env::empty();
+        assert!(expr.eval(&mut env, &ctx).is_err());
     }
 }

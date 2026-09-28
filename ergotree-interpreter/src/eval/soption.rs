@@ -1,5 +1,4 @@
 use crate::eval::EvalError;
-use crate::eval::Evaluable;
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -17,6 +16,7 @@ pub fn map_eval<'ctx>(
     obj: Value<'ctx>,
     args: Vec<Value<'ctx>>,
 ) -> Result<Value<'ctx>, EvalError> {
+    ctx.add_jit_cost(20)?;
     let input_v = obj;
     let lambda_v = args
         .first()
@@ -30,19 +30,15 @@ pub fn map_eval<'ctx>(
             input_v_clone
         ))),
     }?;
+    // Bind and charge like every lambda invocation (AddToEnvironment, 5 JitCost).
     let mut lambda_call = |arg: Value<'ctx>| {
-        let func_arg = lambda.args.first().ok_or_else(|| {
-            EvalError::NotFound("map: lambda has empty arguments list".to_string())
-        })?;
-        let orig_val = env.get(func_arg.idx).cloned();
-        env.insert(func_arg.idx, arg);
-        let res = lambda.body.eval(env, ctx);
-        if let Some(orig_val) = orig_val {
-            env.insert(func_arg.idx, orig_val);
-        } else {
-            env.remove(&func_arg.idx);
-        }
-        res
+        crate::eval::eval_lambda_1arg(
+            lambda,
+            arg,
+            env,
+            ctx,
+            "map: lambda has empty arguments list",
+        )
     };
     let normalized_input_val: Option<Value> = match input_v {
         Value::Opt(opt) => Ok(opt.as_deref().cloned()),
@@ -65,6 +61,7 @@ pub fn filter_eval<'ctx>(
     obj: Value<'ctx>,
     args: Vec<Value<'ctx>>,
 ) -> Result<Value<'ctx>, EvalError> {
+    ctx.add_jit_cost(20)?;
     let input_v = obj;
     let lambda_v = args
         .first()
@@ -78,19 +75,15 @@ pub fn filter_eval<'ctx>(
             input_v_clone
         ))),
     }?;
+    // Bind and charge like every lambda invocation (AddToEnvironment, 5 JitCost).
     let mut predicate_call = |arg: Value<'ctx>| {
-        let func_arg = lambda.args.first().ok_or_else(|| {
-            EvalError::NotFound("filter: lambda has empty arguments list".to_string())
-        })?;
-        let orig_val = env.get(func_arg.idx).cloned();
-        env.insert(func_arg.idx, arg);
-        let res = lambda.body.eval(env, ctx);
-        if let Some(orig_val) = orig_val {
-            env.insert(func_arg.idx, orig_val);
-        } else {
-            env.remove(&func_arg.idx);
-        }
-        res
+        crate::eval::eval_lambda_1arg(
+            lambda,
+            arg,
+            env,
+            ctx,
+            "filter: lambda has empty arguments list",
+        )
     };
     let normalized_input_val: Option<Value> = match input_v {
         Value::Opt(opt) => Ok(opt.as_deref().cloned()),
@@ -375,5 +368,53 @@ mod tests {
             .into()],
         )
         .is_err());
+    }
+
+    // Every lambda invocation binds its argument at AddToEnvironment's cost (5
+    // JitCost), Option.map and Option.filter included. With a Const body (5), a
+    // Some input costs 10 more than None, which never invokes the lambda.
+    #[test]
+    fn map_and_filter_charge_add_to_env_per_invocation() {
+        use crate::eval::test_util::try_eval_out;
+        use ergotree_ir::chain::context::Context;
+        use ergotree_ir::types::smethod::SMethod;
+        use sigma_test_util::force_any_val;
+
+        let run = |method: SMethod, input: Option<i64>| -> u64 {
+            let ctx = force_any_val::<Context>();
+            let before = ctx.jit_cost_value();
+            let opt_const: Constant = input.into();
+            let expr: Expr = MethodCall::new(
+                opt_const.into(),
+                method,
+                vec![FuncValue::new(
+                    vec![FuncArg {
+                        idx: 1.into(),
+                        tpe: SType::SLong,
+                    }],
+                    Expr::Const(true.into()),
+                )
+                .into()],
+            )
+            .unwrap()
+            .into();
+            let _: Value = try_eval_out(&expr, &ctx).unwrap();
+            ctx.jit_cost_value() - before
+        };
+        let map = soption::MAP_METHOD.clone().with_concrete_types(
+            &[
+                (STypeVar::iv(), SType::SLong),
+                (STypeVar::ov(), SType::SBoolean),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+        );
+        let filter = soption::FILTER_METHOD
+            .clone()
+            .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect());
+        for method in [map, filter] {
+            assert_eq!(run(method.clone(), Some(1)) - run(method, None), 10);
+        }
     }
 }
