@@ -666,4 +666,23 @@ mod tests {
             }
         });
     }
+
+    #[test]
+    fn function_type_code_in_a_transaction_is_an_error_not_a_panic() {
+        // A transaction parses at ErgoTree version 0, where sigmastate's `CheckTypeCode`
+        // rejects type code 112 (the function type from v3): in a context extension value
+        // and in a register alike.
+        let sfunc = [0x70, 0x01, 0x04, 0x04, 0x00]; // (Int) => Int
+        let in_extension = tx_bytes(&[&[0x01, 0x01][..], &sfunc].concat(), &[0x00, 0x08, 0xd3]);
+        let mut in_register = tx_bytes(&[0], &[0x00, 0x08, 0xd3]);
+        in_register.pop(); // registers count
+        in_register.push(1);
+        in_register.extend_from_slice(&sfunc);
+        for tx in [in_extension, in_register] {
+            assert!(matches!(
+                Transaction::sigma_parse_bytes(&tx),
+                Err(SigmaParsingError::InvalidTypeCode(112))
+            ));
+        }
+    }
 }
