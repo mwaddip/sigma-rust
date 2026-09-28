@@ -134,7 +134,7 @@ mod tests {
         // the same AvlTree; cost follows the wire shape — the op form charges
         // the op's Fixed(15), the PropertyCall form the method machinery (20).
         let ctx = force_any_val::<Context>();
-        let tree = ErgoTree::sigma_parse_bytes(&[0x10, 0x00, 0xa6]).unwrap();
+        let tree = ErgoTree::sigma_parse_bytes_lenient(&[0x10, 0x00, 0xa6]).unwrap();
         let expr = tree.proposition().unwrap();
         let before = ctx.jit_cost_value();
         assert_eq!(
