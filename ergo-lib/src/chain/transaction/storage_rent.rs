@@ -211,8 +211,7 @@ pub(crate) mod test_support {
             .map(|(b, v)| {
                 let mut ext = ContextExtension::empty();
                 if let Some(idx) = v {
-                    ext.values
-                        .insert(STORAGE_EXTENSION_INDEX, Constant::from(*idx));
+                    ext.values.insert(STORAGE_EXTENSION_INDEX, (*idx).into());
                 }
                 Input::new(
                     b.box_id(),
@@ -440,7 +439,7 @@ mod tests {
     ) -> T {
         let mut ext = ContextExtension::empty();
         if let Some(c) = var127 {
-            ext.values.insert(STORAGE_EXTENSION_INDEX, c);
+            ext.values.insert(STORAGE_EXTENSION_INDEX, c.into());
         }
         let base = force_any_val::<Context>();
         let mut pre_header = base.pre_header.clone();

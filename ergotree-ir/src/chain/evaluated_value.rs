@@ -48,6 +48,12 @@ pub enum EvaluatedExpr {
     GroupGenerator,
 }
 
+impl<T: Into<Constant>> From<T> for EvaluatedValue {
+    fn from(c: T) -> Self {
+        EvaluatedValue::Constant(c.into())
+    }
+}
+
 impl EvaluatedValue {
     /// sigmastate's `CheckV6Type` (rule 1019, v6.0.6 `ValidationRules.scala:165-194`), which
     /// the register and extension parsers run on each value: no `Option`, `Header` or

@@ -71,6 +71,9 @@ pub unsafe fn context_extension_set_pair(
 ) -> Result<(), Error> {
     let constant = const_ptr_as_ref(constant_ptr, "constant_ptr")?;
     let context_extension = mut_ptr_as_mut(context_extension_ptr, "context_extension_ptr")?;
-    context_extension.0.values.insert(key, constant.0.clone());
+    context_extension
+        .0
+        .values
+        .insert(key, constant.0.clone().into());
     Ok(())
 }

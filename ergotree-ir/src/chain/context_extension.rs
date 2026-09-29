@@ -1,4 +1,5 @@
 //! ContextExtension type
+use crate::chain::evaluated_value::EvaluatedValue;
 use crate::mir::constant::Constant;
 use crate::mir::constant::TryExtractFromError;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
@@ -23,8 +24,9 @@ use super::IndexMap;
     serde(try_from = "IndexMap<String, String>")
 )]
 pub struct ContextExtension {
-    /// key-value pairs of variable id and it's value
-    pub values: IndexMap<u8, Constant>,
+    /// key-value pairs of variable id and its value: any value sigmastate's cast to
+    /// `EvaluatedValue` accepts (v6.0.6 `ContextExtension.scala:61`)
+    pub values: IndexMap<u8, EvaluatedValue>,
 }
 
 impl ContextExtension {
@@ -35,9 +37,13 @@ impl ContextExtension {
         }
     }
 
-    /// The value of variable `id` as a constant, or `None` when there is no such variable
+    /// The value of variable `id` as a constant (see [`EvaluatedValue::to_constant`]), or `None`
+    /// when there is no such variable
     pub fn get_constant(&self, id: u8) -> Result<Option<Constant>, TryExtractFromError> {
-        Ok(self.values.get(&id).cloned())
+        self.values
+            .get(&id)
+            .map(EvaluatedValue::to_constant)
+            .transpose()
     }
 }
 
@@ -125,7 +131,7 @@ impl SigmaSerializable for ContextExtension {
                 "Negative amount of context extension values: {values_count}"
             )));
         }
-        let mut values: IndexMap<u8, Constant> =
+        let mut values: IndexMap<u8, EvaluatedValue> =
             IndexMap::with_capacity_and_hasher(values_count as usize, Default::default());
         for _ in 0..values_count {
             let idx = r.get_i8()?;
@@ -134,15 +140,12 @@ impl SigmaSerializable for ContextExtension {
                     "Negative id of context extension variable: {idx}"
                 )));
             }
-            // The JVM reads the value with `getValue` (sigmastate v6.0.6
-            // `ContextExtension.scala:61`), so it takes one value level
-            // (`ValueSerializer.deserialize`, `ValueSerializer.scala:396-409`) on top of the
-            // constant's data levels, released only on success.
-            let depth = r.level();
-            r.set_level(depth + 1)?;
-            let value = Constant::sigma_parse(r)?;
-            r.set_level(r.level().saturating_sub(1))?;
-            value.tpe.check_v6_type()?;
+            // `getValue`, the cast to `EvaluatedValue`, then `CheckV6Type` (sigmastate v6.0.6
+            // `ContextExtension.scala:61-62`). `getValue` takes one value level
+            // (`ValueSerializer.scala:396-409`) on top of the value's own, released only on
+            // success.
+            let value = EvaluatedValue::sigma_parse(r)?;
+            value.check_v6_type()?;
             values.insert(idx as u8, value);
         }
         Ok(ContextExtension { values })
@@ -170,17 +173,19 @@ impl<H: BuildHasher> TryFrom<indexmap::IndexMap<String, String, H>> for ContextE
                         "context extension variable id {idx} is outside 0..=127"
                     )));
                 }
-                let constant_bytes = base16::decode(pair.1).map_err(|_| {
+                let value_bytes = base16::decode(pair.1).map_err(|_| {
                     ConstantParsingError(format!(
-                        "cannot decode base16 constant bytes from {0:?}",
+                        "cannot decode base16 value bytes from {0:?}",
                         pair.1
                     ))
                 })?;
+                // sigmastate's decoder is `getValue` and the cast, without `CheckV6Type`
+                // (v6.0.6 `JsonCodecs.scala:192-196`)
                 acc.insert(
                     idx,
-                    Constant::sigma_parse_bytes(&constant_bytes).map_err(|_| {
+                    EvaluatedValue::sigma_parse_bytes(&value_bytes).map_err(|_| {
                         ConstantParsingError(format!(
-                            "cannot deserialize constant bytes from {0:?}",
+                            "cannot deserialize value bytes from {0:?}",
                             pair.1
                         ))
                     })?,
@@ -232,7 +237,7 @@ mod arbitrary {
                 let pairs = constants
                     .into_iter()
                     .enumerate()
-                    .map(|(idx, c)| (idx as u8, c))
+                    .map(|(idx, c)| (idx as u8, c.into()))
                     .collect();
                 Self { values: pairs }
             })
@@ -278,7 +283,7 @@ mod tests {
     ) -> ContextExtension {
         let mut ext = ContextExtension::empty();
         for key in keys {
-            ext.values.insert(key, Constant::from(key as i32));
+            ext.values.insert(key, (key as i32).into());
         }
         ext
     }
@@ -301,7 +306,7 @@ mod tests {
         let mut extension = ContextExtension::empty();
         extension
             .values
-            .insert(0, Constant::from(UnsignedBigInt::from(1u32)));
+            .insert(0, UnsignedBigInt::from(1u32).into());
         sigma_serialize_roundtrip(&extension);
     }
 
@@ -394,7 +399,7 @@ mod tests {
         // in Scala 2.12 HAMT iteration order, not insertion/sorted order.
         let mut ext = ContextExtension::empty();
         for i in 0..6u8 {
-            ext.values.insert(i, Constant::from(i as i32));
+            ext.values.insert(i, (i as i32).into());
         }
         let bytes = ext.sigma_serialize_bytes().unwrap();
         // bytes[0] = count (6)
@@ -418,7 +423,7 @@ mod tests {
         // insertion order (Scala Map1-Map4 behavior).
         let mut ext = ContextExtension::empty();
         for i in 0..4u8 {
-            ext.values.insert(i, Constant::from(i as i32));
+            ext.values.insert(i, (i as i32).into());
         }
         let bytes = ext.sigma_serialize_bytes().unwrap();
         assert_eq!(bytes[0], 4);
@@ -533,14 +538,14 @@ mod parse_bounds_tests {
         bytes.extend_from_slice(&two);
         let ext = ContextExtension::sigma_parse_bytes(&bytes).unwrap();
         assert_eq!(ext.values.keys().copied().collect::<Vec<_>>(), vec![5, 7]);
-        assert_eq!(ext.values[&5], Constant::from(2i32));
+        assert_eq!(ext.values[&5], EvaluatedValue::from(2i32));
     }
 
     #[test]
     fn serialize_rejects_more_than_127_entries() {
         let mut ext = ContextExtension::empty();
         for id in 0..=127u8 {
-            ext.values.insert(id, Constant::from(1i32));
+            ext.values.insert(id, 1i32.into());
         }
         assert!(ext.sigma_serialize_bytes().is_err());
     }
@@ -549,7 +554,7 @@ mod parse_bounds_tests {
     fn serialize_accepts_127_entries() {
         let mut ext = ContextExtension::empty();
         for id in 0..127u8 {
-            ext.values.insert(id, Constant::from(1i32));
+            ext.values.insert(id, 1i32.into());
         }
         assert_eq!(ext.sigma_serialize_bytes().unwrap()[0], 127);
     }
@@ -682,5 +687,100 @@ mod depth_limit_tests {
         assert!(depth_exceeded(ContextExtension::sigma_parse_bytes(
             &ext_bytes(109)
         )));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod evaluated_value_tests {
+    //! JVM parity: sigmastate reads each context-extension value with `getValue` and casts it to
+    //! `EvaluatedValue` (v6.0.6 `ContextExtension.scala:61`), so a variable may hold a tuple, a
+    //! concrete collection or the group generator. The tx id hashes each value as `putValue`
+    //! writes it back (`:49`).
+    use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
+
+    /// One variable, id 0, holding `value`
+    fn extension_hex(value: &str) -> String {
+        format!("0100{value}")
+    }
+
+    fn parse(value: &str) -> Result<ContextExtension, SigmaParsingError> {
+        ContextExtension::sigma_parse_bytes(&base16::decode(&extension_hex(value)).unwrap())
+    }
+
+    #[test]
+    fn values_the_jvm_accepts_parse_and_are_written_back_as_it_writes_them() {
+        // SANTA `extension_evaluated_values` X1-X14, as in `chain::evaluated_value`'s tests
+        for (value, written_back) in [
+            ("7f", "0101"),
+            ("80", "0100"),
+            ("82", "82"),
+            ("83020404020404", "83020404020404"),
+            ("83020101010100", "850201"),
+            ("8302017f80", "850201"),
+            ("830001", "8500"),
+            ("850201", "850201"),
+            ("860204020404", "860204020404"),
+            ("8603040204040406", "8603040204040406"),
+            ("86010402", "86010402"),
+            ("8600", "8600"),
+            ("86020402a3", "86020402a3"),
+            ("830104a3", "830104a3"),
+        ] {
+            let ext = parse(value).unwrap();
+            assert_eq!(
+                base16::encode_lower(&ext.sigma_serialize_bytes().unwrap()),
+                extension_hex(written_back),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn values_the_jvm_rejects_do_not_parse() {
+        // SANTA N1-N6: a placeholder, `HEIGHT`, `Plus(1, 2)`, a tuple holding a placeholder, a
+        // tuple holding `GetVar[Int](0)` (rule 1019), and a tuple size of 0x80
+        let size_0x80 = format!("8680{}", "0402".repeat(128));
+        for value in [
+            "7300",
+            "a3",
+            "9a04020404",
+            "860204027300",
+            "86020402e30004",
+            &size_0x80,
+        ] {
+            assert!(parse(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn get_constant_derives_a_value_s_constant_form() {
+        // `Coll[Int](1, 2)`, against its constant encoding; `Tuple(1, HEIGHT)` has none
+        let coll = parse("83020404020404").unwrap();
+        assert_eq!(
+            coll.get_constant(0).unwrap(),
+            Some(Constant::sigma_parse_bytes(&base16::decode("10020204").unwrap()).unwrap())
+        );
+        assert!(parse("86020402a3").unwrap().get_constant(0).is_err());
+    }
+
+    #[test]
+    fn json_values_parse_as_the_jvm_decoder_reads_them() {
+        // sigmastate's JSON decoder is `getValue` and the cast, without rule 1019
+        // (`JsonCodecs.scala:192-196`): `TrueLeaf` and a tuple holding an `Option` pass,
+        // `HEIGHT` does not
+        let json = |value: &str| {
+            let mut map: IndexMap<String, String> = IndexMap::with_hasher(Default::default());
+            map.insert("0".to_string(), value.to_string());
+            ContextExtension::try_from(map)
+        };
+        assert_eq!(
+            json("7f").unwrap().get_constant(0).unwrap(),
+            Some(true.into())
+        );
+        assert!(json("86020402e30004").is_ok());
+        assert!(json("a3").is_err());
     }
 }
