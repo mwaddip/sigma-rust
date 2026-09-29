@@ -686,4 +686,31 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn deeply_nested_extension_value_types_end_in_an_error_on_a_2_mib_stack() {
+        // `Coll^n[Byte]` as a context extension value: type `0c`×(n−2) `1a`, then data
+        // nested all the way down (`01`×(n−1) `00`) or an empty outer collection (`00`). On
+        // a 2 MiB stack, a tokio worker's, each ends at the temporary type bound instead of
+        // running the recursive type parse out of stack.
+        for (n, nested_data) in [(2000, true), (2500, true), (2000, false), (2500, false)] {
+            let mut value = vec![0x0c; n - 2];
+            value.push(0x1a);
+            if nested_data {
+                value.extend(core::iter::repeat_n(0x01, n - 1));
+            }
+            value.push(0x00);
+            let tx = tx_bytes(&[&[0x01, 0x01][..], &value].concat(), &[0x00, 0x08, 0xd3]);
+            let res = std::thread::Builder::new()
+                .stack_size(2 << 20)
+                .spawn(move || Transaction::sigma_parse_bytes(&tx).err())
+                .unwrap()
+                .join()
+                .unwrap();
+            assert!(
+                matches!(res, Some(SigmaParsingError::TypeDepthExceeded(111))),
+                "n = {n}, nested data = {nested_data}: {res:?}"
+            );
+        }
+    }
 }
