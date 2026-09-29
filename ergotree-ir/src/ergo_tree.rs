@@ -5,7 +5,7 @@ use crate::mir::expr::Expr;
 use crate::serialization::SigmaSerializationError;
 use crate::serialization::SigmaSerializeResult;
 use crate::serialization::{
-    sigma_byte_reader::{SigmaByteRead, SigmaByteReader},
+    sigma_byte_reader::{SigmaByteRead, SigmaByteReader, MAX_ARRAY_LENGTH},
     sigma_byte_writer::{SigmaByteWrite, SigmaByteWriter},
     SigmaParsingError, SigmaSerializable,
 };
@@ -310,21 +310,24 @@ impl ErgoTree {
         ErgoTree::sigma_parse_bytes_lenient(&sized)
     }
 
+    /// sigmastate reads the count as `getUInt().toInt`: a count that wraps negative means no
+    /// constants, and `safeNewArray` refuses a positive one above `MaxArrayLength` before
+    /// reading any (`ErgoTreeSerializer.scala:250-261`)
     fn sigma_parse_constants<R: SigmaByteRead>(
         r: &mut R,
     ) -> Result<Vec<Constant>, SigmaParsingError> {
-        let constants_len = r.get_u32()?;
-        if constants_len as usize > ErgoTree::MAX_CONSTANTS_COUNT {
-            return Err(SigmaParsingError::ValueOutOfBounds(
-                "too many constants".to_string(),
-            ));
+        let constants_len = r.get_u32()? as i32;
+        if constants_len <= 0 {
+            return Ok(Vec::new());
         }
-        //dbg!(&constants_len);
-        let mut constants = Vec::with_capacity(constants_len as usize);
+        let constants_len = constants_len as usize;
+        if constants_len > MAX_ARRAY_LENGTH {
+            return Err(SigmaParsingError::ArrayLengthExceeded(constants_len));
+        }
+        // Grown as the constants are read: until then the count is only a claim
+        let mut constants = Vec::new();
         for _ in 0..constants_len {
-            let c = Constant::sigma_parse(r)?;
-            //dbg!(&c);
-            constants.push(c);
+            constants.push(Constant::sigma_parse(r)?);
         }
         Ok(constants)
     }
@@ -361,9 +364,6 @@ impl ErgoTree {
             })
         })
     }
-
-    /// Reasonable limit for the number of constants allowed in the ErgoTree
-    pub const MAX_CONSTANTS_COUNT: usize = 4096;
 
     /// A tree's read window, from its first byte (sigmastate
     /// `SigmaConstants.MaxPropositionBytes`, the `maxTreeSizeBytes` a box passes)
@@ -1806,5 +1806,77 @@ mod header_bits_tests {
         )
         .unwrap();
         assert_eq!(out, [0x38, 0x05, 0x01, 0x08, 0xd2, 0x73, 0x00]);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod constants_count_tests {
+    //! JVM parity: sigmastate reads a tree's constants count as `getUInt().toInt`. A count that
+    //! wraps negative means no constants, and `safeNewArray` refuses a count above
+    //! `MaxArrayLength` before reading a constant (`ErgoTreeSerializer.scala:250-261`).
+    use super::*;
+
+    #[test]
+    fn a_count_that_wraps_negative_means_no_constants() {
+        // SANTA `tree_count_wrap` #0-#2: 2^32 - 1 and 2^31 constants, sized and unsized, each
+        // written back with a count of 0
+        for (bytes, expected) in [
+            (
+                &[0x18, 0x07, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x08, 0xd3][..],
+                &[0x18, 0x03, 0x00, 0x08, 0xd3][..],
+            ),
+            (
+                &[0x18, 0x07, 0x80, 0x80, 0x80, 0x80, 0x08, 0x08, 0xd3],
+                &[0x18, 0x03, 0x00, 0x08, 0xd3],
+            ),
+            (
+                &[0x10, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x08, 0xd3],
+                &[0x10, 0x00, 0x08, 0xd3],
+            ),
+        ] {
+            let tree = ErgoTree::sigma_parse_bytes(bytes).unwrap();
+            assert_eq!(tree.constants_len().unwrap(), 0, "{bytes:02x?}");
+            assert_eq!(tree.sigma_serialize_bytes().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn a_count_above_max_array_length_rejects_a_sized_tree() {
+        // 100001 constants: refused before any is read, so the tree does not degrade
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&[0x18, 0x04, 0xa1, 0x8d, 0x06, 0x00]),
+            Err(SigmaParsingError::ArrayLengthExceeded(MAX_ARRAY_LENGTH + 1))
+        );
+    }
+
+    #[test]
+    fn a_count_at_max_array_length_reads_on() {
+        // 100000 constants of `true`: the reads cross the tree's window, which degrades it
+        let mut bytes = vec![0x18, 0x8b, 0x27, 0xa0, 0x8d, 0x06]; // size 5003, count 100000
+        bytes.extend([0x01, 0x01].repeat(2500));
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(tree, ErgoTree::Unparsed { .. }));
+    }
+
+    #[test]
+    fn a_count_that_runs_out_of_input_rejects_a_sized_tree() {
+        // 5000 constants, and the input ends inside the first: an end of input does not
+        // degrade
+        assert!(ErgoTree::sigma_parse_bytes(&[0x18, 0x03, 0x88, 0x27, 0x01]).is_err());
+    }
+
+    #[test]
+    fn substitute_constants_reads_a_count_that_wraps_negative_as_no_constants() {
+        // `ErgoTreeSerializer.substituteConstants` reads the constants the same way
+        // (`deserializeHeaderWithTreeBytes`) and writes the count it found
+        let out = ErgoTree::substitute_constants(
+            vec![0x18, 0x07, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x08, 0xd3],
+            &[],
+            &[],
+            ErgoTreeVersion::V3,
+        )
+        .unwrap();
+        assert_eq!(out, (vec![0x18, 0x03, 0x00, 0x08, 0xd3], 0));
     }
 }

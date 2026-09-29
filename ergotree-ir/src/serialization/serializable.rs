@@ -101,6 +101,14 @@ pub enum SigmaParsingError {
         max = crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH
     )]
     TypeDepthExceeded(usize),
+    /// A declared item count above
+    /// [`MAX_ARRAY_LENGTH`](crate::serialization::sigma_byte_reader::MAX_ARRAY_LENGTH):
+    /// sigmastate's `safeNewArray` refuses it before any item is read
+    #[error(
+        "cannot allocate an array of {0} items: the limit is {max}",
+        max = crate::serialization::sigma_byte_reader::MAX_ARRAY_LENGTH
+    )]
+    ArrayLengthExceeded(usize),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -195,7 +203,8 @@ impl SigmaParsingError {
     /// errors live in other variants and keep degrading (not listed here).
     /// Nesting deeper than `MaxTreeDepth` escapes too: the JVM's
     /// `DeserializeCallDepthExceeded` is a `SerializerException`. A type nested deeper
-    /// than `MaxTreeDepth` (the temporary `TypeDepthExceeded` bound) escapes as well.
+    /// than `MaxTreeDepth` (the temporary `TypeDepthExceeded` bound) escapes as well, and
+    /// so does a count above `MaxArrayLength` (`safeNewArray` throws a `RuntimeException`).
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -206,6 +215,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::ScorexParsingError(_)
                 | SigmaParsingError::Io(_)
                 | SigmaParsingError::VlqEncode(_)
+                | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)
         )
