@@ -520,58 +520,49 @@ mod tests {
 
     #[test]
     fn test_v6_types() {
-        // An output is written below tree version 3, as ergo's default version context writes
-        // it (`ErgoTransaction.scala:171-175`), where an `UnsignedBigInt` register has no
-        // encoding. A context extension value is written at the transaction's version, 3 for
-        // one built here; rule 1019 rejects it when the transaction is read
-        // (`ContextExtension.scala:61-62`).
-        let mut ergo_box = ErgoBoxCandidate {
+        // A transaction with an `UnsignedBigInt` register or context extension value builds, as
+        // in ergo, which has no check there; rule 1019 rejects either when the transaction is
+        // read (`ErgoBoxCandidate.scala:231-232`, `ContextExtension.scala:61-62`). Its output
+        // fails the output checks too (`tx_context`).
+        let output = ErgoBoxCandidate {
             value: BoxValue::SAFE_USER_MIN,
             ergo_tree: force_any_val::<ErgoTree>(),
             tokens: None,
+            additional_registers: NonMandatoryRegisters::empty(),
+            creation_height: 0,
+        };
+        let in_register = ErgoBoxCandidate {
             additional_registers: NonMandatoryRegisters::new([(
                 NonMandatoryRegisterId::R4,
                 Constant::from(UnsignedBigInt::from_str("0").unwrap()),
             )])
             .unwrap(),
-            creation_height: 0,
+            ..output.clone()
         };
-        assert!(matches!(
-            Transaction::new_from_vec(
+        let in_extension = ContextExtension {
+            values: IndexMap::from_iter([(0, UnsignedBigInt::from_str("0").unwrap().into())]),
+        };
+        for (extension, output) in [
+            (ContextExtension::empty(), in_register),
+            (in_extension, output),
+        ] {
+            let tx = Transaction::new_from_vec(
                 vec![Input::new(
                     BoxId::zero(),
                     ProverResult {
                         proof: ProofBytes::Empty,
-                        extension: ContextExtension::empty(),
+                        extension,
                     },
                 )],
                 vec![],
-                vec![ergo_box.clone()],
-            ),
-            Err(TransactionError::SigmaSerializationError(_))
-        ));
-        ergo_box.additional_registers = NonMandatoryRegisters::empty();
-        let tx = Transaction::new_from_vec(
-            vec![Input::new(
-                BoxId::zero(),
-                ProverResult {
-                    proof: ProofBytes::Empty,
-                    extension: ContextExtension {
-                        values: IndexMap::from_iter([(
-                            0,
-                            UnsignedBigInt::from_str("0").unwrap().into(),
-                        )]),
-                    },
-                },
-            )],
-            vec![],
-            vec![ergo_box.clone()],
-        )
-        .unwrap();
-        assert!(matches!(
-            Transaction::sigma_parse_bytes(&tx.sigma_serialize_bytes().unwrap()),
-            Err(SigmaParsingError::V6TypeError)
-        ));
+                vec![output],
+            )
+            .unwrap();
+            assert!(matches!(
+                Transaction::sigma_parse_bytes(&tx.sigma_serialize_bytes().unwrap()),
+                Err(SigmaParsingError::V6TypeError)
+            ));
+        }
     }
 
     #[test]
@@ -836,13 +827,15 @@ mod tests {
     }
 
     #[test]
-    fn an_output_the_default_context_cannot_write_fails_the_transaction() {
-        // ergo writes an output under its default version context (1, 1), where a function
-        // type has no encoding (`TypeSerializer.scala:111`), and the output checks throw
-        // (`ErgoTransaction.scala:171-175`): an output holding SANTA C2's twin as R4 fails the
-        // transaction read at version 3 as well
+    fn an_output_the_default_context_cannot_write_is_read() {
+        // SANTA `evaluated-values-spend` entry 46: C2's twin as the output's R4. ergo reads the
+        // transaction at (3, 3); its output checks then write the output under the default
+        // context (1, 1), where a function type has no encoding (`TypeSerializer.scala:111`), and
+        // fail it (`ErgoTransaction.scala:171-175`). Here too it reads, and the output's bytes
+        // fail (`tx_context`'s output checks).
         let tx = tx_with_r4(&[0x83, 0x00, 0x70, 0x01, 0x04, 0x04, 0x00]);
-        assert!(parse_at(&tx, ErgoTreeVersion::V3).is_err());
+        let read = parse_at(&tx, ErgoTreeVersion::V3).unwrap();
+        assert!(read.outputs.first().bytes().is_err());
         assert!(matches!(
             parse_at(&tx, ErgoTreeVersion::V0),
             Err(SigmaParsingError::InvalidTypeCode(112))
