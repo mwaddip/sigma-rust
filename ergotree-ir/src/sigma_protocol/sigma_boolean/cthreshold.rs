@@ -117,15 +117,77 @@ impl SigmaSerializable for Cthreshold {
     }
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
-        let k = r.get_u16()? as u8; // safe because we serialized u8 as u16
+        let k = r.get_u16()?;
         let items_count = r.get_u16()?;
         let mut items = Vec::new();
         for _ in 0..items_count {
             items.push(SigmaBoolean::sigma_parse(r)?);
         }
+        // sigmastate's CTHRESHOLD requires 0 <= k <= n <= 255 once the children are read
+        // (`SigmaBoolean.scala:223`)
+        if items.len() > 255 || usize::from(k) > items.len() {
+            return Err(SigmaParsingError::CthresholdOutOfBounds(k, items.len()));
+        }
         Ok(Cthreshold {
-            k,
+            k: k as u8,
             children: items.try_into()?,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    //! JVM parity: sigmastate reads CTHRESHOLD's `k` and number of children with `getUShort`,
+    //! reads the children, then requires `0 <= k <= n <= 255` (`SigmaBoolean.scala:94-100`,
+    //! `:223`). A failed `require` rejects, even in a size-flagged tree.
+    use super::*;
+    use crate::ergo_tree::ErgoTree;
+    use alloc::vec;
+
+    /// `CTHRESHOLD(k, n × TrueProp)`, `k` and `n` as written
+    fn cthreshold_bytes(k: &[u8], n: &[u8], children: usize) -> Vec<u8> {
+        [&[0x98][..], k, n, &vec![0xd3; children][..]].concat()
+    }
+
+    #[test]
+    fn k_and_n_within_bounds_parse() {
+        // SANTA `conjecture_bounds` #1 and #5: 255 children, and k = 0
+        for bytes in [
+            cthreshold_bytes(&[0x01], &[0xff, 0x01], 255),
+            cthreshold_bytes(&[0x00], &[0x01], 1),
+        ] {
+            let parsed = SigmaBoolean::sigma_parse_bytes(&bytes).unwrap();
+            assert_eq!(parsed.sigma_serialize_bytes().unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn k_or_n_out_of_bounds_rejects() {
+        // SANTA `conjecture_bounds` #0 and #2, 256 children and k above n; then k = 256,
+        // which a byte-wide read of k turned into 0
+        for (bytes, k, n) in [
+            (cthreshold_bytes(&[0x01], &[0x80, 0x02], 256), 1, 256),
+            (cthreshold_bytes(&[0x02], &[0x01], 1), 2, 1),
+            (cthreshold_bytes(&[0x80, 0x02], &[0x01], 1), 256, 1),
+        ] {
+            assert_eq!(
+                SigmaBoolean::sigma_parse_bytes(&bytes),
+                Err(SigmaParsingError::CthresholdOutOfBounds(k, n))
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_bounds_rejects_a_sized_tree() {
+        // SANTA `tree_sigmaboolean_bounds` #0: a size-flagged tree whose root is the constant
+        // `CTHRESHOLD(1, 256 × TrueProp)` does not degrade
+        let body = [&[0x08][..], &cthreshold_bytes(&[0x01], &[0x80, 0x02], 256)].concat();
+        assert_eq!(body.len(), 261);
+        let tree = [&[0x08, 0x85, 0x02][..], &body].concat();
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&tree),
+            Err(SigmaParsingError::CthresholdOutOfBounds(1, 256))
+        );
     }
 }

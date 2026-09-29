@@ -109,6 +109,10 @@ pub enum SigmaParsingError {
         max = crate::serialization::sigma_byte_reader::MAX_ARRAY_LENGTH
     )]
     ArrayLengthExceeded(usize),
+    /// A CTHRESHOLD whose `k` and number of children break `0 <= k <= n <= 255`:
+    /// sigmastate's `require` throws an `IllegalArgumentException`
+    #[error("CTHRESHOLD needs 0 <= k <= n <= 255, got k = {0}, n = {1}")]
+    CthresholdOutOfBounds(u16, usize),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -204,7 +208,8 @@ impl SigmaParsingError {
     /// Nesting deeper than `MaxTreeDepth` escapes too: the JVM's
     /// `DeserializeCallDepthExceeded` is a `SerializerException`. A type nested deeper
     /// than `MaxTreeDepth` (the temporary `TypeDepthExceeded` bound) escapes as well, and
-    /// so does a count above `MaxArrayLength` (`safeNewArray` throws a `RuntimeException`).
+    /// so does a count above `MaxArrayLength` (`safeNewArray` throws a `RuntimeException`),
+    /// and a CTHRESHOLD outside its bounds (the `IllegalArgumentException` of its `require`).
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -216,6 +221,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::Io(_)
                 | SigmaParsingError::VlqEncode(_)
                 | SigmaParsingError::ArrayLengthExceeded(_)
+                | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)
         )
