@@ -24,11 +24,13 @@ use crate::serialization::sigma_byte_writer::SigmaByteWrite;
 ///  We reserve the possibility to extend header by using Bit 7 == 1 and chain additional bytes as in VLQ.
 ///  Once the new bytes are required, a new version of the language should be created and implemented.
 ///  That new language will give an interpretation for the new bytes.
+///
+///  The byte is kept as read. Like sigmastate's `ErgoTree.header` (`ErgoTree.scala:82`), only
+///  the version, size and segregation bits are interpreted (`:255-261`), and the byte is written
+///  back whole (`ErgoTreeSerializer.scala:81`), so bits 5-7 round-trip.
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct ErgoTreeHeader {
-    version: ErgoTreeVersion,
-    is_constant_segregation: bool,
-    has_size: bool,
+    header_byte: u8,
 }
 
 impl ErgoTreeHeader {
@@ -52,66 +54,56 @@ impl ErgoTreeHeader {
 
     /// Parse from byte
     pub fn new(header_byte: u8) -> Result<Self, ErgoTreeHeaderError> {
-        let version = ErgoTreeVersion::parse_version(header_byte);
-        let has_size = header_byte & Self::HAS_SIZE_FLAG != 0;
-        let is_constant_segregation = header_byte & Self::CONSTANT_SEGREGATION_FLAG != 0;
+        let header = ErgoTreeHeader { header_byte };
         // JVM `CheckHeaderSizeBit` (ValidationRules Rule-1012, applied in
         // `ErgoTreeSerializer` right after the header byte is read): for any
         // version > 0 the size bit must be set. Reject otherwise, mirroring the
         // JVM `ValidationException` (a malformed v>0 header without the size slot).
-        if version != ErgoTreeVersion::V0 && !has_size {
-            return Err(ErgoTreeHeaderError::InvalidSizeBit(version.0));
+        if header.version() != ErgoTreeVersion::V0 && !header.has_size() {
+            return Err(ErgoTreeHeaderError::InvalidSizeBit(header.version().0));
         }
-        Ok(ErgoTreeHeader {
-            version,
-            is_constant_segregation,
-            has_size,
-        })
+        Ok(header)
     }
 
     /// Serialize to byte
     pub fn serialized(&self) -> u8 {
-        let mut header_byte: u8 = self.version.0;
-        if self.is_constant_segregation {
-            header_byte |= Self::CONSTANT_SEGREGATION_FLAG;
-        }
-        if self.has_size {
-            header_byte |= Self::HAS_SIZE_FLAG;
-        }
-        header_byte
+        self.header_byte
     }
 
     /// Return a header with version set to 0 and constant segregation flag set to the given value
     pub fn v0(constant_segregation: bool) -> Self {
-        ErgoTreeHeader {
-            version: ErgoTreeVersion::V0,
-            is_constant_segregation: constant_segregation,
-            has_size: false,
-        }
+        Self::from_flags(ErgoTreeVersion::V0, constant_segregation, false)
     }
 
     /// Return a header with version set to 1 (with size flag set) and constant segregation flag set to the given value
     pub fn v1(constant_segregation: bool) -> Self {
-        ErgoTreeHeader {
-            version: ErgoTreeVersion::V1,
-            is_constant_segregation: constant_segregation,
-            has_size: true,
+        Self::from_flags(ErgoTreeVersion::V1, constant_segregation, true)
+    }
+
+    fn from_flags(version: ErgoTreeVersion, is_constant_segregation: bool, has_size: bool) -> Self {
+        let mut header_byte: u8 = version.0;
+        if is_constant_segregation {
+            header_byte |= Self::CONSTANT_SEGREGATION_FLAG;
         }
+        if has_size {
+            header_byte |= Self::HAS_SIZE_FLAG;
+        }
+        ErgoTreeHeader { header_byte }
     }
 
     /// Returns true if constant segregation flag is set
     pub fn is_constant_segregation(&self) -> bool {
-        self.is_constant_segregation
+        self.header_byte & Self::CONSTANT_SEGREGATION_FLAG != 0
     }
 
     /// Returns true if size flag is set
     pub fn has_size(&self) -> bool {
-        self.has_size
+        self.header_byte & Self::HAS_SIZE_FLAG != 0
     }
 
     /// Returns ErgoTree version
     pub fn version(&self) -> ErgoTreeVersion {
-        self.version
+        ErgoTreeVersion::parse_version(self.header_byte)
     }
 }
 
@@ -186,6 +178,19 @@ mod tests {
                 hb,
                 hb & 0x07
             );
+        }
+    }
+
+    // sigmastate reads only the version, size and segregation bits of the header byte
+    // (`ErgoTree.scala:255-261`) and keeps the byte whole, so bits 5-7 come back as read.
+    #[test]
+    fn header_keeps_bits_5_to_7() {
+        for hb in [0x28u8, 0x48, 0x88, 0xe8, 0xe0, 0xf8, 0x2b] {
+            let header = ErgoTreeHeader::new(hb).unwrap();
+            assert_eq!(header.serialized(), hb);
+            assert_eq!(header.version(), ErgoTreeVersion::from(hb & 0x07));
+            assert_eq!(header.has_size(), hb & 0x08 != 0);
+            assert_eq!(header.is_constant_segregation(), hb & 0x10 != 0);
         }
     }
 }

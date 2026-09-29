@@ -1761,3 +1761,50 @@ mod root_type_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod header_bits_tests {
+    //! JVM parity: sigmastate keeps a tree's header byte as read (`ErgoTree.scala:82`) and
+    //! writes it back whole, in a serialized tree (`ErgoTreeSerializer.scala:81`) and in
+    //! `substituteConstants`' output (`:367`). Bits 5-7 mean nothing yet, but they are part
+    //! of the tree's bytes, and so of every box and transaction id over them.
+    use super::*;
+    use crate::mir::constant::Literal;
+    use crate::sigma_protocol::sigma_boolean::SigmaProp;
+
+    #[test]
+    fn header_bits_5_to_7_round_trip() {
+        // SANTA `tree_header_bits`: `sigmaProp(true)` under the headers 28, 48, 88 and e8
+        // (sized) and e0 (unsized)
+        for bytes in [
+            &[0x28, 0x02, 0x08, 0xd3][..],
+            &[0x48, 0x02, 0x08, 0xd3],
+            &[0x88, 0x02, 0x08, 0xd3],
+            &[0xe8, 0x02, 0x08, 0xd3],
+            &[0xe0, 0x08, 0xd3],
+        ] {
+            let tree = ErgoTree::sigma_parse_bytes(bytes).unwrap();
+            assert!(matches!(tree, ErgoTree::Parsed(_)), "{bytes:02x?}");
+            assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn substitute_constants_keeps_header_bits() {
+        // Header 38 (bit 5, segregation and size), constant 0 `sigmaProp(true)`, the root
+        // placeholder 0; the substitution writes `sigmaProp(false)`
+        let new_value = Constant {
+            tpe: SType::SSigmaProp,
+            v: Literal::SigmaProp(SigmaProp::new(false.into()).into()),
+        };
+        let (out, _) = ErgoTree::substitute_constants(
+            vec![0x38, 0x05, 0x01, 0x08, 0xd3, 0x73, 0x00],
+            &[0],
+            &[new_value],
+            ErgoTreeVersion::V3,
+        )
+        .unwrap();
+        assert_eq!(out, [0x38, 0x05, 0x01, 0x08, 0xd2, 0x73, 0x00]);
+    }
+}

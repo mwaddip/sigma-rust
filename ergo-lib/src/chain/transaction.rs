@@ -688,6 +688,24 @@ mod tests {
     }
 
     #[test]
+    fn output_tree_header_bits_reach_the_tx_id() {
+        // SANTA `Transaction.tree_header_bits`: sigmastate writes an output tree's header
+        // byte back whole, bits 5-7 included, so the id hashes the output as received. The
+        // input's proof is empty, so the signed bytes are the transaction's own.
+        for tree in [
+            &[0x28, 0x02, 0x08, 0xd3][..],
+            &[0x48, 0x02, 0x08, 0xd3],
+            &[0x88, 0x02, 0x08, 0xd3],
+            &[0xe8, 0x02, 0x08, 0xd3],
+            &[0xe0, 0x08, 0xd3],
+        ] {
+            let bytes = tx_bytes(&[0], tree);
+            let tx = Transaction::sigma_parse_bytes(&bytes).unwrap();
+            assert_eq!(tx.id(), TxId(blake2b256_hash(&bytes)), "{tree:02x?}");
+        }
+    }
+
+    #[test]
     fn deeply_nested_extension_value_types_end_in_an_error_on_a_2_mib_stack() {
         // `Coll^n[Byte]` as a context extension value: type `0c`×(n−2) `1a`, then data
         // nested all the way down (`01`×(n−1) `00`) or an empty outer collection (`00`). On
