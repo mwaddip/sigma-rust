@@ -773,20 +773,20 @@ mod tests {
         ];
         assert_eq!(
             ErgoTree::sigma_parse_bytes(&bytes),
-            Err(SigmaParsingError::UnsizedTreeValidationError(Box::new(
-                ErgoTreeError::SigmaParsingError(SigmaParsingError::InvalidTypeCode(0))
-            )))
+            Err(SigmaParsingError::InvalidTypePrefix)
         );
     }
 
     #[test]
     fn deserialization_non_parseable_tree_v1() {
-        // v1(size is set), constants length is set, invalid constant
+        // v1(size is set), constants length is set, invalid constant: an unknown type code
+        // fails the soft-forkable rule 1008, which degrades (type code 0 would be a hard
+        // `InvalidTypePrefix`)
         let bytes = [
             ErgoTreeHeader::v1(true).serialized(),
-            4, // tree size
-            1, // constants quantity
-            0, // invalid constant type
+            4,   // tree size
+            1,   // constants quantity
+            107, // unknown constant type
             99,
             99,
         ];
@@ -872,11 +872,12 @@ mod tests {
 
     #[test]
     fn deserialization_non_parseable_root_v1() {
-        // no constant segregation, Expr is invalid
+        // no constant segregation, Expr is invalid: a constant of an unknown type code (rule
+        // 1008, soft-forkable)
         let bytes = [
             ErgoTreeHeader::v1(false).serialized(),
             2, // tree size
-            0,
+            107,
             1,
         ];
         let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
@@ -2082,5 +2083,65 @@ mod store_lookup_tests {
             ErgoTree::sigma_parse_bytes(&bound).unwrap(),
             ErgoTree::Parsed(_)
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod type_tests {
+    //! JVM parity: type code 0 (`InvalidTypePrefix`), a negative `FunDef` type-parameter count
+    //! (a `NegativeArraySizeException`) and a `FunDef` or `SFunc` type parameter that is not a
+    //! type variable (a `ClassCastException`, a failed `require`) are no
+    //! `ValidationException`s, so a size-flagged tree rejects (SANTA `tree_degrade_gate`).
+    use super::*;
+
+    fn tree(hex: &str) -> Vec<u8> {
+        base16::decode(hex).unwrap()
+    }
+
+    #[test]
+    fn type_code_zero_rejects_a_sized_tree() {
+        // #2, then its control #4
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&tree("080100")),
+            Err(SigmaParsingError::InvalidTypePrefix)
+        );
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&tree("080208d3")).unwrap(),
+            ErgoTree::Parsed(_)
+        ));
+    }
+
+    #[test]
+    fn a_type_parameter_that_is_no_type_variable_rejects_a_sized_tree() {
+        // #9 a `FunDef` with -1 type parameters, #10 a `FunDef` whose type parameter is `Int`,
+        // #12 a v3 `SFunc` constant whose type parameter is `Int`
+        for hex in [
+            "0809d801d701ff08d37201",
+            "080ad801d701010408d37201",
+            "1b0a01700104040104027300",
+        ] {
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse_bytes(&tree(hex)),
+                    Err(SigmaParsingError::InvalidTypeParameter(_))
+                ),
+                "{hex}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_type_variable_parameter_is_accepted() {
+        // #11 a `FunDef` over the type variable `T`; #13 the `SFunc` constant over `T`, which
+        // degrades because a function has no data (rule 1009)
+        for hex in [
+            "080cd801d7010167015408d37201",
+            "1b0c017001040401670154027300",
+        ] {
+            let bytes = tree(hex);
+            let parsed = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+            assert_eq!(parsed.sigma_serialize_bytes().unwrap(), bytes, "{hex}");
+        }
     }
 }

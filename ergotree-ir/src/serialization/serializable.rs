@@ -123,6 +123,14 @@ pub enum SigmaParsingError {
     /// size-flagged tree around it as well.
     #[error("ErgoTree serialized without size bit: {0}")]
     UnsizedTreeValidationError(Box<ErgoTreeError>),
+    /// Type code 0, which sigmastate's `TypeSerializer` refuses with `InvalidTypePrefix`
+    #[error("type code 0 is not a type")]
+    InvalidTypePrefix,
+    /// A type parameter sigmastate cannot build: a negative `FunDef` count, or a `FunDef` or
+    /// `SFunc` type parameter that is not a type variable (a `NegativeArraySizeException`, a
+    /// `ClassCastException`, a failed `require`)
+    #[error("invalid type parameter: {0}")]
+    InvalidTypeParameter(String),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -224,7 +232,8 @@ impl SigmaParsingError {
     /// failure of an unsized tree nested in this one, which the JVM turns into a
     /// `SerializerException`. A placeholder past the tree's constants and a `ValUse` with no
     /// `ValDef` escape too: their store lookups throw (`ConstantPlaceholderSerializer.scala:19`,
-    /// `ValDefTypeStore.scala:11`).
+    /// `ValDefTypeStore.scala:11`). So do type code 0 (`InvalidTypePrefix`) and a type
+    /// parameter that is not a type variable.
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -237,6 +246,8 @@ impl SigmaParsingError {
                 | SigmaParsingError::VlqEncode(_)
                 | SigmaParsingError::ConstantForPlaceholderNotFound(_)
                 | SigmaParsingError::ValDefIdNotFound(_)
+                | SigmaParsingError::InvalidTypePrefix
+                | SigmaParsingError::InvalidTypeParameter(_)
                 | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)
