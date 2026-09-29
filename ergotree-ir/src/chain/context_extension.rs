@@ -1,5 +1,6 @@
 //! ContextExtension type
 use crate::mir::constant::Constant;
+use crate::mir::constant::TryExtractFromError;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
 use crate::serialization::SigmaParsingError;
@@ -32,6 +33,11 @@ impl ContextExtension {
         Self {
             values: IndexMap::with_hasher(Default::default()),
         }
+    }
+
+    /// The value of variable `id` as a constant, or `None` when there is no such variable
+    pub fn get_constant(&self, id: u8) -> Result<Option<Constant>, TryExtractFromError> {
+        Ok(self.values.get(&id).cloned())
     }
 }
 

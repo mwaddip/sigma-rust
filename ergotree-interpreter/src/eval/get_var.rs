@@ -10,9 +10,9 @@ use crate::eval::Evaluable;
 impl Evaluable for GetVar {
     fn eval<'ctx>(&self, _env: &mut Env, ctx: &Context<'ctx>) -> Result<Value<'ctx>, EvalError> {
         ctx.add_jit_cost(10)?; // GetVar = Fixed(10)
-        match ctx.extension.values.get(&self.var_id) {
+        match ctx.extension.get_constant(self.var_id)? {
             None => Ok(Value::Opt(None)),
-            Some(v) if v.tpe == self.var_tpe => Ok((Some(v.v.clone())).into()),
+            Some(v) if v.tpe == self.var_tpe => Ok((Some(v.v)).into()),
             Some(v) => Err(TryExtractFromError(format!(
                 "GetVar: expected extension value id {} to have type {:?}, found {:?} in context extension map {}",
                 self.var_id, self.var_tpe, v, ctx.extension

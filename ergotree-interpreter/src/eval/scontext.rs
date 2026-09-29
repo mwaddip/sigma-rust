@@ -120,17 +120,14 @@ pub(crate) static GET_VAR_FROM_INPUT_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, arg
     };
     let input_idx = args[0].clone().try_extract_into::<i16>()? as usize;
     let var_id = args[1].clone().try_extract_into::<i8>()? as u8;
-    Ok(
-        match ctx
-            .extension_provider
-            .context_extension(input_idx)
-            .and_then(|extension| extension.values.get(&(var_id)))
-            .cloned()
-        {
-            Some(c) if c.tpe == **output_tpe => Value::Opt(Some(Box::new(c.v.into()))),
-            _ => Value::Opt(None),
-        },
-    )
+    let var = match ctx.extension_provider.context_extension(input_idx) {
+        Some(extension) => extension.get_constant(var_id)?,
+        None => None,
+    };
+    Ok(match var {
+        Some(c) if c.tpe == **output_tpe => Value::Opt(Some(Box::new(c.v.into()))),
+        _ => Value::Opt(None),
+    })
 };
 
 #[cfg(test)]

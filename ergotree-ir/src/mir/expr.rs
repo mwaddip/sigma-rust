@@ -440,8 +440,8 @@ impl Expr {
             |expr| {
                 let (tpe, parsed_expr): (&mut SType, Expr) = match expr {
                     Expr::DeserializeContext(DeserializeContext { tpe, id }) => {
-                        let value = match ctx.extension.values.get(&*id) {
-                            Some(value) => value.clone(),
+                        let value = match ctx.extension.get_constant(*id)? {
+                            Some(value) => value,
                             // Absent context variable: leave the DeserializeContext
                             // node unchanged, mirroring the JVM
                             // `Interpreter.substDeserialize` `else None` (and the
