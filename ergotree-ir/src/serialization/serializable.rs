@@ -113,6 +113,10 @@ pub enum SigmaParsingError {
     /// sigmastate's `require` throws an `IllegalArgumentException`
     #[error("CTHRESHOLD needs 0 <= k <= n <= 255, got k = {0}, n = {1}")]
     CthresholdOutOfBounds(u16, usize),
+    /// A bitwise operation with a non-numeric operand: sigmastate's `BitOp` requires
+    /// numeric operands and throws an `IllegalArgumentException`
+    #[error("bitwise operation on non-numeric operands: {0}")]
+    BitOpOperandsNotNumeric(String),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -208,8 +212,9 @@ impl SigmaParsingError {
     /// Nesting deeper than `MaxTreeDepth` escapes too: the JVM's
     /// `DeserializeCallDepthExceeded` is a `SerializerException`. A type nested deeper
     /// than `MaxTreeDepth` (the temporary `TypeDepthExceeded` bound) escapes as well, and
-    /// so does a count above `MaxArrayLength` (`safeNewArray` throws a `RuntimeException`),
-    /// and a CTHRESHOLD outside its bounds (the `IllegalArgumentException` of its `require`).
+    /// so does a count above `MaxArrayLength` (`safeNewArray` throws a `RuntimeException`).
+    /// A CTHRESHOLD outside its bounds and a bitwise operation on a non-numeric operand
+    /// escape as well: both fail a `require`, an `IllegalArgumentException`.
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -222,6 +227,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::VlqEncode(_)
                 | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
+                | SigmaParsingError::BitOpOperandsNotNumeric(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)
         )

@@ -305,23 +305,41 @@ mod arbitrary {
                 SType::SLong => numeric_binop(),
                 SType::SBigInt => numeric_binop(),
 
-                _ => (
-                    any::<BinOpKind>(),
-                    any_with::<Expr>(ArbExprParams {
-                        tpe: SType::SAny,
-                        depth: args.depth,
-                    }),
-                    any_with::<Expr>(ArbExprParams {
-                        tpe: SType::SAny,
-                        depth: args.depth,
-                    }),
-                )
-                    .prop_map(|(kind, left, right)| BinOp {
-                        kind,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                    })
-                    .boxed(),
+                _ => prop_oneof![
+                    (
+                        prop_oneof![
+                            any::<ArithOp>().prop_map_into(),
+                            any::<RelationOp>().prop_map_into(),
+                            any::<LogicalOp>().prop_map_into(),
+                        ],
+                        any_with::<Expr>(ArbExprParams {
+                            tpe: SType::SAny,
+                            depth: args.depth,
+                        }),
+                        any_with::<Expr>(ArbExprParams {
+                            tpe: SType::SAny,
+                            depth: args.depth,
+                        }),
+                    ),
+                    // A bitwise operation parses only with numeric operands
+                    (
+                        any::<BitOp>().prop_map_into(),
+                        any_with::<Expr>(ArbExprParams {
+                            tpe: SType::SInt,
+                            depth: args.depth,
+                        }),
+                        any_with::<Expr>(ArbExprParams {
+                            tpe: SType::SInt,
+                            depth: args.depth,
+                        }),
+                    )
+                ]
+                .prop_map(|(kind, left, right)| BinOp {
+                    kind,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                })
+                .boxed(),
             }
         }
     }
