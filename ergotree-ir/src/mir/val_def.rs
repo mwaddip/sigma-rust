@@ -52,9 +52,7 @@ impl ValId {
     ) -> Result<Self, SigmaParsingError> {
         let id = r.get_u32()?;
         if id > i32::MAX as u32 {
-            return Err(SigmaParsingError::Misc(alloc::format!(
-                "ValDef id {id} exceeds Int.MaxValue (getUIntExact)"
-            )));
+            return Err(SigmaParsingError::ExceedsIntMax("ValDef id", id));
         }
         Ok(ValId(id))
     }
@@ -95,7 +93,7 @@ impl ValDef {
         // counts above 127 (bytes 0x80..=0xff).
         let n_tpe_args = r.get_i8()?;
         if n_tpe_args < 0 {
-            return Err(SigmaParsingError::Misc(format!(
+            return Err(SigmaParsingError::InvalidTypeParameter(format!(
                 "FunDef: negative type parameter count {}",
                 n_tpe_args
             )));
@@ -106,7 +104,7 @@ impl ValDef {
         let tpe_args = (0..n_tpe_args)
             .map(|_| match SType::sigma_parse(r)? {
                 SType::STypeVar(tv) => Ok(tv),
-                other => Err(SigmaParsingError::Misc(format!(
+                other => Err(SigmaParsingError::InvalidTypeParameter(format!(
                     "FunDef: expected a type variable as type parameter, got {:?}",
                     other
                 ))),

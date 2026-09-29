@@ -208,6 +208,11 @@ impl SType {
         depth: usize,
     ) -> Result<Self, SigmaParsingError> {
         use SType::*;
+        // sigmastate refuses type code 0 before reading anything else (v6.0.6
+        // `TypeSerializer.scala:133-135`)
+        if c == 0 {
+            return Err(SigmaParsingError::InvalidTypePrefix);
+        }
         let nested = depth + 1;
         if c < TypeCode::TUPLE_TYPECODE {
             let (container, embeddable) = TypeCode::unpack_tag(c)?;
@@ -296,9 +301,10 @@ impl SType {
                         if let SType::STypeVar(typevar) = tpe {
                             tpe_params.push(STypeParam { ident: typevar });
                         } else {
-                            return Err(SigmaParsingError::Misc(
-                                "SFunc.tpe_params: only STypeVar is allowed".into(),
-                            ));
+                            // `require(ident.isInstanceOf[STypeVar])` (`TypeSerializer.scala:221`)
+                            return Err(SigmaParsingError::InvalidTypeParameter(format!(
+                                "SFunc type parameter {tpe:?} is not a type variable"
+                            )));
                         }
                     }
                     SType::SFunc(crate::types::sfunc::SFunc {

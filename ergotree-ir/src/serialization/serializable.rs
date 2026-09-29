@@ -7,7 +7,7 @@ use crate::types::type_unify::TypeUnificationError;
 
 use super::{
     constant_store::ConstantStore,
-    sigma_byte_reader::{SigmaByteRead, SigmaByteReader},
+    sigma_byte_reader::{SigmaByteRead, SigmaByteReader, MAX_ARRAY_LENGTH},
     sigma_byte_writer::{SigmaByteWrite, SigmaByteWriter},
 };
 use crate::types::smethod::MethodId;
@@ -123,6 +123,42 @@ pub enum SigmaParsingError {
     /// size-flagged tree around it as well.
     #[error("ErgoTree serialized without size bit: {0}")]
     UnsizedTreeValidationError(Box<ErgoTreeError>),
+    /// Type code 0, which sigmastate's `TypeSerializer` refuses with `InvalidTypePrefix`
+    #[error("type code 0 is not a type")]
+    InvalidTypePrefix,
+    /// A type parameter sigmastate cannot build: a negative `FunDef` count, or a `FunDef` or
+    /// `SFunc` type parameter that is not a type variable (a `NegativeArraySizeException`, a
+    /// `ClassCastException`, a failed `require`)
+    #[error("invalid type parameter: {0}")]
+    InvalidTypeParameter(String),
+    /// A SigmaBoolean opcode sigmastate's parser does not match (a `MatchError`)
+    #[error("unexpected SigmaBoolean opcode {0:#04x}")]
+    InvalidSigmaBooleanOpCode(u8),
+    /// A BigInt or UnsignedBigInt data size above 32 bytes, which sigmastate refuses with a
+    /// `SerializerException`, or a BigInt of 0 bytes, which `new BigInteger` refuses with a
+    /// `NumberFormatException`
+    #[error("invalid BigInt size {0}")]
+    InvalidBigIntSize(usize),
+    /// A value sigmastate reads with `getUIntExact` that does not fit an `Int` (an
+    /// `ArithmeticException`)
+    #[error("{0} {1} exceeds Int.MaxValue (getUIntExact)")]
+    ExceedsIntMax(&'static str, u32),
+    /// A Box constant's register that holds an expression, not a value: sigmastate's cast to
+    /// `EvaluatedValue` throws a `ClassCastException`
+    #[error("unevaluated register value: {0}")]
+    UnevaluatedRegisterValue(String),
+    /// A Box constant with more than the six non-mandatory registers: sigmastate's
+    /// register-id lookup throws an `ArrayIndexOutOfBoundsException` at the seventh
+    #[error("{0} registers, where only R4 to R9 exist")]
+    TooManyRegisters(u8),
+    /// An `Append` or `Slice` whose input is not a collection: sigmastate types the node
+    /// eagerly as its input's type, cast to a collection (a `ClassCastException`)
+    #[error("a collection input expected: {0}")]
+    CollectionInputExpected(String),
+    /// A concrete collection's item whose type is not the declared element type: sigmastate
+    /// asserts each item's type, an `AssertionError`
+    #[error("collection item type mismatch: {0}")]
+    CollectionItemTypeMismatch(String),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -222,7 +258,14 @@ impl SigmaParsingError {
     /// A CTHRESHOLD outside its bounds and a bitwise operation on a non-numeric operand
     /// escape as well: both fail a `require`, an `IllegalArgumentException`. So does the
     /// failure of an unsized tree nested in this one, which the JVM turns into a
-    /// `SerializerException`.
+    /// `SerializerException`. A placeholder past the tree's constants and a `ValUse` with no
+    /// `ValDef` escape too: their store lookups throw (`ConstantPlaceholderSerializer.scala:19`,
+    /// `ValDefTypeStore.scala:11`). So do type code 0 (`InvalidTypePrefix`) and a type
+    /// parameter that is not a type variable, and malformed data: an unknown SigmaBoolean
+    /// opcode, a bad BigInt size and a `getUIntExact` value above `Int.MaxValue`, and a Box
+    /// constant's register that holds no value, or a seventh register. So does an `Append` or
+    /// `Slice` whose input is not a collection (`transformers.scala:62`, `:89`), and a concrete
+    /// collection's item of another type than the declared one (an `AssertionError`).
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -233,6 +276,17 @@ impl SigmaParsingError {
                 | SigmaParsingError::ScorexParsingError(_)
                 | SigmaParsingError::Io(_)
                 | SigmaParsingError::VlqEncode(_)
+                | SigmaParsingError::ConstantForPlaceholderNotFound(_)
+                | SigmaParsingError::ValDefIdNotFound(_)
+                | SigmaParsingError::InvalidTypePrefix
+                | SigmaParsingError::InvalidTypeParameter(_)
+                | SigmaParsingError::InvalidSigmaBooleanOpCode(_)
+                | SigmaParsingError::InvalidBigIntSize(_)
+                | SigmaParsingError::ExceedsIntMax(_, _)
+                | SigmaParsingError::UnevaluatedRegisterValue(_)
+                | SigmaParsingError::TooManyRegisters(_)
+                | SigmaParsingError::CollectionInputExpected(_)
+                | SigmaParsingError::CollectionItemTypeMismatch(_)
                 | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)
@@ -292,8 +346,17 @@ impl<T: SigmaSerializable> SigmaSerializable for Vec<T> {
         self.iter().try_for_each(|i| i.sigma_serialize(w))
     }
 
+    /// Every counted list sigmastate reads this way (the values of `getValues`, SigmaAnd's
+    /// and SigmaOr's items, a block's items, a function's arguments) reads the count with
+    /// `getUIntExact` and allocates with `safeNewArray`, which refuses more than
+    /// `MaxArrayLength` before reading an item (v6.0.6 `SigmaByteReader.scala:53-59`,
+    /// `SigmaTransformerSerializer.scala:21-25`, `BlockValueSerializer.scala:28-37`,
+    /// `FuncValueSerializer.scala:30-34`)
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let items_count = r.get_u32()?;
+        if items_count as usize > MAX_ARRAY_LENGTH {
+            return Err(SigmaParsingError::ArrayLengthExceeded(items_count as usize));
+        }
         let mut items = Vec::new();
         for _ in 0..items_count {
             items.push(T::sigma_parse(r)?);

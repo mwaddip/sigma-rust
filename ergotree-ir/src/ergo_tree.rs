@@ -773,20 +773,20 @@ mod tests {
         ];
         assert_eq!(
             ErgoTree::sigma_parse_bytes(&bytes),
-            Err(SigmaParsingError::UnsizedTreeValidationError(Box::new(
-                ErgoTreeError::SigmaParsingError(SigmaParsingError::InvalidTypeCode(0))
-            )))
+            Err(SigmaParsingError::InvalidTypePrefix)
         );
     }
 
     #[test]
     fn deserialization_non_parseable_tree_v1() {
-        // v1(size is set), constants length is set, invalid constant
+        // v1(size is set), constants length is set, invalid constant: an unknown type code
+        // fails the soft-forkable rule 1008, which degrades (type code 0 would be a hard
+        // `InvalidTypePrefix`)
         let bytes = [
             ErgoTreeHeader::v1(true).serialized(),
-            4, // tree size
-            1, // constants quantity
-            0, // invalid constant type
+            4,   // tree size
+            1,   // constants quantity
+            107, // unknown constant type
             99,
             99,
         ];
@@ -872,11 +872,12 @@ mod tests {
 
     #[test]
     fn deserialization_non_parseable_root_v1() {
-        // no constant segregation, Expr is invalid
+        // no constant segregation, Expr is invalid: a constant of an unknown type code (rule
+        // 1008, soft-forkable)
         let bytes = [
             ErgoTreeHeader::v1(false).serialized(),
             2, // tree size
-            0,
+            107,
             1,
         ];
         let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
@@ -1991,5 +1992,349 @@ mod nested_tree_tests {
         let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
         assert!(matches!(tree, ErgoTree::Parsed(_)));
         assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod array_length_tests {
+    //! JVM parity: sigmastate reads a counted list's length with `getUIntExact` and allocates
+    //! with `safeNewArray`, which refuses more than `MaxArrayLength` (100000) before it reads
+    //! an item. That is no `ValidationException`, so a size-flagged tree rejects as well.
+    use super::*;
+
+    /// A size-flagged tree: `node`, the item count, then 2100 copies of `item`, so that
+    /// reading the items crosses the tree's window before the input ends (SANTA
+    /// `tree_count_bounds`)
+    fn sized_tree(node: &[u8], count: &[u8], item: &[u8]) -> Vec<u8> {
+        let body = [node, count, &item.repeat(2100)].concat();
+        let mut tree = vec![0x08];
+        let mut size = body.len();
+        while size >= 0x80 {
+            tree.push((size & 0x7f) as u8 | 0x80);
+            size >>= 7;
+        }
+        tree.push(size as u8);
+        [tree, body].concat()
+    }
+
+    /// SigmaAnd over `sigmaProp(true)` items, and `Apply` of a constant to `true` arguments
+    const LISTS: [(&[u8], &[u8]); 2] = [
+        (&[0xea], &[0x08, 0xd3]),
+        (&[0xda, 0x08, 0xd3], &[0x01, 0x01]),
+    ];
+
+    #[test]
+    fn a_count_above_max_array_length_rejects() {
+        // SANTA `tree_count_bounds` #0 and #5: 100001 items
+        for (node, item) in LISTS {
+            assert_eq!(
+                ErgoTree::sigma_parse_bytes(&sized_tree(node, &[0xa1, 0x8d, 0x06], item)),
+                Err(SigmaParsingError::ArrayLengthExceeded(MAX_ARRAY_LENGTH + 1)),
+                "{node:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_count_at_max_array_length_reads_on() {
+        // SANTA `tree_count_bounds` #1: 100000 items are read until the tree's window trips,
+        // which degrades the tree
+        for (node, item) in LISTS {
+            let tree =
+                ErgoTree::sigma_parse_bytes(&sized_tree(node, &[0xa0, 0x8d, 0x06], item)).unwrap();
+            assert!(matches!(tree, ErgoTree::Unparsed { .. }), "{node:02x?}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod store_lookup_tests {
+    //! JVM parity: a placeholder past the tree's constants and a `ValUse` with no `ValDef`
+    //! fail their store lookups with an `ArrayIndexOutOfBoundsException` and a
+    //! `NoSuchElementException`, which reject a size-flagged tree too.
+    use super::*;
+    use crate::mir::val_def::ValId;
+
+    #[test]
+    fn a_placeholder_past_the_constants_rejects_a_sized_tree() {
+        // SANTA `tree_degrade_gate` #0 and its twin #1
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&[0x08, 0x02, 0x73, 0x05]),
+            Err(SigmaParsingError::ConstantForPlaceholderNotFound(5))
+        );
+        let in_store = [0x18, 0x05, 0x01, 0x08, 0xd3, 0x73, 0x00];
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&in_store).unwrap(),
+            ErgoTree::Parsed(_)
+        ));
+    }
+
+    #[test]
+    fn a_val_use_without_its_val_def_rejects_a_sized_tree() {
+        // SANTA `tree_valuse_unbound` #0 and its bound twin #1
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&[0x08, 0x02, 0x72, 0x01]),
+            Err(SigmaParsingError::ValDefIdNotFound(ValId(1)))
+        );
+        let bound = [0x08, 0x08, 0xd8, 0x01, 0xd6, 0x01, 0x08, 0xd3, 0x72, 0x01];
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&bound).unwrap(),
+            ErgoTree::Parsed(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod type_tests {
+    //! JVM parity: type code 0 (`InvalidTypePrefix`), a negative `FunDef` type-parameter count
+    //! (a `NegativeArraySizeException`) and a `FunDef` or `SFunc` type parameter that is not a
+    //! type variable (a `ClassCastException`, a failed `require`) are no
+    //! `ValidationException`s, so a size-flagged tree rejects (SANTA `tree_degrade_gate`).
+    use super::*;
+
+    fn tree(hex: &str) -> Vec<u8> {
+        base16::decode(hex).unwrap()
+    }
+
+    #[test]
+    fn type_code_zero_rejects_a_sized_tree() {
+        // #2, then its control #4
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&tree("080100")),
+            Err(SigmaParsingError::InvalidTypePrefix)
+        );
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&tree("080208d3")).unwrap(),
+            ErgoTree::Parsed(_)
+        ));
+    }
+
+    #[test]
+    fn a_type_parameter_that_is_no_type_variable_rejects_a_sized_tree() {
+        // #9 a `FunDef` with -1 type parameters, #10 a `FunDef` whose type parameter is `Int`,
+        // #12 a v3 `SFunc` constant whose type parameter is `Int`
+        for hex in [
+            "0809d801d701ff08d37201",
+            "080ad801d701010408d37201",
+            "1b0a01700104040104027300",
+        ] {
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse_bytes(&tree(hex)),
+                    Err(SigmaParsingError::InvalidTypeParameter(_))
+                ),
+                "{hex}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_type_variable_parameter_is_accepted() {
+        // #11 a `FunDef` over the type variable `T`; #13 the `SFunc` constant over `T`, which
+        // degrades because a function has no data (rule 1009)
+        for hex in [
+            "080cd801d7010167015408d37201",
+            "1b0c017001040401670154027300",
+        ] {
+            let bytes = tree(hex);
+            let parsed = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+            assert_eq!(parsed.sigma_serialize_bytes().unwrap(), bytes, "{hex}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod malformed_data_tests {
+    //! JVM parity: an unknown SigmaBoolean opcode (a `MatchError`), a BigInt size above 32 or
+    //! of 0 (a `SerializerException`, a `NumberFormatException`) and a `getUIntExact` value
+    //! above `Int.MaxValue` (an `ArithmeticException`) are no `ValidationException`s, so a
+    //! size-flagged tree rejects (SANTA `tree_degrade_gate`).
+    use super::*;
+
+    fn tree(hex: &str) -> Vec<u8> {
+        base16::decode(hex).unwrap()
+    }
+
+    /// A size-flagged tree whose constant 0 is a `Box` created at `height` (SANTA
+    /// `tree_degrade_gate` #14, #15)
+    fn box_constant_tree(height: &[u8]) -> Vec<u8> {
+        let nested_box = [
+            &[0xc0, 0x84, 0x3d, 0x00, 0x08, 0xd3][..], // value, tree
+            height,
+            &[0x00, 0x00], // tokens, registers
+            &[0; 33],      // transaction id and index
+        ]
+        .concat();
+        let body = [&[0x02, 0x63][..], &nested_box, &[0x08, 0xd3, 0x73, 0x01]].concat();
+        [&[0x18, body.len() as u8][..], &body].concat()
+    }
+
+    #[test]
+    fn a_sigma_boolean_opcode_nothing_matches_rejects_a_sized_tree() {
+        // #3
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&tree("08020801")),
+            Err(SigmaParsingError::InvalidSigmaBooleanOpCode(1))
+        );
+    }
+
+    #[test]
+    fn a_big_int_of_a_bad_size_rejects_a_sized_tree() {
+        // #5, 33 bytes; then 0 bytes (from source); then the 32-byte twin #6, which parses and
+        // degrades on its root (rule 1001)
+        let size_33 = [&[0x08, 0x23, 0x06, 0x21, 0x00, 0x01][..], &[0; 31]].concat();
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&size_33),
+            Err(SigmaParsingError::InvalidBigIntSize(33))
+        );
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&[0x08, 0x02, 0x06, 0x00]),
+            Err(SigmaParsingError::InvalidBigIntSize(0))
+        );
+        let size_32 = [&[0x08, 0x22, 0x06, 0x20, 0x01][..], &[0; 31]].concat();
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&size_32).unwrap(),
+            ErgoTree::Unparsed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_get_uint_exact_value_above_int_max_rejects_a_sized_tree() {
+        // #7 a `ValDef` id of 2^31 and #14 a `Box` constant created at height 2^31; then their
+        // twins at 2^31 - 1, #8 and #15
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&tree("0810d801d6808080800808d3728080808008")),
+            Err(SigmaParsingError::ExceedsIntMax("ValDef id", 1 << 31))
+        );
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&box_constant_tree(&[0x80, 0x80, 0x80, 0x80, 0x08])),
+            Err(SigmaParsingError::ExceedsIntMax(
+                "box creation height",
+                1 << 31
+            ))
+        );
+        for bytes in [
+            tree("0810d801d6ffffffff0708d372ffffffff07"),
+            box_constant_tree(&[0xff, 0xff, 0xff, 0xff, 0x07]),
+        ] {
+            assert!(matches!(
+                ErgoTree::sigma_parse_bytes(&bytes).unwrap(),
+                ErgoTree::Parsed(_)
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod register_tests {
+    //! JVM parity: sigmastate reads a box's registers one at a time, looking each register's
+    //! id up before it reads the value and casting the value to `EvaluatedValue`
+    //! (`ErgoBoxCandidate.scala:229-231`). A seventh register fails the lookup and an
+    //! expression fails the cast. Neither is a `ValidationException`, so a size-flagged tree
+    //! holding such a Box constant rejects (SANTA `tree_degrade_gate`).
+    use super::*;
+
+    /// A size-flagged tree whose constant 0 is a `Box` with `registers` (SANTA
+    /// `tree_degrade_gate` #16-#18)
+    fn box_constant_tree(registers: &[u8]) -> Vec<u8> {
+        let nested_box = [
+            &[0xc0, 0x84, 0x3d, 0x00, 0x08, 0xd3, 0x01, 0x00][..], // value, tree, height, tokens
+            registers,
+            &[0; 33], // transaction id and index
+        ]
+        .concat();
+        let body = [&[0x02, 0x63][..], &nested_box, &[0x08, 0xd3, 0x73, 0x01]].concat();
+        [&[0x18, body.len() as u8][..], &body].concat()
+    }
+
+    /// `count` registers, each `Int` 1
+    fn int_registers(count: u8) -> Vec<u8> {
+        [&[count][..], &[0x04, 0x02].repeat(count as usize)].concat()
+    }
+
+    #[test]
+    fn a_register_holding_an_expression_rejects_a_sized_tree() {
+        // #16: R4 = `HEIGHT`
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&box_constant_tree(&[0x01, 0xa3])),
+            Err(SigmaParsingError::UnevaluatedRegisterValue(_))
+        ));
+    }
+
+    #[test]
+    fn a_seventh_register_rejects_a_sized_tree() {
+        // #17: seven registers; then seven whose last value is an unknown opcode, which the
+        // JVM never reads, as the seventh id's lookup fails first (from source)
+        let seventh_unread = [&[0x07][..], &[0x04, 0x02].repeat(6), &[0xfd]].concat();
+        for registers in [int_registers(7), seventh_unread] {
+            assert_eq!(
+                ErgoTree::sigma_parse_bytes(&box_constant_tree(&registers)),
+                Err(SigmaParsingError::TooManyRegisters(7))
+            );
+        }
+    }
+
+    #[test]
+    fn six_registers_parse() {
+        // #18
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&box_constant_tree(&int_registers(6))).unwrap(),
+            ErgoTree::Parsed(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod collection_input_tests {
+    //! JVM parity: sigmastate types `Append` and `Slice` eagerly as their input's type, cast
+    //! to a collection (`transformers.scala:62`, `:89`), so an input of another type throws a
+    //! `ClassCastException`: no `ValidationException`, so a size-flagged tree rejects as well.
+    use super::*;
+
+    #[test]
+    fn append_or_slice_of_a_non_collection_rejects_sized_or_not() {
+        // SANTA `tree_parse_acceptance` #6-#9: `sigmaProp(SizeOf(Append(1, 2)) == 0)` and
+        // `sigmaProp(SizeOf(Slice(1, 0, 1)) == 0)`, unsized and size-flagged
+        for hex in [
+            "00d193b1b3040204040400",
+            "080ad193b1b3040204040400",
+            "00d193b1b40402040004020400",
+            "080cd193b1b40402040004020400",
+        ] {
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap()),
+                    Err(SigmaParsingError::CollectionInputExpected(_))
+                ),
+                "{hex}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_collection_item_of_another_type_rejects_sized_or_not() {
+        // SANTA `tree_parse_acceptance` #20-#22: `sigmaProp(SizeOf(Coll[Int](1L)) == 1)`,
+        // unsized and size-flagged (`ConcreteCollectionSerializer.scala:38` asserts the item's
+        // type), then the right-typed twin `Coll[Int](1)`
+        for hex in ["00d193b183010405020402", "080ad193b183010405020402"] {
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap()),
+                    Err(SigmaParsingError::CollectionItemTypeMismatch(_))
+                ),
+                "{hex}"
+            );
+        }
+        let twin = base16::decode("00d193b183010404020402").unwrap();
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&twin).unwrap(),
+            ErgoTree::Parsed(_)
+        ));
     }
 }

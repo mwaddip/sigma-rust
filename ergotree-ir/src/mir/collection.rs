@@ -122,7 +122,17 @@ pub(crate) fn coll_sigma_parse<R: SigmaByteRead>(
     let elem_tpe = SType::sigma_parse(r)?;
     let mut items = Vec::new();
     for _ in 0..items_count {
-        items.push(Expr::sigma_parse(r)?);
+        let item = Expr::sigma_parse(r)?;
+        // sigmastate asserts each item's type as it reads it, an `AssertionError` on a
+        // mismatch (v6.0.6 `ConcreteCollectionSerializer.scala:38`)
+        if item.tpe() != elem_tpe {
+            return Err(SigmaParsingError::CollectionItemTypeMismatch(format!(
+                "an item of type {:?} in a collection of {:?}",
+                item.tpe(),
+                elem_tpe
+            )));
+        }
+        items.push(item);
     }
     Ok(Collection::Exprs { elem_tpe, items })
 }

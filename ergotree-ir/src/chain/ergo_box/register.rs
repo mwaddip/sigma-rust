@@ -2,6 +2,7 @@
 
 use crate::mir::constant::Constant;
 use crate::mir::expr::Expr;
+use crate::mir::global_vars::GlobalVars;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
 use crate::serialization::SigmaParsingError;
@@ -140,6 +141,11 @@ impl SigmaSerializable for NonMandatoryRegisters {
         let regs_num = r.get_u8()?;
         let mut additional_regs = Vec::with_capacity(regs_num as usize);
         for idx in 0..regs_num {
+            // sigmastate looks the register's id up before it reads the value, so a seventh
+            // register fails before its value is read (v6.0.6 `ErgoBoxCandidate.scala:229-231`)
+            if idx as usize >= NonMandatoryRegisters::MAX_SIZE {
+                return Err(SigmaParsingError::TooManyRegisters(regs_num));
+            }
             let expr = Expr::sigma_parse(r)?;
             let reg_val = match expr {
                 Expr::Const(c) => {
@@ -156,12 +162,21 @@ impl SigmaSerializable for NonMandatoryRegisters {
                     evaluated_tuple.as_constant().tpe.check_v6_type()?;
                     RegisterValue::ParsedTupleExpr(evaluated_tuple)
                 }
-                _ => {
+                // A concrete collection and the group generator pass sigmastate's cast to
+                // `EvaluatedValue` too (`ErgoBoxCandidate.scala:231`)
+                Expr::Collection(_) | Expr::GlobalVars(GlobalVars::GroupGenerator) => {
                     return Err(RegisterValueError::UnexpectedRegisterValue(format!(
                         "invalid register ({0:?}) value: {expr:?} (expected Constant or Tuple)",
                         RegisterId::try_from(idx)
                     ))
                     .into())
+                }
+                // Any other expression fails that cast with a `ClassCastException`
+                _ => {
+                    return Err(SigmaParsingError::UnevaluatedRegisterValue(format!(
+                        "register {0:?} holds {expr:?}, which is not a value",
+                        RegisterId::try_from(idx)
+                    )))
                 }
             };
             additional_regs.push(reg_val);
