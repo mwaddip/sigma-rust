@@ -1,5 +1,8 @@
 use derive_more::{From, Into};
-use pyo3::{exceptions::PyKeyError, prelude::*};
+use pyo3::{
+    exceptions::{PyKeyError, PyValueError},
+    prelude::*,
+};
 
 use ergo_lib::ergotree_ir::{
     chain::{context_extension::ContextExtension as ContextExtensionInner, IndexMap},
@@ -34,9 +37,8 @@ impl ContextExtension {
     }
     fn __getitem__(&self, index: u8) -> PyResult<Constant> {
         self.0
-            .values
-            .get(&index)
-            .cloned()
+            .get_constant(index)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
             .map(Into::into)
             .ok_or_else(|| PyKeyError::new_err(format!("{index}")))
     }

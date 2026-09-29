@@ -1,6 +1,7 @@
 //! ProverResult
 
 use crate::ast::Constant;
+use crate::error_conversion::to_js;
 use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use wasm_bindgen::prelude::*;
 
@@ -31,13 +32,11 @@ impl ContextExtension {
     }
     /// get from map or fail if key is missing
     pub fn get(&self, key: u8) -> Result<Constant, JsValue> {
-        let wrapped: ergo_lib::ergotree_ir::chain::context_extension::ContextExtension =
-            self.0.clone();
-        Ok(wrapped
-            .values
-            .get(&key)
+        Ok(self
+            .0
+            .get_constant(key)
+            .map_err(to_js)?
             .ok_or_else::<JsValue, _>(|| "err".into())?
-            .clone()
             .into())
     }
 

@@ -69,14 +69,15 @@ fn rent_verdict_for_empty_proof(
         return StorageRentVerdict::NotApplicable;
     }
     // `context.extension.values.contains(varId)` (`:77`)
-    let var = match context.extension.values.get(&STORAGE_EXTENSION_INDEX) {
-        Some(var) => var,
-        None => return StorageRentVerdict::NotApplicable,
-    };
     // Everything below sits inside `Try { .. }.recoverWith { case _ => super.verify(..) }`
-    // (`:78-83`): each failure falls back to ordinary script verification.
+    // (`:78-83`): each failure falls back to ordinary script verification, a value whose
+    // `.value` fails included.
+    let var = match context.extension.get_constant(STORAGE_EXTENSION_INDEX) {
+        Ok(Some(var)) => var,
+        Ok(None) | Err(_) => return StorageRentVerdict::NotApplicable,
+    };
     // `.value.asInstanceOf[Short]` (`:79`): only a Short constant passes.
-    let idx: i16 = match var.v.clone().try_extract_into() {
+    let idx: i16 = match var.v.try_extract_into() {
         Ok(idx) => idx,
         Err(_) => return StorageRentVerdict::NotApplicable,
     };
