@@ -35,8 +35,16 @@ impl Evaluable for Collection {
                 bools.clone().into()
             }
             Collection::Exprs { elem_tpe, items } => {
-                let items_v: Result<Arc<[Value]>, EvalError> =
-                    items.iter().map(|i| i.eval(env, ctx)).collect();
+                // `ConcreteCollection.eval` checks each item's value against its type
+                // (`values.scala:891-896`)
+                let items_v: Result<Arc<[Value]>, EvalError> = items
+                    .iter()
+                    .map(|i| {
+                        let v = i.eval(env, ctx)?;
+                        crate::eval::check_value_of_type(&i.tpe(), &v)?;
+                        Ok(v)
+                    })
+                    .collect();
                 match elem_tpe {
                     SType::SByte => {
                         let bytes: Result<Arc<[i8]>, TryExtractFromError> = items_v?

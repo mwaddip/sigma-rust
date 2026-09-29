@@ -1216,9 +1216,15 @@ mod value_check_tests {
     use ergotree_ir::chain::evaluated_value::EvaluatedValue;
     use ergotree_ir::mir::apply::Apply;
     use ergotree_ir::mir::block::BlockValue;
+    use ergotree_ir::mir::coll_size::SizeOf;
+    use ergotree_ir::mir::collection::Collection;
+    use ergotree_ir::mir::constant::Constant;
     use ergotree_ir::mir::func_value::{FuncArg, FuncValue};
     use ergotree_ir::mir::get_var::GetVar;
+    use ergotree_ir::mir::if_op::If;
     use ergotree_ir::mir::option_get::OptionGet;
+    use ergotree_ir::mir::select_field::SelectField;
+    use ergotree_ir::mir::tuple::Tuple;
     use ergotree_ir::mir::unary_op::OneArgOpTryBuild;
     use ergotree_ir::mir::val_def::ValDef;
     use ergotree_ir::mir::val_use::ValUse;
@@ -1331,5 +1337,51 @@ mod value_check_tests {
         env.insert(1.into(), coll.into());
         let ctx = force_any_val::<Context>();
         assert!(use_pair.eval(&mut env, &ctx).is_err());
+    }
+
+    #[test]
+    fn a_collection_checks_its_items() {
+        // SANTA T5, `Coll(getVar[(Int, Int)](0).get).size == 1`, as the size
+        let coll: Expr = Collection::new(pair_type(), vec![pair_var0()])
+            .unwrap()
+            .into();
+        check(&SizeOf::try_build(coll).unwrap().into());
+    }
+
+    #[test]
+    fn a_tuple_checks_its_items() {
+        // `(getVar[(Int, Int)](0).get, 1)._2`, from source (`values.scala:828-833`)
+        let tuple: Expr = Tuple::new(vec![pair_var0(), Expr::Const(1i32.into())])
+            .unwrap()
+            .into();
+        check(
+            &SelectField::new(tuple, 2u8.try_into().unwrap())
+                .unwrap()
+                .into(),
+        );
+    }
+
+    #[test]
+    fn an_if_checks_its_branch() {
+        // `(if (true) getVar[(Int, Int)](0).get else (0, 0))._1`, from source
+        // (`trees.scala:1358-1365`): the branch's check fails before `SelectField` would
+        let zeros = Constant::sigma_parse_bytes(&[0x58, 0x00, 0x00]).unwrap();
+        let if_expr: Expr = If {
+            condition: Box::new(Expr::Const(true.into())),
+            true_branch: Box::new(pair_var0()),
+            false_branch: Box::new(zeros.into()),
+        }
+        .into();
+        let first: Expr = SelectField::new(if_expr, 1u8.try_into().unwrap())
+            .unwrap()
+            .into();
+        assert!(matches!(
+            try_eval_out::<i32>(&first, &ctx_with_var0("860204020404")),
+            Err(e) if format!("{e:?}").contains("Invalid type returned by evaluator")
+        ));
+        assert_eq!(
+            try_eval_out::<i32>(&first, &ctx_with_var0("580204")).unwrap(),
+            1
+        );
     }
 }
