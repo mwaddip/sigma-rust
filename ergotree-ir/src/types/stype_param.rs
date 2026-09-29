@@ -38,7 +38,7 @@ impl STypeVar {
     ///
     /// Mirrors the JVM `TypeSerializer` (`new String(bytes, UTF_8)`): a non-UTF8 name is
     /// lossily decoded -- malformed bytes become U+FFFD, matching the JVM's substitution
-    /// byte-for-byte (see [`jvm_lossy_utf8`]) -- and stored canonicalized, rather than
+    /// byte-for-byte (see `jvm_lossy_utf8`) -- and stored canonicalized, rather than
     /// rejected. (`Result` is kept for API stability; this no longer errors.)
     pub fn new_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidArgumentError> {
         Ok(Self {
