@@ -8,7 +8,6 @@ pub(crate) mod storage_rent;
 pub mod unsigned;
 
 use alloc::string::String;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 use bounded_vec::BoundedVec;
 use ergo_chain_types::blake2b256_hash;
@@ -36,6 +35,7 @@ use thiserror::Error;
 pub use data_input::*;
 use ergotree_interpreter::sigma_protocol::prover::ProofBytes;
 use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
+use ergotree_ir::serialization::sigma_byte_reader::MAX_ARRAY_LENGTH;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
 use ergotree_ir::serialization::SigmaParsingError;
 use ergotree_ir::serialization::SigmaSerializable;
@@ -306,13 +306,13 @@ impl SigmaSerializable for Transaction {
                     data_inputs.push(DataInput::sigma_parse(r)?);
                 }
 
-                // parse distinct ids of tokens in transaction outputs
+                // parse distinct ids of tokens in transaction outputs: sigmastate reads the count
+                // with `getUIntExact` and allocates with `safeNewArray`, which refuses more than
+                // `MaxArrayLength` (v6.0.6 `ErgoLikeTransaction.scala:162-166`)
                 let tokens_count = r.get_u32()?;
-                if tokens_count as usize
-                    > Transaction::MAX_OUTPUTS_COUNT * ErgoBox::MAX_TOKENS_COUNT
-                {
-                    return Err(SigmaParsingError::ValueOutOfBounds(
-                        "too many tokens in transaction".to_string(),
+                if tokens_count as usize > MAX_ARRAY_LENGTH {
+                    return Err(SigmaParsingError::ArrayLengthExceeded(
+                        tokens_count as usize,
                     ));
                 }
                 let mut token_ids = IndexSet::with_hasher(Default::default());
@@ -717,6 +717,27 @@ mod tests {
         let tx = Transaction::sigma_parse_bytes(&wrapped).unwrap();
         assert_eq!(tx.sigma_serialize_bytes().unwrap(), canonical);
         assert_eq!(tx.id(), TxId(blake2b256_hash(&canonical)));
+    }
+
+    #[test]
+    fn a_tokens_count_above_max_array_length_rejects() {
+        // sigmastate reads the count of distinct token ids with `getUIntExact` and allocates
+        // with `safeNewArray` (`ErgoLikeTransaction.scala:162-166`): 100001 is refused before
+        // an id is read
+        let canonical = tx_bytes(&[0], &[0x00, 0x08, 0xd3]);
+        // the input count, the box id, an empty proof and extension, no data inputs
+        let tokens_count_at = 1 + 32 + 2 + 1;
+        assert_eq!(canonical[tokens_count_at], 0);
+        let bytes = [
+            &canonical[..tokens_count_at],
+            &[0xa1, 0x8d, 0x06],
+            &canonical[tokens_count_at + 1..],
+        ]
+        .concat();
+        assert!(matches!(
+            Transaction::sigma_parse_bytes(&bytes),
+            Err(SigmaParsingError::ArrayLengthExceeded(n)) if n == MAX_ARRAY_LENGTH + 1
+        ));
     }
 
     #[test]

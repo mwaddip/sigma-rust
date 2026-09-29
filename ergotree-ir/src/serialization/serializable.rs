@@ -7,7 +7,7 @@ use crate::types::type_unify::TypeUnificationError;
 
 use super::{
     constant_store::ConstantStore,
-    sigma_byte_reader::{SigmaByteRead, SigmaByteReader},
+    sigma_byte_reader::{SigmaByteRead, SigmaByteReader, MAX_ARRAY_LENGTH},
     sigma_byte_writer::{SigmaByteWrite, SigmaByteWriter},
 };
 use crate::types::smethod::MethodId;
@@ -292,8 +292,17 @@ impl<T: SigmaSerializable> SigmaSerializable for Vec<T> {
         self.iter().try_for_each(|i| i.sigma_serialize(w))
     }
 
+    /// Every counted list sigmastate reads this way (the values of `getValues`, SigmaAnd's
+    /// and SigmaOr's items, a block's items, a function's arguments) reads the count with
+    /// `getUIntExact` and allocates with `safeNewArray`, which refuses more than
+    /// `MaxArrayLength` before reading an item (v6.0.6 `SigmaByteReader.scala:53-59`,
+    /// `SigmaTransformerSerializer.scala:21-25`, `BlockValueSerializer.scala:28-37`,
+    /// `FuncValueSerializer.scala:30-34`)
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let items_count = r.get_u32()?;
+        if items_count as usize > MAX_ARRAY_LENGTH {
+            return Err(SigmaParsingError::ArrayLengthExceeded(items_count as usize));
+        }
         let mut items = Vec::new();
         for _ in 0..items_count {
             items.push(T::sigma_parse(r)?);

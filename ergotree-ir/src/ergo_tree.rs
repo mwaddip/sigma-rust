@@ -1993,3 +1993,56 @@ mod nested_tree_tests {
         assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod array_length_tests {
+    //! JVM parity: sigmastate reads a counted list's length with `getUIntExact` and allocates
+    //! with `safeNewArray`, which refuses more than `MaxArrayLength` (100000) before it reads
+    //! an item. That is no `ValidationException`, so a size-flagged tree rejects as well.
+    use super::*;
+
+    /// A size-flagged tree: `node`, the item count, then 2100 copies of `item`, so that
+    /// reading the items crosses the tree's window before the input ends (SANTA
+    /// `tree_count_bounds`)
+    fn sized_tree(node: &[u8], count: &[u8], item: &[u8]) -> Vec<u8> {
+        let body = [node, count, &item.repeat(2100)].concat();
+        let mut tree = vec![0x08];
+        let mut size = body.len();
+        while size >= 0x80 {
+            tree.push((size & 0x7f) as u8 | 0x80);
+            size >>= 7;
+        }
+        tree.push(size as u8);
+        [tree, body].concat()
+    }
+
+    /// SigmaAnd over `sigmaProp(true)` items, and `Apply` of a constant to `true` arguments
+    const LISTS: [(&[u8], &[u8]); 2] = [
+        (&[0xea], &[0x08, 0xd3]),
+        (&[0xda, 0x08, 0xd3], &[0x01, 0x01]),
+    ];
+
+    #[test]
+    fn a_count_above_max_array_length_rejects() {
+        // SANTA `tree_count_bounds` #0 and #5: 100001 items
+        for (node, item) in LISTS {
+            assert_eq!(
+                ErgoTree::sigma_parse_bytes(&sized_tree(node, &[0xa1, 0x8d, 0x06], item)),
+                Err(SigmaParsingError::ArrayLengthExceeded(MAX_ARRAY_LENGTH + 1)),
+                "{node:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_count_at_max_array_length_reads_on() {
+        // SANTA `tree_count_bounds` #1: 100000 items are read until the tree's window trips,
+        // which degrades the tree
+        for (node, item) in LISTS {
+            let tree =
+                ErgoTree::sigma_parse_bytes(&sized_tree(node, &[0xa0, 0x8d, 0x06], item)).unwrap();
+            assert!(matches!(tree, ErgoTree::Unparsed { .. }), "{node:02x?}");
+        }
+    }
+}
