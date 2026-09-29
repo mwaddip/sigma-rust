@@ -1,8 +1,7 @@
 //! Box registers
 
+use crate::chain::evaluated_value::EvaluatedValue;
 use crate::mir::constant::Constant;
-use crate::mir::expr::Expr;
-use crate::mir::global_vars::GlobalVars;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
 use crate::serialization::SigmaParsingError;
@@ -127,7 +126,7 @@ impl SigmaSerializable for NonMandatoryRegisters {
         for (idx, reg_value) in self.0.iter().enumerate() {
             match reg_value {
                 RegisterValue::Parsed(c) => c.sigma_serialize(w)?,
-                RegisterValue::ParsedTupleExpr(t) => t.to_tuple_expr().sigma_serialize(w)?,
+                RegisterValue::ParsedExpr(e) => e.value().sigma_serialize(w)?,
                 RegisterValue::Invalid { bytes, error_msg } => {
                     let bytes_str = base16::encode_lower(bytes);
                     return Err(SigmaSerializationError::NotSupported(format!("unparseable register value at {0:?} (parsing error: {error_msg}) cannot be serialized in the stream (writer), because it cannot be parsed later. Register value as base16-encoded bytes: {bytes_str}", NonMandatoryRegisterId::get_by_zero_index(idx))));
@@ -146,40 +145,11 @@ impl SigmaSerializable for NonMandatoryRegisters {
             if idx as usize >= NonMandatoryRegisters::MAX_SIZE {
                 return Err(SigmaParsingError::TooManyRegisters(regs_num));
             }
-            let expr = Expr::sigma_parse(r)?;
-            let reg_val = match expr {
-                Expr::Const(c) => {
-                    c.tpe.check_v6_type()?;
-                    RegisterValue::Parsed(c)
-                }
-                Expr::Tuple(t) => {
-                    let evaluated_tuple = EvaluatedTuple::new(t).map_err(|e| {
-                        RegisterValueError::UnexpectedRegisterValue(format!(
-                            "error parsing tuple expression from register {0:?}: {e}",
-                            RegisterId::try_from(idx)
-                        ))
-                    })?;
-                    evaluated_tuple.as_constant().tpe.check_v6_type()?;
-                    RegisterValue::ParsedTupleExpr(evaluated_tuple)
-                }
-                // A concrete collection and the group generator pass sigmastate's cast to
-                // `EvaluatedValue` too (`ErgoBoxCandidate.scala:231`)
-                Expr::Collection(_) | Expr::GlobalVars(GlobalVars::GroupGenerator) => {
-                    return Err(RegisterValueError::UnexpectedRegisterValue(format!(
-                        "invalid register ({0:?}) value: {expr:?} (expected Constant or Tuple)",
-                        RegisterId::try_from(idx)
-                    ))
-                    .into())
-                }
-                // Any other expression fails that cast with a `ClassCastException`
-                _ => {
-                    return Err(SigmaParsingError::UnevaluatedValue(format!(
-                        "register {0:?} holds {expr:?}, which is not a value",
-                        RegisterId::try_from(idx)
-                    )))
-                }
-            };
-            additional_regs.push(reg_val);
+            // `getValue`, the cast to `EvaluatedValue`, then `CheckV6Type` (v6.0.6
+            // `ErgoBoxCandidate.scala:231-232`)
+            let value = EvaluatedValue::sigma_parse(r)?;
+            value.check_v6_type()?;
+            additional_regs.push(RegisterValue::from(value));
         }
         Ok(additional_regs.try_into()?)
     }
@@ -429,5 +399,90 @@ mod tests {
         );
         assert_eq!(only_r4.get(NonMandatoryRegisterId::R5), None);
         assert_eq!(only_r4.get(NonMandatoryRegisterId::R9), None);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod evaluated_value_tests {
+    //! JVM parity: sigmastate reads a register's value with `getValue` and casts it to
+    //! `EvaluatedValue` (v6.0.6 `ErgoBoxCandidate.scala:231`), so a register may hold a tuple, a
+    //! concrete collection or the group generator, whose items may be any expression.
+    use super::*;
+    use crate::chain::ergo_box::ErgoBox;
+    use alloc::format;
+    use alloc::string::String;
+
+    /// A bare box whose one register, R4, holds `r4` (SANTA `register_evaluated_values`)
+    fn box_hex(r4: &str) -> String {
+        format!(
+            "c0843d0008d3010001{r4}1d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400"
+        )
+    }
+
+    fn parse_box(r4: &str) -> Result<ErgoBox, SigmaParsingError> {
+        ErgoBox::sigma_parse_bytes(&base16::decode(&box_hex(r4)).unwrap())
+    }
+
+    #[test]
+    fn register_values_the_jvm_accepts_parse_and_are_written_back_as_it_writes_them() {
+        // SANTA `register_evaluated_values` #0-#7, #14, #15: `GroupGenerator`,
+        // `Coll[Int](1, 2)`, `TrueLeaf`, Boolean constants read as `83`, `Tuple(1, HEIGHT)`, a
+        // 1-item tuple, `Tuple(1, 2)`, `Coll[Int](HEIGHT)`, a `Coll[(Int, Int)]` holding a tuple
+        // expression, and `Coll[Byte](1, 1)` as a concrete collection
+        for (r4, written_back) in [
+            ("82", "82"),
+            ("83020404020404", "83020404020404"),
+            ("7f", "0101"),
+            ("83020101010100", "850201"),
+            ("86020402a3", "86020402a3"),
+            ("86010402", "86010402"),
+            ("860204020404", "860204020404"),
+            ("830104a3", "830104a3"),
+            ("830158860204020404", "830158860204020404"),
+            ("83020202010201", "83020202010201"),
+        ] {
+            let b = parse_box(r4).unwrap();
+            assert_eq!(
+                base16::encode_lower(&b.sigma_serialize_bytes().unwrap()),
+                box_hex(written_back),
+                "{r4}"
+            );
+        }
+    }
+
+    #[test]
+    fn register_values_the_jvm_rejects_do_not_parse() {
+        // SANTA #8-#13: a placeholder, `HEIGHT`, `Plus(1, 2)`, a tuple holding a placeholder, a
+        // tuple holding `GetVar[Int](0)` (rule 1019), and a tuple size of 0x80 followed by 128
+        // items, which sigma-rust used to read as 128 items
+        let size_0x80 = format!("8680{}", "0402".repeat(128));
+        for r4 in [
+            "7300",
+            "a3",
+            "9a04020404",
+            "860204027300",
+            "86020402e30004",
+            &size_0x80,
+        ] {
+            assert!(parse_box(r4).is_err(), "{r4}");
+        }
+    }
+
+    #[test]
+    fn get_constant_reads_a_value_that_has_a_constant_form() {
+        // G2's `Coll[Int](1, 2)`, against its constant encoding; G5's `Tuple(1, HEIGHT)` has none
+        let coll = parse_box("83020404020404").unwrap();
+        assert_eq!(
+            coll.additional_registers
+                .get_constant(NonMandatoryRegisterId::R4)
+                .unwrap(),
+            Some(Constant::sigma_parse_bytes(&base16::decode("10020204").unwrap()).unwrap())
+        );
+        let tuple = parse_box("86020402a3").unwrap();
+        assert!(tuple
+            .additional_registers
+            .get_constant(NonMandatoryRegisterId::R4)
+            .is_err());
     }
 }
