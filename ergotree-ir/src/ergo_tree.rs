@@ -5,13 +5,14 @@ use crate::mir::expr::Expr;
 use crate::serialization::SigmaSerializationError;
 use crate::serialization::SigmaSerializeResult;
 use crate::serialization::{
-    sigma_byte_reader::{SigmaByteRead, SigmaByteReader},
+    sigma_byte_reader::{SigmaByteRead, SigmaByteReader, MAX_ARRAY_LENGTH},
     sigma_byte_writer::{SigmaByteWrite, SigmaByteWriter},
     SigmaParsingError, SigmaSerializable,
 };
 use crate::sigma_protocol::sigma_boolean::ProveDlog;
 use crate::types::stype::SType;
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
@@ -216,10 +217,18 @@ impl ErgoTree {
                 tree_size,
             ) {
                 (Ok(parsed_tree), _) => Ok(parsed_tree.into()),
-                // An unsized tree cannot degrade: its body error rejects it (`:204-207`),
-                // a root that is not a `SigmaProp` included.
-                (Err(ErgoTreeError::SigmaParsingError(e)), None) => Err(e),
-                (Err(error), None) => Err(SigmaParsingError::Misc(error.to_string())),
+                // An unsized tree cannot degrade (`:204-207`). A hard error rejects it as
+                // it is; one that would degrade a size-flagged tree, a root that is not a
+                // `SigmaProp` included, becomes sigmastate's `SerializerException`, which a
+                // size-flagged tree around this one does not degrade on either.
+                (Err(ErgoTreeError::SigmaParsingError(e)), None)
+                    if e.escapes_sized_tree_degrade() =>
+                {
+                    Err(e)
+                }
+                (Err(error), None) => Err(SigmaParsingError::UnsizedTreeValidationError(Box::new(
+                    error,
+                ))),
                 (Err(error), Some(tree_size)) => {
                     // Mirror sigma-state `ErgoTreeSerializer.deserializeErgoTree`:
                     // the size-flagged `UnparsedErgoTree` fallback wraps ONLY a
@@ -310,21 +319,24 @@ impl ErgoTree {
         ErgoTree::sigma_parse_bytes_lenient(&sized)
     }
 
+    /// sigmastate reads the count as `getUInt().toInt`: a count that wraps negative means no
+    /// constants, and `safeNewArray` refuses a positive one above `MaxArrayLength` before
+    /// reading any (`ErgoTreeSerializer.scala:250-261`)
     fn sigma_parse_constants<R: SigmaByteRead>(
         r: &mut R,
     ) -> Result<Vec<Constant>, SigmaParsingError> {
-        let constants_len = r.get_u32()?;
-        if constants_len as usize > ErgoTree::MAX_CONSTANTS_COUNT {
-            return Err(SigmaParsingError::ValueOutOfBounds(
-                "too many constants".to_string(),
-            ));
+        let constants_len = r.get_u32()? as i32;
+        if constants_len <= 0 {
+            return Ok(Vec::new());
         }
-        //dbg!(&constants_len);
-        let mut constants = Vec::with_capacity(constants_len as usize);
+        let constants_len = constants_len as usize;
+        if constants_len > MAX_ARRAY_LENGTH {
+            return Err(SigmaParsingError::ArrayLengthExceeded(constants_len));
+        }
+        // Grown as the constants are read: until then the count is only a claim
+        let mut constants = Vec::new();
         for _ in 0..constants_len {
-            let c = Constant::sigma_parse(r)?;
-            //dbg!(&c);
-            constants.push(c);
+            constants.push(Constant::sigma_parse(r)?);
         }
         Ok(constants)
     }
@@ -361,9 +373,6 @@ impl ErgoTree {
             })
         })
     }
-
-    /// Reasonable limit for the number of constants allowed in the ErgoTree
-    pub const MAX_CONSTANTS_COUNT: usize = 4096;
 
     /// A tree's read window, from its first byte (sigmastate
     /// `SigmaConstants.MaxPropositionBytes`, the `maxTreeSizeBytes` a box passes)
@@ -764,7 +773,9 @@ mod tests {
         ];
         assert_eq!(
             ErgoTree::sigma_parse_bytes(&bytes),
-            Err(SigmaParsingError::InvalidTypeCode(0))
+            Err(SigmaParsingError::UnsizedTreeValidationError(Box::new(
+                ErgoTreeError::SigmaParsingError(SigmaParsingError::InvalidTypeCode(0))
+            )))
         );
     }
 
@@ -1143,10 +1154,12 @@ mod tests {
         assert!(matches!(tree, ErgoTree::Unparsed { .. }));
         assert_eq!(tree.sigma_serialize_bytes().unwrap(), sized);
         let unsized_tree = base16::decode("100170010404007300").unwrap();
-        assert!(matches!(
+        assert_eq!(
             ErgoTree::sigma_parse_bytes(&unsized_tree),
-            Err(SigmaParsingError::InvalidTypeCode(112))
-        ));
+            Err(SigmaParsingError::UnsizedTreeValidationError(Box::new(
+                ErgoTreeError::SigmaParsingError(SigmaParsingError::InvalidTypeCode(112))
+            )))
+        );
     }
 
     #[test]
@@ -1694,11 +1707,16 @@ mod tree_window_tests {
 
     #[test]
     fn body_read_past_the_tree_window_rejects_an_unsized_tree() {
+        // The window trip is soft (rule 1014), so an unsized tree rejects with it wrapped as
+        // "serialized without size bit", which is no position-limit error to a tree around it
         let mut bytes = vec![0x00];
         bytes.extend(eq_body(&coll_byte(4090), &coll_byte(1)));
         assert!(matches!(
             ErgoTree::sigma_parse_bytes(&bytes),
-            Err(e) if e.is_position_limit_exceeded()
+            Err(SigmaParsingError::UnsizedTreeValidationError(e)) if matches!(
+                &*e,
+                ErgoTreeError::SigmaParsingError(inner) if inner.is_position_limit_exceeded()
+            )
         ));
     }
 
@@ -1759,5 +1777,219 @@ mod root_type_tests {
                 error: ErgoTreeError::RootTpeError(SType::SInt),
             }
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod header_bits_tests {
+    //! JVM parity: sigmastate keeps a tree's header byte as read (`ErgoTree.scala:82`) and
+    //! writes it back whole, in a serialized tree (`ErgoTreeSerializer.scala:81`) and in
+    //! `substituteConstants`' output (`:367`). Bits 5-7 mean nothing yet, but they are part
+    //! of the tree's bytes, and so of every box and transaction id over them.
+    use super::*;
+    use crate::mir::constant::Literal;
+    use crate::sigma_protocol::sigma_boolean::SigmaProp;
+
+    #[test]
+    fn header_bits_5_to_7_round_trip() {
+        // SANTA `tree_header_bits`: `sigmaProp(true)` under the headers 28, 48, 88 and e8
+        // (sized) and e0 (unsized)
+        for bytes in [
+            &[0x28, 0x02, 0x08, 0xd3][..],
+            &[0x48, 0x02, 0x08, 0xd3],
+            &[0x88, 0x02, 0x08, 0xd3],
+            &[0xe8, 0x02, 0x08, 0xd3],
+            &[0xe0, 0x08, 0xd3],
+        ] {
+            let tree = ErgoTree::sigma_parse_bytes(bytes).unwrap();
+            assert!(matches!(tree, ErgoTree::Parsed(_)), "{bytes:02x?}");
+            assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn substitute_constants_keeps_header_bits() {
+        // Header 38 (bit 5, segregation and size), constant 0 `sigmaProp(true)`, the root
+        // placeholder 0; the substitution writes `sigmaProp(false)`
+        let new_value = Constant {
+            tpe: SType::SSigmaProp,
+            v: Literal::SigmaProp(SigmaProp::new(false.into()).into()),
+        };
+        let (out, _) = ErgoTree::substitute_constants(
+            vec![0x38, 0x05, 0x01, 0x08, 0xd3, 0x73, 0x00],
+            &[0],
+            &[new_value],
+            ErgoTreeVersion::V3,
+        )
+        .unwrap();
+        assert_eq!(out, [0x38, 0x05, 0x01, 0x08, 0xd2, 0x73, 0x00]);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod constants_count_tests {
+    //! JVM parity: sigmastate reads a tree's constants count as `getUInt().toInt`. A count that
+    //! wraps negative means no constants, and `safeNewArray` refuses a count above
+    //! `MaxArrayLength` before reading a constant (`ErgoTreeSerializer.scala:250-261`).
+    use super::*;
+
+    #[test]
+    fn a_count_that_wraps_negative_means_no_constants() {
+        // SANTA `tree_count_wrap` #0-#2: 2^32 - 1 and 2^31 constants, sized and unsized, each
+        // written back with a count of 0
+        for (bytes, expected) in [
+            (
+                &[0x18, 0x07, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x08, 0xd3][..],
+                &[0x18, 0x03, 0x00, 0x08, 0xd3][..],
+            ),
+            (
+                &[0x18, 0x07, 0x80, 0x80, 0x80, 0x80, 0x08, 0x08, 0xd3],
+                &[0x18, 0x03, 0x00, 0x08, 0xd3],
+            ),
+            (
+                &[0x10, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x08, 0xd3],
+                &[0x10, 0x00, 0x08, 0xd3],
+            ),
+        ] {
+            let tree = ErgoTree::sigma_parse_bytes(bytes).unwrap();
+            assert_eq!(tree.constants_len().unwrap(), 0, "{bytes:02x?}");
+            assert_eq!(tree.sigma_serialize_bytes().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn a_count_above_max_array_length_rejects_a_sized_tree() {
+        // 100001 constants: refused before any is read, so the tree does not degrade
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&[0x18, 0x04, 0xa1, 0x8d, 0x06, 0x00]),
+            Err(SigmaParsingError::ArrayLengthExceeded(MAX_ARRAY_LENGTH + 1))
+        );
+    }
+
+    #[test]
+    fn a_count_at_max_array_length_reads_on() {
+        // 100000 constants of `true`: the reads cross the tree's window, which degrades it
+        let mut bytes = vec![0x18, 0x8b, 0x27, 0xa0, 0x8d, 0x06]; // size 5003, count 100000
+        bytes.extend([0x01, 0x01].repeat(2500));
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(tree, ErgoTree::Unparsed { .. }));
+    }
+
+    #[test]
+    fn a_count_that_runs_out_of_input_rejects_a_sized_tree() {
+        // 5000 constants, and the input ends inside the first: an end of input does not
+        // degrade
+        assert!(ErgoTree::sigma_parse_bytes(&[0x18, 0x03, 0x88, 0x27, 0x01]).is_err());
+    }
+
+    #[test]
+    fn substitute_constants_reads_a_count_that_wraps_negative_as_no_constants() {
+        // `ErgoTreeSerializer.substituteConstants` reads the constants the same way
+        // (`deserializeHeaderWithTreeBytes`) and writes the count it found
+        let out = ErgoTree::substitute_constants(
+            vec![0x18, 0x07, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x08, 0xd3],
+            &[],
+            &[],
+            ErgoTreeVersion::V3,
+        )
+        .unwrap();
+        assert_eq!(out, (vec![0x18, 0x03, 0x00, 0x08, 0xd3], 0));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod ushort_count_tests {
+    //! JVM parity: sigmastate reads a collection's count with `getUShort`, which narrows the
+    //! value to an `Int` before its range check (`getULong().toInt`), so a count written as
+    //! 2^32 + k is k.
+    use super::*;
+
+    #[test]
+    fn a_collection_count_written_above_u32_is_its_low_32_bits() {
+        // SANTA `tree_count_wrap` #3-#5: `sigmaProp(SizeOf(coll) == n)`, each written back
+        // with the narrowed count
+        for (bytes, expected) in [
+            // `Coll[Boolean]()`, the count written as 2^32
+            (
+                &[
+                    0x00, 0xd1, 0x93, 0xb1, 0x85, 0x80, 0x80, 0x80, 0x80, 0x10, 0x04, 0x00,
+                ][..],
+                &[0x00, 0xd1, 0x93, 0xb1, 0x85, 0x00, 0x04, 0x00][..],
+            ),
+            // `Coll(true)`, the count written as 2^32 + 1
+            (
+                &[
+                    0x00, 0xd1, 0x93, 0xb1, 0x85, 0x81, 0x80, 0x80, 0x80, 0x10, 0x01, 0x04, 0x02,
+                ],
+                &[0x00, 0xd1, 0x93, 0xb1, 0x85, 0x01, 0x01, 0x04, 0x02],
+            ),
+            // `Coll[Int]()`, the count written as 2^32
+            (
+                &[
+                    0x00, 0xd1, 0x93, 0xb1, 0x83, 0x80, 0x80, 0x80, 0x80, 0x10, 0x04, 0x04, 0x00,
+                ],
+                &[0x00, 0xd1, 0x93, 0xb1, 0x83, 0x00, 0x04, 0x04, 0x00],
+            ),
+        ] {
+            let tree = ErgoTree::sigma_parse_bytes(bytes).unwrap();
+            assert_eq!(
+                tree.sigma_serialize_bytes().unwrap(),
+                expected,
+                "{bytes:02x?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod nested_tree_tests {
+    //! JVM parity: an unsized tree cannot degrade, so sigmastate turns a failure that would
+    //! degrade it into a `SerializerException` ("ErgoTree serialized without size bit",
+    //! `ErgoTreeSerializer.scala:204-207`). No tree degrades on that, so it also rejects a
+    //! size-flagged tree holding the unsized one in a `Box` constant.
+    use super::*;
+
+    /// A size-flagged, segregated tree whose constant 0 is a `Box` guarded by `nested_tree`,
+    /// constant 1 `sigmaProp(true)`, and whose root is `ConstantPlaceholder(1)` (SANTA
+    /// `tree_nested_degrade`)
+    fn outer_tree(nested_tree: &[u8]) -> Vec<u8> {
+        let nested_box = [
+            &[0xc0, 0x84, 0x3d][..], // value
+            nested_tree,
+            &[0x01, 0x00, 0x00], // creation height, tokens, registers
+            &[0; 33],            // transaction id and index
+        ]
+        .concat();
+        let body = [&[0x02, 0x63][..], &nested_box, &[0x08, 0xd3, 0x73, 0x01]].concat();
+        [&[0x18, body.len() as u8][..], &body].concat()
+    }
+
+    #[test]
+    fn a_nested_unsized_tree_that_would_degrade_rejects_the_outer_tree() {
+        // SANTA `tree_nested_degrade` #0, an unknown opcode (rule 1002); then a root that is
+        // not a `SigmaProp` (rule 1001)
+        for nested_tree in [[0x00, 0xd1, 0xfd], [0x00, 0x04, 0x02]] {
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse_bytes(&outer_tree(&nested_tree)),
+                    Err(SigmaParsingError::UnsizedTreeValidationError(_))
+                ),
+                "{nested_tree:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nested_sized_tree_degrades_on_its_own() {
+        // SANTA `tree_nested_degrade` #1: the nested tree is kept as `Unparsed`, and the
+        // outer tree parses
+        let bytes = outer_tree(&[0x08, 0x02, 0xd1, 0xfd]);
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)));
+        assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
     }
 }

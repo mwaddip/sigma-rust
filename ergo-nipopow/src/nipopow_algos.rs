@@ -44,7 +44,7 @@ pub struct NipopowAlgos {
     /// headers and naturally-skipped entries from sparse-superlevel walks,
     /// so the verifier needs a tolerant lookback window to accept them.
     ///
-    /// Default is [`DEFAULT_USE_LAST_EPOCHS`] (= 8), matching Ergo mainnet
+    /// Default is `DEFAULT_USE_LAST_EPOCHS` (= 8), matching Ergo mainnet
     /// and testnet `application.conf`. A future port of `ChainSettings` can
     /// replace this single field with the full struct without changing the
     /// connection-check semantics.

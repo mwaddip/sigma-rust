@@ -1,6 +1,6 @@
 //! Serialization of Ergo types
 use crate::chain::ergo_box::RegisterValueError;
-use crate::ergo_tree::{ErgoTreeHeaderError, ErgoTreeVersion};
+use crate::ergo_tree::{ErgoTreeError, ErgoTreeHeaderError, ErgoTreeVersion};
 use crate::mir::val_def::ValId;
 use crate::mir::{constant::TryExtractFromError, expr::InvalidArgumentError};
 use crate::types::type_unify::TypeUnificationError;
@@ -101,6 +101,28 @@ pub enum SigmaParsingError {
         max = crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH
     )]
     TypeDepthExceeded(usize),
+    /// A declared item count above
+    /// [`MAX_ARRAY_LENGTH`](crate::serialization::sigma_byte_reader::MAX_ARRAY_LENGTH):
+    /// sigmastate's `safeNewArray` refuses it before any item is read
+    #[error(
+        "cannot allocate an array of {0} items: the limit is {max}",
+        max = crate::serialization::sigma_byte_reader::MAX_ARRAY_LENGTH
+    )]
+    ArrayLengthExceeded(usize),
+    /// A CTHRESHOLD whose `k` and number of children break `0 <= k <= n <= 255`:
+    /// sigmastate's `require` throws an `IllegalArgumentException`
+    #[error("CTHRESHOLD needs 0 <= k <= n <= 255, got k = {0}, n = {1}")]
+    CthresholdOutOfBounds(u16, usize),
+    /// A bitwise operation with a non-numeric operand: sigmastate's `BitOp` requires
+    /// numeric operands and throws an `IllegalArgumentException`
+    #[error("bitwise operation on non-numeric operands: {0}")]
+    BitOpOperandsNotNumeric(String),
+    /// A tree without the size flag failed with an error that would only degrade a
+    /// size-flagged tree. sigmastate cannot keep it as `UnparsedErgoTree` and throws a
+    /// `SerializerException` ("ErgoTree serialized without size bit") instead, which rejects a
+    /// size-flagged tree around it as well.
+    #[error("ErgoTree serialized without size bit: {0}")]
+    UnsizedTreeValidationError(Box<ErgoTreeError>),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -195,7 +217,12 @@ impl SigmaParsingError {
     /// errors live in other variants and keep degrading (not listed here).
     /// Nesting deeper than `MaxTreeDepth` escapes too: the JVM's
     /// `DeserializeCallDepthExceeded` is a `SerializerException`. A type nested deeper
-    /// than `MaxTreeDepth` (the temporary `TypeDepthExceeded` bound) escapes as well.
+    /// than `MaxTreeDepth` (the temporary `TypeDepthExceeded` bound) escapes as well, and
+    /// so does a count above `MaxArrayLength` (`safeNewArray` throws a `RuntimeException`).
+    /// A CTHRESHOLD outside its bounds and a bitwise operation on a non-numeric operand
+    /// escape as well: both fail a `require`, an `IllegalArgumentException`. So does the
+    /// failure of an unsized tree nested in this one, which the JVM turns into a
+    /// `SerializerException`.
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -206,6 +233,10 @@ impl SigmaParsingError {
                 | SigmaParsingError::ScorexParsingError(_)
                 | SigmaParsingError::Io(_)
                 | SigmaParsingError::VlqEncode(_)
+                | SigmaParsingError::ArrayLengthExceeded(_)
+                | SigmaParsingError::CthresholdOutOfBounds(_, _)
+                | SigmaParsingError::BitOpOperandsNotNumeric(_)
+                | SigmaParsingError::UnsizedTreeValidationError(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)
         )

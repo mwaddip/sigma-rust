@@ -14,6 +14,10 @@ use sigma_ser::vlq_encode::ReadSigmaVlqExt;
 /// (sigmastate `SigmaConstants.MaxTreeDepth`, the default `maxTreeDepth` of every reader)
 pub const MAX_TREE_DEPTH: usize = 110;
 
+/// Maximum number of items in an array a parse allocates (sigmastate `sigma.util.MaxArrayLength`,
+/// which `safeNewArray` checks before it allocates)
+pub const MAX_ARRAY_LENGTH: usize = 100_000;
+
 /// Implementation of SigmaByteRead
 pub struct SigmaByteReader<R> {
     inner: R,

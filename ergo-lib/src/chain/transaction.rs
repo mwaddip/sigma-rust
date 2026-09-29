@@ -645,7 +645,8 @@ mod tests {
         Transaction::sigma_parse(&mut r).unwrap();
         assert!(matches!(
             Transaction::sigma_parse(&mut r),
-            Err(SigmaParsingError::ValDefIdNotFound(ValId(1)))
+            Err(SigmaParsingError::UnsizedTreeValidationError(e))
+                if *e == ErgoTreeError::SigmaParsingError(SigmaParsingError::ValDefIdNotFound(ValId(1)))
         ));
     }
 
@@ -685,6 +686,37 @@ mod tests {
                 Err(SigmaParsingError::InvalidTypeCode(112))
             ));
         }
+    }
+
+    #[test]
+    fn output_tree_header_bits_reach_the_tx_id() {
+        // SANTA `Transaction.tree_header_bits`: sigmastate writes an output tree's header
+        // byte back whole, bits 5-7 included, so the id hashes the output as received. The
+        // input's proof is empty, so the signed bytes are the transaction's own.
+        for tree in [
+            &[0x28, 0x02, 0x08, 0xd3][..],
+            &[0x48, 0x02, 0x08, 0xd3],
+            &[0x88, 0x02, 0x08, 0xd3],
+            &[0xe8, 0x02, 0x08, 0xd3],
+            &[0xe0, 0x08, 0xd3],
+        ] {
+            let bytes = tx_bytes(&[0], tree);
+            let tx = Transaction::sigma_parse_bytes(&bytes).unwrap();
+            assert_eq!(tx.id(), TxId(blake2b256_hash(&bytes)), "{tree:02x?}");
+        }
+    }
+
+    #[test]
+    fn an_inputs_count_written_above_u32_is_its_low_32_bits() {
+        // sigmastate reads the inputs count with `getUShort` (`ErgoLikeTransaction.scala:148`),
+        // which narrows it to an `Int` before its range check: written as 2^32 + 1, it is one
+        // input, and the id is over the count re-encoded
+        let canonical = tx_bytes(&[0], &[0x00, 0x08, 0xd3]);
+        let mut wrapped = vec![0x81, 0x80, 0x80, 0x80, 0x10];
+        wrapped.extend_from_slice(&canonical[1..]);
+        let tx = Transaction::sigma_parse_bytes(&wrapped).unwrap();
+        assert_eq!(tx.sigma_serialize_bytes().unwrap(), canonical);
+        assert_eq!(tx.id(), TxId(blake2b256_hash(&canonical)));
     }
 
     #[test]
