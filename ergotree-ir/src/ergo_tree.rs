@@ -2288,3 +2288,32 @@ mod register_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod collection_input_tests {
+    //! JVM parity: sigmastate types `Append` and `Slice` eagerly as their input's type, cast
+    //! to a collection (`transformers.scala:62`, `:89`), so an input of another type throws a
+    //! `ClassCastException`: no `ValidationException`, so a size-flagged tree rejects as well.
+    use super::*;
+
+    #[test]
+    fn append_or_slice_of_a_non_collection_rejects_sized_or_not() {
+        // SANTA `tree_parse_acceptance` #6-#9: `sigmaProp(SizeOf(Append(1, 2)) == 0)` and
+        // `sigmaProp(SizeOf(Slice(1, 0, 1)) == 0)`, unsized and size-flagged
+        for hex in [
+            "00d193b1b3040204040400",
+            "080ad193b1b3040204040400",
+            "00d193b1b40402040004020400",
+            "080cd193b1b40402040004020400",
+        ] {
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap()),
+                    Err(SigmaParsingError::CollectionInputExpected(_))
+                ),
+                "{hex}"
+            );
+        }
+    }
+}

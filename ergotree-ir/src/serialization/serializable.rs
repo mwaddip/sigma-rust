@@ -151,6 +151,10 @@ pub enum SigmaParsingError {
     /// register-id lookup throws an `ArrayIndexOutOfBoundsException` at the seventh
     #[error("{0} registers, where only R4 to R9 exist")]
     TooManyRegisters(u8),
+    /// An `Append` or `Slice` whose input is not a collection: sigmastate types the node
+    /// eagerly as its input's type, cast to a collection (a `ClassCastException`)
+    #[error("a collection input expected: {0}")]
+    CollectionInputExpected(String),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -255,7 +259,8 @@ impl SigmaParsingError {
     /// `ValDefTypeStore.scala:11`). So do type code 0 (`InvalidTypePrefix`) and a type
     /// parameter that is not a type variable, and malformed data: an unknown SigmaBoolean
     /// opcode, a bad BigInt size and a `getUIntExact` value above `Int.MaxValue`, and a Box
-    /// constant's register that holds no value, or a seventh register.
+    /// constant's register that holds no value, or a seventh register. So does an `Append` or
+    /// `Slice` whose input is not a collection (`transformers.scala:62`, `:89`).
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -275,6 +280,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::ExceedsIntMax(_, _)
                 | SigmaParsingError::UnevaluatedRegisterValue(_)
                 | SigmaParsingError::TooManyRegisters(_)
+                | SigmaParsingError::CollectionInputExpected(_)
                 | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)

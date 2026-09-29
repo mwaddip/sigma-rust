@@ -76,6 +76,14 @@ impl SigmaSerializable for Slice {
         let input = Expr::sigma_parse(r)?;
         let from = Expr::sigma_parse(r)?;
         let until = Expr::sigma_parse(r)?;
+        // sigmastate types `Slice` eagerly as its input's type, cast to a collection, so an
+        // input of any other type throws a `ClassCastException` (v6.0.6 `transformers.scala:89`)
+        if !matches!(input.tpe(), SType::SColl(_)) {
+            return Err(SigmaParsingError::CollectionInputExpected(format!(
+                "Slice input of type {:?}",
+                input.tpe()
+            )));
+        }
         Ok(Self::new(input, from, until)?)
     }
 }
