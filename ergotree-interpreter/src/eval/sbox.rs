@@ -4,7 +4,10 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use ergotree_ir::chain::ergo_box::ErgoBox;
+use ergotree_ir::chain::ergo_box::NonMandatoryRegisterId;
 use ergotree_ir::chain::ergo_box::RegisterId;
+use ergotree_ir::chain::ergo_box::RegisterValue;
+use ergotree_ir::chain::evaluated_value::ScriptValue;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
@@ -19,6 +22,57 @@ pub(crate) static VALUE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         obj.try_extract_into::<Ref<'_, ErgoBox>>()?.value.as_i64(),
     ))
 };
+
+/// A box's register as a script reads it. sigmastate's `CBox.getReg` (v6.0.6
+/// `CBox.scala:31-45`) reads from `registers`, a lazy val that converts every register of the
+/// box on the first read (`:28`, `:77-92`), so a register that does not convert fails a read of
+/// any register of the box. A constant always converts, so only the other values are tried.
+pub(crate) fn get_register_script_value(
+    ergo_box: &ErgoBox,
+    id: RegisterId,
+) -> Result<Option<ScriptValue>, EvalError> {
+    let unreadable = |reg_id, error| {
+        EvalError::NotFound(format!(
+            "Error getting the register id {reg_id} with error {error:?}"
+        ))
+    };
+    for reg_id in NonMandatoryRegisterId::REG_IDS {
+        match ergo_box.additional_registers.get(reg_id) {
+            Some(RegisterValue::ParsedExpr(e)) => {
+                e.value().to_script_value()?;
+            }
+            Some(value @ RegisterValue::Invalid { .. }) => {
+                return Err(unreadable(
+                    RegisterId::from(reg_id),
+                    value.as_constant().err(),
+                ))
+            }
+            _ => {}
+        }
+    }
+    match id {
+        RegisterId::NonMandatoryRegisterId(reg_id) => {
+            match ergo_box.additional_registers.get(reg_id) {
+                Some(RegisterValue::ParsedExpr(e)) => Ok(Some(e.value().to_script_value()?)),
+                Some(value) => {
+                    let c = value.as_constant().map_err(|e| unreadable(id, Some(e)))?;
+                    Ok(Some(ScriptValue {
+                        tpe: Some(c.tpe.clone()),
+                        v: c.v.clone(),
+                    }))
+                }
+                None => Ok(None),
+            }
+        }
+        RegisterId::MandatoryRegisterId(_) => Ok(ergo_box
+            .get_register(id)
+            .map_err(|e| unreadable(id, Some(e)))?
+            .map(|c| ScriptValue {
+                tpe: Some(c.tpe),
+                v: c.v,
+            })),
+    }
+}
 
 pub(crate) static GET_REG_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     ctx.add_jit_cost(50)?;
@@ -40,14 +94,10 @@ pub(crate) static GET_REG_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
         .ok()
         .and_then(|id| RegisterId::try_from(id).ok());
     let reg_val_opt = match reg_id {
-        Some(reg_id) => obj
-            .try_extract_into::<Ref<'_, ErgoBox>>()?
-            .get_register(reg_id)
-            .map_err(|e| {
-                EvalError::NotFound(format!(
-                    "Error getting the register id {reg_id} with error {e:?}"
-                ))
-            })?,
+        Some(reg_id) => {
+            let ergo_box = obj.try_extract_into::<Ref<'_, ErgoBox>>()?;
+            get_register_script_value(&ergo_box, reg_id)?
+        }
         None => None,
     };
     // Return type of getReg[T] is always Option[T]
@@ -57,12 +107,12 @@ pub(crate) static GET_REG_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
         unreachable!()
     };
     match reg_val_opt {
-        Some(constant) if constant.tpe == **expected_type => {
-            Ok(Value::Opt(Some(Box::new(constant.v.into()))))
+        Some(value) if value.tpe.as_ref() == Some(&**expected_type) => {
+            Ok(Value::Opt(Some(Box::new(value.v.into()))))
         }
-        Some(constant) => Err(EvalError::UnexpectedValue(format!(
-            "Expected register {reg_idx} to be of type {}, got {}",
-            expected_type, constant.tpe
+        Some(value) => Err(EvalError::UnexpectedValue(format!(
+            "Expected register {reg_idx} to be of type {}, got {:?}",
+            expected_type, value.tpe
         ))),
         None => Ok(Value::Opt(None)),
     }
@@ -458,5 +508,40 @@ mod tests {
         let expr = parse_tree_lenient("1b1402010101019573007301e6dc6307a701e4e30104");
         let ctx = ctx_with_r4_long7_and_var1(4);
         assert!(try_eval_out_with_version::<bool>(&expr, &ctx, 3, 3).unwrap());
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod get_reg_conversion_tests {
+    use crate::eval::extract_reg_as::register_conversion_tests::ctx_with_r4;
+    use crate::eval::test_util::try_eval_out_with_version;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::constant::Constant;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::global_vars::GlobalVars;
+    use ergotree_ir::mir::method_call::MethodCall;
+    use ergotree_ir::types::sbox;
+    use ergotree_ir::types::stype::SType;
+    use ergotree_ir::types::stype_param::STypeVar;
+
+    #[test]
+    fn get_reg_converts_every_register_of_the_box() {
+        // SANTA V10 through `Box.getReg` (`CBox.getReg`, the same `registers`): R4 =
+        // `Tuple(1, HEIGHT)` fails the read of R5, and its twin, R4 = `Tuple(1, 2)`, reads it
+        let type_args = core::iter::once((STypeVar::t(), SType::SInt)).collect();
+        let expr: Expr = MethodCall::with_type_args(
+            GlobalVars::SelfBox.into(),
+            sbox::GET_REG_METHOD.clone().with_concrete_types(&type_args),
+            vec![Constant::from(5i32).into()],
+            type_args,
+        )
+        .unwrap()
+        .into();
+        let v3 = ErgoTreeVersion::V3.into();
+        let read = |r4| try_eval_out_with_version::<Option<i32>>(&expr, &ctx_with_r4(r4), v3, v3);
+        assert!(read("86020402a3").is_err());
+        assert_eq!(read("860204020404").unwrap(), Some(1));
     }
 }

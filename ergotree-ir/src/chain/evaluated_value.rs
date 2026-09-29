@@ -87,6 +87,21 @@ impl EvaluatedValue {
     /// pairs, or a type with no runtime form.
     pub fn to_script_value(&self) -> Result<ScriptValue, TryExtractFromError> {
         // `stypeToRType(v.tpe)`, then `v.value` (`ErgoLikeContext.scala:159-160`)
+        let tpe = self.script_type()?;
+        let v = match self {
+            EvaluatedValue::Constant(c) => c.v.clone(),
+            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => tuple_script_data(items)?,
+            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => collection_script_data(c)?,
+            EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => {
+                Literal::GroupElement(generator().into())
+            }
+        };
+        Ok(ScriptValue { tpe, v })
+    }
+
+    /// The type a script reads the value at (see [`ScriptValue::tpe`]), before its data is read:
+    /// sigmastate's `stypeToRType(v.tpe)`, which fails for a type with no runtime form
+    pub fn script_type(&self) -> Result<Option<SType>, TryExtractFromError> {
         let has_runtime_type = match self {
             EvaluatedValue::Constant(c) => has_runtime_type(&c.tpe),
             EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => {
@@ -100,15 +115,7 @@ impl EvaluatedValue {
                 "{self:?} has a type with no runtime form"
             )));
         }
-        let v = match self {
-            EvaluatedValue::Constant(c) => c.v.clone(),
-            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => tuple_script_data(items)?,
-            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => collection_script_data(c)?,
-            EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => {
-                Literal::GroupElement(generator().into())
-            }
-        };
-        Ok(ScriptValue { tpe: self.tpe(), v })
+        Ok(self.tpe())
     }
 }
 
