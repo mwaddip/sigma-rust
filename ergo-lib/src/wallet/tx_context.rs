@@ -22,7 +22,6 @@ use ergotree_interpreter::sigma_protocol::verifier::{
 use ergotree_ir::chain::context::{CostLimitExceeded, TxIoVec};
 use ergotree_ir::chain::ergo_box::{BoxTokens, ErgoBox};
 use ergotree_ir::chain::token::{TokenAmount, TokenId};
-use ergotree_ir::serialization::SigmaSerializable;
 use thiserror::Error;
 
 use super::signing::{make_context, update_context};
@@ -334,7 +333,9 @@ fn verify_output(
     output: &ErgoBox,
     max_creation_height: u32,
 ) -> Result<(), TxValidationError> {
-    let box_size = output.sigma_serialize_bytes()?.len() as u64;
+    // `verifyOutput` measures `ErgoBox.bytes`, which ergo writes under its default version
+    // context (`ErgoTransaction.scala:171-175`, `BoxUtils.scala:41`)
+    let box_size = output.bytes()?.len() as u64;
     let script_size = output.script_bytes()?.len();
     let block_version = state_context.pre_header.version;
     // Check that output is not dust
@@ -972,6 +973,44 @@ mod test {
             }
         });
     }
+    #[test]
+    fn an_output_is_measured_as_ergo_s_default_context_writes_it() {
+        // SANTA X15, `Tuple(1, Upcast(1, Long))`, as R4. ergo measures an output by
+        // `ErgoBox.bytes` (`ErgoTransaction.scala:171-175`, `BoxUtils.scala:41`), written under
+        // its default version context, where the `Upcast` is written as its constant: two
+        // bytes fewer than at version 3
+        use super::verify_output;
+        use crate::chain::parameters::Parameter;
+        use ergotree_ir::serialization::SigmaSerializable;
+        let candidate = ErgoBoxCandidate::sigma_parse_bytes(
+            &base16::decode("c0843d0008d3010001860204027e040205").unwrap(),
+        )
+        .unwrap();
+        let output = ErgoBox::from_box_candidate(&candidate, TxId::zero(), 0).unwrap();
+        let written = output.bytes().unwrap().len() as u64;
+        assert_eq!(
+            output.sigma_serialize_bytes().unwrap().len() as u64,
+            written + 2
+        );
+        let mut state_context: ErgoStateContext = force_any_val();
+        state_context.pre_header.height = 1;
+        let per_byte = *output.value.as_u64() / written;
+        for (per_byte, dust) in [(per_byte, false), (per_byte + 1, true)] {
+            state_context
+                .parameters
+                .parameters_table
+                .insert(Parameter::MinValuePerByte, per_byte as i32);
+            assert_eq!(
+                matches!(
+                    verify_output(&state_context, &output, 0),
+                    Err(TxValidationError::DustOutput(..))
+                ),
+                dust,
+                "{per_byte}"
+            );
+        }
+    }
+
     #[test]
     fn test_monotonic_box_creation() {
         let true_tree = ErgoTree::new(
