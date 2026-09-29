@@ -1,6 +1,6 @@
 //! Serialization of Ergo types
 use crate::chain::ergo_box::RegisterValueError;
-use crate::ergo_tree::{ErgoTreeHeaderError, ErgoTreeVersion};
+use crate::ergo_tree::{ErgoTreeError, ErgoTreeHeaderError, ErgoTreeVersion};
 use crate::mir::val_def::ValId;
 use crate::mir::{constant::TryExtractFromError, expr::InvalidArgumentError};
 use crate::types::type_unify::TypeUnificationError;
@@ -117,6 +117,12 @@ pub enum SigmaParsingError {
     /// numeric operands and throws an `IllegalArgumentException`
     #[error("bitwise operation on non-numeric operands: {0}")]
     BitOpOperandsNotNumeric(String),
+    /// A tree without the size flag failed with an error that would only degrade a
+    /// size-flagged tree. sigmastate cannot keep it as `UnparsedErgoTree` and throws a
+    /// `SerializerException` ("ErgoTree serialized without size bit") instead, which rejects a
+    /// size-flagged tree around it as well.
+    #[error("ErgoTree serialized without size bit: {0}")]
+    UnsizedTreeValidationError(Box<ErgoTreeError>),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -214,7 +220,9 @@ impl SigmaParsingError {
     /// than `MaxTreeDepth` (the temporary `TypeDepthExceeded` bound) escapes as well, and
     /// so does a count above `MaxArrayLength` (`safeNewArray` throws a `RuntimeException`).
     /// A CTHRESHOLD outside its bounds and a bitwise operation on a non-numeric operand
-    /// escape as well: both fail a `require`, an `IllegalArgumentException`.
+    /// escape as well: both fail a `require`, an `IllegalArgumentException`. So does the
+    /// failure of an unsized tree nested in this one, which the JVM turns into a
+    /// `SerializerException`.
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -228,6 +236,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)
+                | SigmaParsingError::UnsizedTreeValidationError(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)
         )

@@ -645,7 +645,8 @@ mod tests {
         Transaction::sigma_parse(&mut r).unwrap();
         assert!(matches!(
             Transaction::sigma_parse(&mut r),
-            Err(SigmaParsingError::ValDefIdNotFound(ValId(1)))
+            Err(SigmaParsingError::UnsizedTreeValidationError(e))
+                if *e == ErgoTreeError::SigmaParsingError(SigmaParsingError::ValDefIdNotFound(ValId(1)))
         ));
     }
 

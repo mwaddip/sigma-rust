@@ -12,6 +12,7 @@ use crate::serialization::{
 use crate::sigma_protocol::sigma_boolean::ProveDlog;
 use crate::types::stype::SType;
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
@@ -216,10 +217,18 @@ impl ErgoTree {
                 tree_size,
             ) {
                 (Ok(parsed_tree), _) => Ok(parsed_tree.into()),
-                // An unsized tree cannot degrade: its body error rejects it (`:204-207`),
-                // a root that is not a `SigmaProp` included.
-                (Err(ErgoTreeError::SigmaParsingError(e)), None) => Err(e),
-                (Err(error), None) => Err(SigmaParsingError::Misc(error.to_string())),
+                // An unsized tree cannot degrade (`:204-207`). A hard error rejects it as
+                // it is; one that would degrade a size-flagged tree, a root that is not a
+                // `SigmaProp` included, becomes sigmastate's `SerializerException`, which a
+                // size-flagged tree around this one does not degrade on either.
+                (Err(ErgoTreeError::SigmaParsingError(e)), None)
+                    if e.escapes_sized_tree_degrade() =>
+                {
+                    Err(e)
+                }
+                (Err(error), None) => Err(SigmaParsingError::UnsizedTreeValidationError(Box::new(
+                    error,
+                ))),
                 (Err(error), Some(tree_size)) => {
                     // Mirror sigma-state `ErgoTreeSerializer.deserializeErgoTree`:
                     // the size-flagged `UnparsedErgoTree` fallback wraps ONLY a
@@ -764,7 +773,9 @@ mod tests {
         ];
         assert_eq!(
             ErgoTree::sigma_parse_bytes(&bytes),
-            Err(SigmaParsingError::InvalidTypeCode(0))
+            Err(SigmaParsingError::UnsizedTreeValidationError(Box::new(
+                ErgoTreeError::SigmaParsingError(SigmaParsingError::InvalidTypeCode(0))
+            )))
         );
     }
 
@@ -1143,10 +1154,12 @@ mod tests {
         assert!(matches!(tree, ErgoTree::Unparsed { .. }));
         assert_eq!(tree.sigma_serialize_bytes().unwrap(), sized);
         let unsized_tree = base16::decode("100170010404007300").unwrap();
-        assert!(matches!(
+        assert_eq!(
             ErgoTree::sigma_parse_bytes(&unsized_tree),
-            Err(SigmaParsingError::InvalidTypeCode(112))
-        ));
+            Err(SigmaParsingError::UnsizedTreeValidationError(Box::new(
+                ErgoTreeError::SigmaParsingError(SigmaParsingError::InvalidTypeCode(112))
+            )))
+        );
     }
 
     #[test]
@@ -1694,11 +1707,16 @@ mod tree_window_tests {
 
     #[test]
     fn body_read_past_the_tree_window_rejects_an_unsized_tree() {
+        // The window trip is soft (rule 1014), so an unsized tree rejects with it wrapped as
+        // "serialized without size bit", which is no position-limit error to a tree around it
         let mut bytes = vec![0x00];
         bytes.extend(eq_body(&coll_byte(4090), &coll_byte(1)));
         assert!(matches!(
             ErgoTree::sigma_parse_bytes(&bytes),
-            Err(e) if e.is_position_limit_exceeded()
+            Err(SigmaParsingError::UnsizedTreeValidationError(e)) if matches!(
+                &*e,
+                ErgoTreeError::SigmaParsingError(inner) if inner.is_position_limit_exceeded()
+            )
         ));
     }
 
@@ -1923,5 +1941,55 @@ mod ushort_count_tests {
                 "{bytes:02x?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod nested_tree_tests {
+    //! JVM parity: an unsized tree cannot degrade, so sigmastate turns a failure that would
+    //! degrade it into a `SerializerException` ("ErgoTree serialized without size bit",
+    //! `ErgoTreeSerializer.scala:204-207`). No tree degrades on that, so it also rejects a
+    //! size-flagged tree holding the unsized one in a `Box` constant.
+    use super::*;
+
+    /// A size-flagged, segregated tree whose constant 0 is a `Box` guarded by `nested_tree`,
+    /// constant 1 `sigmaProp(true)`, and whose root is `ConstantPlaceholder(1)` (SANTA
+    /// `tree_nested_degrade`)
+    fn outer_tree(nested_tree: &[u8]) -> Vec<u8> {
+        let nested_box = [
+            &[0xc0, 0x84, 0x3d][..], // value
+            nested_tree,
+            &[0x01, 0x00, 0x00], // creation height, tokens, registers
+            &[0; 33],            // transaction id and index
+        ]
+        .concat();
+        let body = [&[0x02, 0x63][..], &nested_box, &[0x08, 0xd3, 0x73, 0x01]].concat();
+        [&[0x18, body.len() as u8][..], &body].concat()
+    }
+
+    #[test]
+    fn a_nested_unsized_tree_that_would_degrade_rejects_the_outer_tree() {
+        // SANTA `tree_nested_degrade` #0, an unknown opcode (rule 1002); then a root that is
+        // not a `SigmaProp` (rule 1001)
+        for nested_tree in [[0x00, 0xd1, 0xfd], [0x00, 0x04, 0x02]] {
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse_bytes(&outer_tree(&nested_tree)),
+                    Err(SigmaParsingError::UnsizedTreeValidationError(_))
+                ),
+                "{nested_tree:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nested_sized_tree_degrades_on_its_own() {
+        // SANTA `tree_nested_degrade` #1: the nested tree is kept as `Unparsed`, and the
+        // outer tree parses
+        let bytes = outer_tree(&[0x08, 0x02, 0xd1, 0xfd]);
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)));
+        assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
     }
 }
