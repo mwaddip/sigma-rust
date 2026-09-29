@@ -436,9 +436,10 @@ pub fn parse_box_with_indexed_digests<R: SigmaByteRead>(
     // `Int.MaxValue` fails the parse, rejecting the box and any transaction
     // output or Box-typed constant that contains it.
     if creation_height > i32::MAX as u32 {
-        return Err(SigmaParsingError::ValueOutOfBounds(alloc::format!(
-            "box creation height {creation_height} exceeds Int.MaxValue (getUIntExact)"
-        )));
+        return Err(SigmaParsingError::ExceedsIntMax(
+            "box creation height",
+            creation_height,
+        ));
     }
     let tokens_count = r.get_u8()?;
     let mut tokens = Vec::with_capacity(tokens_count as usize);
@@ -945,7 +946,7 @@ mod creation_height_bound_tests {
             assert!(
                 matches!(
                     ErgoBox::sigma_parse_bytes(&bytes),
-                    Err(SigmaParsingError::ValueOutOfBounds(_))
+                    Err(SigmaParsingError::ExceedsIntMax("box creation height", _))
                 ),
                 "height {h:#x}"
             );
@@ -965,7 +966,7 @@ mod creation_height_bound_tests {
         let bytes = candidate.sigma_serialize_bytes().unwrap();
         assert!(matches!(
             ErgoBoxCandidate::sigma_parse_bytes(&bytes),
-            Err(SigmaParsingError::ValueOutOfBounds(_))
+            Err(SigmaParsingError::ExceedsIntMax("box creation height", _))
         ));
     }
 

@@ -2149,13 +2149,28 @@ mod type_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod malformed_data_tests {
-    //! JVM parity: an unknown SigmaBoolean opcode (a `MatchError`) and a BigInt size above 32
-    //! or of 0 (a `SerializerException`, a `NumberFormatException`) are no
-    //! `ValidationException`s, so a size-flagged tree rejects (SANTA `tree_degrade_gate`).
+    //! JVM parity: an unknown SigmaBoolean opcode (a `MatchError`), a BigInt size above 32 or
+    //! of 0 (a `SerializerException`, a `NumberFormatException`) and a `getUIntExact` value
+    //! above `Int.MaxValue` (an `ArithmeticException`) are no `ValidationException`s, so a
+    //! size-flagged tree rejects (SANTA `tree_degrade_gate`).
     use super::*;
 
     fn tree(hex: &str) -> Vec<u8> {
         base16::decode(hex).unwrap()
+    }
+
+    /// A size-flagged tree whose constant 0 is a `Box` created at `height` (SANTA
+    /// `tree_degrade_gate` #14, #15)
+    fn box_constant_tree(height: &[u8]) -> Vec<u8> {
+        let nested_box = [
+            &[0xc0, 0x84, 0x3d, 0x00, 0x08, 0xd3][..], // value, tree
+            height,
+            &[0x00, 0x00], // tokens, registers
+            &[0; 33],      // transaction id and index
+        ]
+        .concat();
+        let body = [&[0x02, 0x63][..], &nested_box, &[0x08, 0xd3, 0x73, 0x01]].concat();
+        [&[0x18, body.len() as u8][..], &body].concat()
     }
 
     #[test]
@@ -2185,5 +2200,31 @@ mod malformed_data_tests {
             ErgoTree::sigma_parse_bytes(&size_32).unwrap(),
             ErgoTree::Unparsed { .. }
         ));
+    }
+
+    #[test]
+    fn a_get_uint_exact_value_above_int_max_rejects_a_sized_tree() {
+        // #7 a `ValDef` id of 2^31 and #14 a `Box` constant created at height 2^31; then their
+        // twins at 2^31 - 1, #8 and #15
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&tree("0810d801d6808080800808d3728080808008")),
+            Err(SigmaParsingError::ExceedsIntMax("ValDef id", 1 << 31))
+        );
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&box_constant_tree(&[0x80, 0x80, 0x80, 0x80, 0x08])),
+            Err(SigmaParsingError::ExceedsIntMax(
+                "box creation height",
+                1 << 31
+            ))
+        );
+        for bytes in [
+            tree("0810d801d6ffffffff0708d372ffffffff07"),
+            box_constant_tree(&[0xff, 0xff, 0xff, 0xff, 0x07]),
+        ] {
+            assert!(matches!(
+                ErgoTree::sigma_parse_bytes(&bytes).unwrap(),
+                ErgoTree::Parsed(_)
+            ));
+        }
     }
 }

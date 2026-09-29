@@ -139,6 +139,10 @@ pub enum SigmaParsingError {
     /// `NumberFormatException`
     #[error("invalid BigInt size {0}")]
     InvalidBigIntSize(usize),
+    /// A value sigmastate reads with `getUIntExact` that does not fit an `Int` (an
+    /// `ArithmeticException`)
+    #[error("{0} {1} exceeds Int.MaxValue (getUIntExact)")]
+    ExceedsIntMax(&'static str, u32),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -242,7 +246,7 @@ impl SigmaParsingError {
     /// `ValDef` escape too: their store lookups throw (`ConstantPlaceholderSerializer.scala:19`,
     /// `ValDefTypeStore.scala:11`). So do type code 0 (`InvalidTypePrefix`) and a type
     /// parameter that is not a type variable, and malformed data: an unknown SigmaBoolean
-    /// opcode and a bad BigInt size.
+    /// opcode, a bad BigInt size and a `getUIntExact` value above `Int.MaxValue`.
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -259,6 +263,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::InvalidTypeParameter(_)
                 | SigmaParsingError::InvalidSigmaBooleanOpCode(_)
                 | SigmaParsingError::InvalidBigIntSize(_)
+                | SigmaParsingError::ExceedsIntMax(_, _)
                 | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)

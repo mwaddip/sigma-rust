@@ -52,9 +52,7 @@ impl ValId {
     ) -> Result<Self, SigmaParsingError> {
         let id = r.get_u32()?;
         if id > i32::MAX as u32 {
-            return Err(SigmaParsingError::Misc(alloc::format!(
-                "ValDef id {id} exceeds Int.MaxValue (getUIntExact)"
-            )));
+            return Err(SigmaParsingError::ExceedsIntMax("ValDef id", id));
         }
         Ok(ValId(id))
     }
