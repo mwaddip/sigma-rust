@@ -150,14 +150,18 @@ fn item_script_data(item: &Expr) -> Result<Literal, TryExtractFromError> {
     }
 }
 
-/// `Tuple.value` (`values.scala:818-822`). A tuple of fewer than two items has no tuple data
-/// here, so it keeps sigmastate's `Coll[Any]`.
+/// `Tuple.value` (`values.scala:818-822`): a `Coll[Any]` of the items' data. sigmastate
+/// represents every tuple but a pair that way (`TupleData`, `package.scala:67`), which sigma-rust's
+/// tuple data stands for, so only a pair differs: a pair is a `Tuple2` in sigmastate, and a pair
+/// expression's data stays the collection, which the pair's type checks reject
+/// (`Value.checkType`). A tuple of fewer than two items has no tuple data here, so it keeps the
+/// collection too.
 fn tuple_script_data(items: &[Expr]) -> Result<Literal, TryExtractFromError> {
     let data = items
         .iter()
         .map(item_script_data)
         .collect::<Result<Vec<_>, _>>()?;
-    if data.len() < 2 {
+    if data.len() <= 2 {
         return Ok(Literal::Coll(CollKind::from_collection(SType::SAny, data)?));
     }
     Ok(Literal::Tup(data.try_into().map_err(|_| {
@@ -484,7 +488,7 @@ mod script_value_tests {
     #[test]
     fn a_value_reads_at_its_type_with_its_data() {
         // each value against the constant encoding of the same data: `TrueLeaf`, the generator,
-        // `Coll[Int](1, 2)`, `Tuple(1, 2)`, and a `Coll[(Int, Int)]` holding the pair constant
+        // `Coll[Int](1, 2)`, and a `Coll[(Int, Int)]` holding the pair constant
         for (hex, constant_hex) in [
             ("7f", "0101"),
             (
@@ -492,7 +496,6 @@ mod script_value_tests {
                 "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
             ),
             ("83020404020404", "10020204"),
-            ("860204020404", "580204"),
             ("830158580204", "0c58010204"),
         ] {
             let c = Constant::sigma_parse_bytes(&base16::decode(constant_hex).unwrap()).unwrap();
@@ -505,6 +508,24 @@ mod script_value_tests {
                 "{hex}"
             );
         }
+    }
+
+    #[test]
+    fn a_pair_tuple_expression_reads_as_a_collection() {
+        // `Tuple.value` is a `Coll[Any]` of the items' data (`values.scala:818-822`) while the
+        // type is a pair (SANTA V3, V9): a script reads `Tuple(1, 2)` as that collection
+        let sv = parse("860204020404").to_script_value().unwrap();
+        assert_eq!(
+            sv.tpe,
+            Some(SType::STuple(STuple::pair(SType::SInt, SType::SInt)))
+        );
+        assert_eq!(
+            sv.v,
+            Literal::Coll(
+                CollKind::from_collection(SType::SAny, vec![Literal::Int(1), Literal::Int(2)])
+                    .unwrap()
+            )
+        );
     }
 
     #[test]

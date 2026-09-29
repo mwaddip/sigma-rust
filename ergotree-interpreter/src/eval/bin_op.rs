@@ -228,14 +228,20 @@ impl Evaluable for BinOp {
                 )),
             },
             BinOpKind::Relation(op) => match op {
+                // `EQ`/`NEQ` check each operand's value against its type, the left one before
+                // the right is evaluated (`trees.scala:1204-1209`, `:1224-1229`)
                 RelationOp::Eq => {
+                    crate::eval::check_value_of_type(&self.left.tpe(), &lv)?;
                     let rv_val = rv()?;
+                    crate::eval::check_value_of_type(&self.right.tpe(), &rv_val)?;
                     Ok(Value::Boolean(
                         crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
                     ))
                 }
                 RelationOp::NEq => {
+                    crate::eval::check_value_of_type(&self.left.tpe(), &lv)?;
                     let rv_val = rv()?;
+                    crate::eval::check_value_of_type(&self.right.tpe(), &rv_val)?;
                     Ok(Value::Boolean(
                         !crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
                     ))
@@ -778,7 +784,20 @@ mod tests {
 
         #[test]
         fn test_eq(v in any::<Constant>()) {
-            prop_assert![check_eq_neq(v.clone(), v)];
+            // `EQ`/`NEQ` check each operand's value against its type, and sigmastate's
+            // `isValueOfType` has no case for a tuple of other than two items
+            // (`SType.scala:200-202`): comparing one fails
+            if matches!(&v.tpe, ergotree_ir::types::stype::SType::STuple(t) if t.items.len() != 2) {
+                let eq_op: Expr = BinOp {
+                    kind: BinOpKind::Relation(RelationOp::Eq),
+                    left: Box::new(v.clone().into()),
+                    right: Box::new(v.into()),
+                }
+                .into();
+                prop_assert!(try_eval_out_wo_ctx::<bool>(&eq_op).is_err());
+            } else {
+                prop_assert![check_eq_neq(v.clone(), v)];
+            }
         }
 
         #[test]
@@ -1074,5 +1093,85 @@ mod tests {
         let l = cthreshold(1, vec![cand(vec![a.clone(), b.clone()]), a.clone()]);
         let r = cthreshold(2, vec![a.clone(), a]);
         assert!(!eval_sigmaprop_relation(RelationOp::Eq, l, r).unwrap());
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod pair_value_tests {
+    //! JVM parity: a tuple expression's data is a collection even where its type is a pair
+    //! (`values.scala:818-822`), and `EQ`/`NEQ` check each operand's value against its type
+    //! (`trees.scala:1204-1229`), so comparing a pair read from such a variable fails, as does
+    //! `SelectField` on it (`transformers.scala:300-307`).
+    use super::*;
+    use crate::eval::test_util::try_eval_out;
+    use ergotree_ir::chain::context::Context;
+    use ergotree_ir::chain::context_extension::ContextExtension;
+    use ergotree_ir::chain::evaluated_value::EvaluatedValue;
+    use ergotree_ir::mir::constant::Constant;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::get_var::GetVar;
+    use ergotree_ir::mir::option_get::OptionGet;
+    use ergotree_ir::mir::select_field::SelectField;
+    use ergotree_ir::mir::unary_op::OneArgOpTryBuild;
+    use ergotree_ir::serialization::SigmaSerializable;
+    use ergotree_ir::types::stuple::STuple;
+    use ergotree_ir::types::stype::SType;
+    use sigma_test_util::force_any_val;
+
+    /// var 0 = `hex`
+    fn ctx_with_var0(hex: &str) -> Context<'static> {
+        let value = EvaluatedValue::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap();
+        let ext = ContextExtension {
+            values: [(0u8, value)].into_iter().collect(),
+        };
+        Context {
+            extension: Box::leak(Box::new(ext)),
+            ..force_any_val::<Context>()
+        }
+    }
+
+    fn var0() -> Expr {
+        GetVar {
+            var_id: 0,
+            var_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt)),
+        }
+        .into()
+    }
+
+    fn relation(op: RelationOp, left: Expr, right: Expr) -> Expr {
+        BinOp {
+            kind: BinOpKind::Relation(op),
+            left: left.into(),
+            right: right.into(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn a_tuple_expression_read_as_a_pair_fails_where_its_value_is_checked() {
+        // SANTA T2, `getVar[(Int, Int)](0).get != (0, 0)`, and V3,
+        // `getVar[(Int, Int)](0).get._1 == 1`: invalid with var 0 = `Tuple(1, 2)`, valid with its
+        // constant twin `58 02 04`
+        let pair: Expr = OptionGet::try_build(var0()).unwrap().into();
+        let zeros = Constant::sigma_parse_bytes(&[0x58, 0x00, 0x00]).unwrap();
+        let ne = relation(RelationOp::NEq, pair.clone(), zeros.into());
+        let first: Expr = SelectField::new(pair, 1u8.try_into().unwrap())
+            .unwrap()
+            .into();
+        let first_is_1 = relation(RelationOp::Eq, first, Expr::Const(1i32.into()));
+        for expr in [ne, first_is_1] {
+            assert!(try_eval_out::<bool>(&expr, &ctx_with_var0("860204020404")).is_err());
+            assert!(try_eval_out::<bool>(&expr, &ctx_with_var0("580204")).unwrap());
+        }
+    }
+
+    #[test]
+    fn a_tuple_expression_read_as_a_pair_passes_where_nothing_checks_it() {
+        // SANTA T4, `getVar[(Int, Int)](0) == getVar[(Int, Int)](0)`: the operands are options,
+        // and `isValueOfType` checks only an option's class (`SType.scala:199`)
+        let eq = relation(RelationOp::Eq, var0(), var0());
+        assert!(try_eval_out::<bool>(&eq, &ctx_with_var0("860204020404")).unwrap());
     }
 }

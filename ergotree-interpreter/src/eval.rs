@@ -219,6 +219,22 @@ pub(crate) fn check_value_type(tpe: &SType) -> Result<(), EvalError> {
     }
 }
 
+/// sigmastate's `Value.checkType` (`values.scala:251-255`), through `SType.isValueOfType`
+/// (`SType.scala:187-213`): [`check_value_type`]'s tuple and function rules, and a pair type's
+/// value must be a pair. The other `isValueOfType` arms only assert that a value matches its
+/// type, which sigma-rust's typed values guarantee; a pair is the exception, as a pair tuple
+/// expression's data is a collection typed as a pair (`values.scala:818-822`).
+pub(crate) fn check_value_of_type(tpe: &SType, value: &Value) -> Result<(), EvalError> {
+    check_value_type(tpe)?;
+    match (tpe, value) {
+        (SType::STuple(_), Value::Tup(_)) => Ok(()),
+        (SType::STuple(_), _) => Err(EvalError::Misc(format!(
+            "Invalid type returned by evaluator: expected type {tpe:?}, resulting value {value:?}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Evaluate the given expression by reducing it to SigmaBoolean value.
 pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResult, EvalError> {
     // The JVM rejects a `>= 0x80` self-extension key at context construction,
