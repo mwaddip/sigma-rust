@@ -18,6 +18,7 @@ mod tests {
     use crate::eval::test_util::try_eval_with_deserialize;
     use ergotree_ir::chain::context::Context;
     use ergotree_ir::chain::context_extension::ContextExtension;
+    use ergotree_ir::chain::evaluated_value::EvaluatedValue;
 
     #[test]
     fn eval() {
@@ -354,5 +355,28 @@ mod tests {
                 try_eval_with_deserialize::<bool>(tree.root_expr().unwrap(), &eval_ctx).unwrap()
             );
         }
+    }
+
+    // sigmastate substitutes a context variable only when its type is `Coll[Byte]`, and reads
+    // its data after that (`Interpreter.scala:114-115`), so a variable of another type is left
+    // alone whatever its data (from source). Here var 0 holds an empty tuple, which has no
+    // constant form, under the dead `deserializeContext[Boolean](0)` branch of the test above.
+    #[test]
+    fn a_variable_of_another_type_is_not_substituted() {
+        let bytes = base16::decode("1b0d02010101019573007301d40100").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes_lenient(&bytes).unwrap();
+        let ctx_ext = ContextExtension {
+            values: [(
+                0u8,
+                EvaluatedValue::sigma_parse_bytes(&[0x86, 0x00]).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let mut ctx = force_any_val::<Context>().with_extension(&ctx_ext);
+        ctx.pre_header.version = 4;
+        ctx.tree_version.set(ErgoTreeVersion::V3);
+        let eval_ctx = ctx.with_constants(tree.constants().unwrap());
+        assert!(try_eval_with_deserialize::<bool>(tree.root_expr().unwrap(), &eval_ctx).unwrap());
     }
 }

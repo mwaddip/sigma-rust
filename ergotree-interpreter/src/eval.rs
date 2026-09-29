@@ -184,6 +184,19 @@ fn validate_self_extension_key_domain(ctx: &Context) -> Result<(), EvalError> {
     Ok(())
 }
 
+/// sigmastate converts every self context variable as it builds the script context
+/// (`ErgoLikeContext.scala:158-161`), which `CErgoTreeEvaluator.eval` does for every tree it
+/// evaluates (`CErgoTreeEvaluator.scala:563`), whether a script reads the variable or not: a
+/// variable that does not convert fails the reduction. A tree whose proposition is a
+/// `SigmaProp` constant is not evaluated, so nothing is converted (`Interpreter.scala:211`).
+fn convert_self_extension(ctx: &Context) -> Result<(), EvalError> {
+    ctx.extension
+        .values
+        .values()
+        .try_for_each(|value| value.to_script_value().map(|_| ()))
+        .map_err(EvalError::from)
+}
+
 /// Mirror of sigma-state `SType.isValueOfType`'s reachable rejections
 /// (`SType.scala:200-205`), invoked by the JVM via `Value.checkType` at the
 /// Tuple-eval items (`values.scala:801/804`) and `ConstantPlaceholder.eval`
@@ -278,22 +291,9 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
         }
         let expr = tree.proposition()?;
         let expr = expr.substitute_deserialize(ctx)?;
-        // Trivial short-circuit: plain SigmaProp constants (e.g. P2PK) are
-        // priced at a flat 50 JitCost via EvalSigmaPropConstant. `expr` here
-        // has placeholders already substituted, so only the Expr::Const arm
-        // can fire — the placeholder arm needs `ctx.constants`, which this
-        // path does not set up.
-        if let Some(sigma_bool) = trivial_reduce(&expr, ctx) {
-            ctx.add_jit_cost(EVAL_SIGMA_PROP_CONSTANT)?;
-            return Ok(ReductionResult {
-                sigma_prop: sigma_bool,
-                cost: (ctx.jit_cost_value() - cost_before) / 10,
-                diag: ReductionDiagnosticInfo {
-                    env: Env::empty().to_static(),
-                    pretty_printed_expr: None,
-                },
-            });
-        }
+        // sigmastate evaluates the substituted tree whatever it is, a `SigmaProp` constant
+        // included, building the script context first (`Interpreter.scala:171-177`)
+        convert_self_extension(ctx)?;
         let res = inner(&expr, ctx, cost_before);
         return match res {
             Ok(reduction) if reduction.sigma_prop == SigmaBoolean::TrivialProp(false) => {
@@ -354,6 +354,7 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
             },
         });
     }
+    convert_self_extension(&ctx_with_c)?;
     let res = inner(root, &ctx_with_c, cost_before);
     ctx.jit_cost.set(ctx_with_c.jit_cost_value());
     match res {
@@ -719,6 +720,7 @@ pub mod test_util {
             _ => expr.clone(),
         };
         let expr = expr.substitute_deserialize(ctx)?;
+        super::convert_self_extension(ctx)?;
         try_eval_out(&expr, ctx)
     }
 
@@ -1102,5 +1104,79 @@ mod test {
              fix, got {:?}",
             res
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod context_conversion_tests {
+    //! JVM parity: sigmastate converts every self context variable as it builds the script
+    //! context (`ErgoLikeContext.scala:158-161`), which it does for every tree it evaluates
+    //! (`CErgoTreeEvaluator.scala:563`) and not for a tree whose proposition is a `SigmaProp`
+    //! constant (`Interpreter.scala:211`). A variable that does not convert fails the spend.
+    use super::*;
+    use ergotree_ir::chain::context_extension::ContextExtension;
+    use ergotree_ir::chain::evaluated_value::EvaluatedValue;
+    use ergotree_ir::ergo_tree::ErgoTreeHeader;
+    use ergotree_ir::mir::deserialize_context::DeserializeContext;
+    use ergotree_ir::serialization::SigmaSerializable;
+    use sigma_test_util::force_any_val;
+
+    fn value(hex: &str) -> EvaluatedValue {
+        EvaluatedValue::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap()
+    }
+
+    fn reduce(
+        tree: &ErgoTree,
+        vars: Vec<(u8, EvaluatedValue)>,
+    ) -> Result<ReductionResult, EvalError> {
+        let ext = ContextExtension {
+            values: vars.into_iter().collect(),
+        };
+        let mut ctx = force_any_val::<Context>().with_extension(&ext);
+        ctx.pre_header.version = 4;
+        reduce_to_crypto(tree, &ctx)
+    }
+
+    #[test]
+    fn an_evaluated_tree_fails_on_a_variable_that_does_not_convert() {
+        // SANTA V1: `Tuple(1, HEIGHT)` in var 0 under `sigmaProp(true)`, which is evaluated; V2:
+        // the same under a `SigmaProp` constant, which is not; then `Tuple(1, 2)`, which converts
+        let evaluated = ErgoTree::sigma_parse_bytes(&[0x00, 0xd1, 0x01, 0x01]).unwrap();
+        let constant = ErgoTree::sigma_parse_bytes(&[0x00, 0x08, 0xd3]).unwrap();
+        assert!(reduce(&evaluated, vec![(0, value("86020402a3"))]).is_err());
+        assert!(reduce(&constant, vec![(0, value("86020402a3"))]).is_ok());
+        assert!(reduce(&evaluated, vec![(0, value("860204020404"))]).is_ok());
+    }
+
+    #[test]
+    fn a_deserialized_sigma_prop_constant_is_evaluated() {
+        // SANTA D4: `executeFromVar[SigmaProp](1)`, var 1 deserializing to `TrueProp`. sigmastate
+        // evaluates the substituted tree, whatever it is (`Interpreter.scala:171-177`), so its
+        // context conversion runs: var 0, `Tuple(1, HEIGHT)`, fails the spend
+        let tree = ErgoTree::new(
+            ErgoTreeHeader::v1(false),
+            &DeserializeContext {
+                tpe: SType::SSigmaProp,
+                id: 1,
+            }
+            .into(),
+        )
+        .unwrap();
+        let true_prop_bytes = || (1u8, value("0e0208d3"));
+        assert!(reduce(&tree, vec![(0, value("86020402a3")), true_prop_bytes()]).is_err());
+        // D4's twin, without var 0: the tree's bytes x 20 JitCost (substitution, since v6), 2
+        // bytes x 20 (deserialization), and a `Constant`'s 5, not the flat 50 of a tree that is a
+        // `SigmaProp` constant (SANTA: 12112, where sigma-rust charged 12117)
+        let ext = ContextExtension {
+            values: [true_prop_bytes()].into_iter().collect(),
+        };
+        let mut ctx = force_any_val::<Context>().with_extension(&ext);
+        ctx.pre_header.version = 4;
+        ctx.jit_cost.set(0);
+        reduce_to_crypto(&tree, &ctx).unwrap();
+        let tree_len = tree.sigma_serialize_bytes().unwrap().len() as u64;
+        assert_eq!(ctx.jit_cost_value(), tree_len * 20 + 2 * 20 + 5);
     }
 }

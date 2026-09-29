@@ -10,14 +10,22 @@ use crate::eval::Evaluable;
 impl Evaluable for GetVar {
     fn eval<'ctx>(&self, _env: &mut Env, ctx: &Context<'ctx>) -> Result<Value<'ctx>, EvalError> {
         ctx.add_jit_cost(10)?; // GetVar = Fixed(10)
-        match ctx.extension.get_constant(self.var_id)? {
-            None => Ok(Value::Opt(None)),
-            Some(v) if v.tpe == self.var_tpe => Ok((Some(v.v)).into()),
-            Some(v) => Err(TryExtractFromError(format!(
+
+        // `CContext.getVar` (v6.0.6 `CContext.scala:60-74`): the variable as the script context
+        // holds it, when its type is the one asked for, and an error otherwise
+        let value = match ctx.extension.values.get(&self.var_id) {
+            None => return Ok(Value::Opt(None)),
+            Some(value) => value,
+        };
+        let script_value = value.to_script_value()?;
+        if script_value.tpe.as_ref() == Some(&self.var_tpe) {
+            Ok(Some(script_value.v).into())
+        } else {
+            Err(TryExtractFromError(format!(
                 "GetVar: expected extension value id {} to have type {:?}, found {:?} in context extension map {}",
-                self.var_id, self.var_tpe, v, ctx.extension
+                self.var_id, self.var_tpe, value, ctx.extension
             ))
-            .into()),
+            .into())
         }
     }
 }
