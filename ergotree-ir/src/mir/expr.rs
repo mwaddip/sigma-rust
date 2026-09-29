@@ -441,7 +441,7 @@ impl Expr {
                 let (tpe, parsed_expr): (&mut SType, Expr) = match expr {
                     Expr::DeserializeContext(DeserializeContext { tpe, id }) => {
                         let value = match ctx.extension.values.get(&*id) {
-                            Some(value) => value.clone(),
+                            Some(value) => value,
                             // Absent context variable: leave the DeserializeContext
                             // node unchanged, mirroring the JVM
                             // `Interpreter.substDeserialize` `else None` (and the
@@ -457,10 +457,14 @@ impl Expr {
                         // `Interpreter.substDeserialize` inner `case _ => None`
                         // (a non-SByteArray extension value is not substituted;
                         // the leftover node errors only on the live eval path).
-                        let vec = match value.try_extract_into::<Vec<u8>>() {
-                            Ok(vec) => vec,
-                            Err(_) => return Ok(()),
-                        };
+                        // The type decides before the data is read (`eba.tpe ==
+                        // SByteArray`, then `eba.value`, `Interpreter.scala:114-115`).
+                        if value.tpe() != Some(SType::SColl(SType::SByte.into())) {
+                            return Ok(());
+                        }
+                        // For a `Coll[Byte]`, its constant form is its data as
+                        // the script reads it
+                        let vec = value.to_constant()?.try_extract_into::<Vec<u8>>()?;
                         // Each actually-substituted node charges the JVM's
                         // deserialization complexity — `scriptBytes.length ×
                         // CostPerByteDeserialized(2)` block cost

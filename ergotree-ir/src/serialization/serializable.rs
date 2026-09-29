@@ -143,10 +143,15 @@ pub enum SigmaParsingError {
     /// `ArithmeticException`)
     #[error("{0} {1} exceeds Int.MaxValue (getUIntExact)")]
     ExceedsIntMax(&'static str, u32),
-    /// A Box constant's register that holds an expression, not a value: sigmastate's cast to
-    /// `EvaluatedValue` throws a `ClassCastException`
-    #[error("unevaluated register value: {0}")]
-    UnevaluatedRegisterValue(String),
+    /// A register or context-extension value that is not an `EvaluatedValue`: sigmastate's
+    /// cast after `getValue` throws a `ClassCastException` (v6.0.6
+    /// `ErgoBoxCandidate.scala:231`, `ContextExtension.scala:61`)
+    #[error("not a value: {0}")]
+    UnevaluatedValue(String),
+    /// A tuple whose size, a signed byte, is negative: sigmastate's `safeNewArray` throws a
+    /// `NegativeArraySizeException` (v6.0.6 `TupleSerializer.scala:28-31`)
+    #[error("negative tuple size {0}")]
+    NegativeTupleSize(i8),
     /// A Box constant with more than the six non-mandatory registers: sigmastate's
     /// register-id lookup throws an `ArrayIndexOutOfBoundsException` at the seventh
     #[error("{0} registers, where only R4 to R9 exist")]
@@ -283,7 +288,8 @@ impl SigmaParsingError {
                 | SigmaParsingError::InvalidSigmaBooleanOpCode(_)
                 | SigmaParsingError::InvalidBigIntSize(_)
                 | SigmaParsingError::ExceedsIntMax(_, _)
-                | SigmaParsingError::UnevaluatedRegisterValue(_)
+                | SigmaParsingError::UnevaluatedValue(_)
+                | SigmaParsingError::NegativeTupleSize(_)
                 | SigmaParsingError::TooManyRegisters(_)
                 | SigmaParsingError::CollectionInputExpected(_)
                 | SigmaParsingError::CollectionItemTypeMismatch(_)

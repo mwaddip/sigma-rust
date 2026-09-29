@@ -15,11 +15,15 @@ impl Evaluable for If {
     ) -> Result<Value<'ctx>, EvalError> {
         ctx.add_jit_cost(10)?; // If = Fixed(10)
         let condition_v = self.condition.eval(env, ctx)?;
-        if condition_v.try_extract_into::<bool>()? {
-            self.true_branch.eval(env, ctx)
+        let branch = if condition_v.try_extract_into::<bool>()? {
+            &self.true_branch
         } else {
-            self.false_branch.eval(env, ctx)
-        }
+            &self.false_branch
+        };
+        // `If.eval` checks the branch's value against its type (`trees.scala:1358-1365`)
+        let res = branch.eval(env, ctx)?;
+        crate::eval::check_value_of_type(&branch.tpe(), &res)?;
+        Ok(res)
     }
 }
 

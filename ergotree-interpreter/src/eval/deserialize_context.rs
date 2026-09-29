@@ -18,6 +18,7 @@ mod tests {
     use crate::eval::test_util::try_eval_with_deserialize;
     use ergotree_ir::chain::context::Context;
     use ergotree_ir::chain::context_extension::ContextExtension;
+    use ergotree_ir::chain::evaluated_value::EvaluatedValue;
 
     #[test]
     fn eval() {
@@ -160,7 +161,7 @@ mod tests {
             let bytes = inner.sigma_serialize_bytes().unwrap();
             let len = bytes.len() as u64;
             let ext = ContextExtension {
-                values: [(0u8, Constant::from(bytes))].iter().cloned().collect(),
+                values: [(0u8, bytes.into())].into_iter().collect(),
             };
             let ctx = force_any_val::<Context>().with_extension(&ext);
             let before = ctx.jit_cost_value();
@@ -230,9 +231,8 @@ mod tests {
         }
         .into();
         // var 0 present but an Int, not a Coll[Byte]
-        let ctx_ext_val: Constant = 1i32.into();
         let ctx_ext = ContextExtension {
-            values: [(0u8, ctx_ext_val)].iter().cloned().collect(),
+            values: [(0u8, 1i32.into())].into_iter().collect(),
         };
         let ctx = force_any_val::<Context>().with_extension(&ctx_ext);
         assert!(try_eval_with_deserialize::<bool>(&expr, &ctx).unwrap());
@@ -246,9 +246,8 @@ mod tests {
         }
         .into();
         // should be byte array
-        let ctx_ext_val: Constant = 1i32.into();
         let ctx_ext = ContextExtension {
-            values: [(1u8, ctx_ext_val)].iter().cloned().collect(),
+            values: [(1u8, 1i32.into())].into_iter().collect(),
         };
         let ctx = force_any_val::<Context>().with_extension(&ctx_ext);
         assert!(try_eval_with_deserialize::<bool>(&expr, &ctx).is_err());
@@ -326,7 +325,7 @@ mod tests {
     // over the whole tree, dead branches included).
     #[test]
     fn deserialize_bearing_segregated_tree_evals_substituted() {
-        let inner_bytes: Constant = Expr::from(true).sigma_serialize_bytes().unwrap().into();
+        let inner_bytes = Expr::from(true).sigma_serialize_bytes().unwrap();
         for hex in [
             "1b0d02010101019573007301d40100", // deserializeContext(0) on the dead branch
             "1b0d02010101019573007301d40101", // deserializeContext(1) on the dead branch
@@ -340,10 +339,12 @@ mod tests {
             let tree = ErgoTree::sigma_parse_bytes_lenient(&bytes).unwrap();
 
             let ctx_ext = ContextExtension {
-                values: [(0u8, inner_bytes.clone()), (1u8, inner_bytes.clone())]
-                    .iter()
-                    .cloned()
-                    .collect(),
+                values: [
+                    (0u8, inner_bytes.clone().into()),
+                    (1u8, inner_bytes.clone().into()),
+                ]
+                .into_iter()
+                .collect(),
             };
             let mut ctx = force_any_val::<Context>().with_extension(&ctx_ext);
             ctx.pre_header.version = 4;
@@ -354,5 +355,28 @@ mod tests {
                 try_eval_with_deserialize::<bool>(tree.root_expr().unwrap(), &eval_ctx).unwrap()
             );
         }
+    }
+
+    // sigmastate substitutes a context variable only when its type is `Coll[Byte]`, and reads
+    // its data after that (`Interpreter.scala:114-115`), so a variable of another type is left
+    // alone whatever its data (from source). Here var 0 holds an empty tuple, which has no
+    // constant form, under the dead `deserializeContext[Boolean](0)` branch of the test above.
+    #[test]
+    fn a_variable_of_another_type_is_not_substituted() {
+        let bytes = base16::decode("1b0d02010101019573007301d40100").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes_lenient(&bytes).unwrap();
+        let ctx_ext = ContextExtension {
+            values: [(
+                0u8,
+                EvaluatedValue::sigma_parse_bytes(&[0x86, 0x00]).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let mut ctx = force_any_val::<Context>().with_extension(&ctx_ext);
+        ctx.pre_header.version = 4;
+        ctx.tree_version.set(ErgoTreeVersion::V3);
+        let eval_ctx = ctx.with_constants(tree.constants().unwrap());
+        assert!(try_eval_with_deserialize::<bool>(tree.root_expr().unwrap(), &eval_ctx).unwrap());
     }
 }

@@ -289,7 +289,7 @@ mod tests {
     fn changed_extension(reverse: bool) -> ContextExtension {
         let mut extension = ContextExtension::empty();
         for key in if reverse { [2, 1] } else { [1, 2] } {
-            extension.values.insert(key, Constant::from(key as i32));
+            extension.values.insert(key, (key as i32).into());
         }
         extension
     }

@@ -786,7 +786,7 @@ mod tests {
         assert_eq!(quint - quad, 3);
     }
 
-    /// A legacy box register holding a tuple EXPRESSION (`RegisterValue::ParsedTupleExpr`,
+    /// A legacy box register holding a tuple EXPRESSION (`RegisterValue::ParsedExpr`,
     /// the pre-v5.0 register encoding still on-chain) re-serializes through the expression
     /// serializer; the JVM charges the Tuple op-code byte (`ValueSerializer`'s costed
     /// `put(opCode)`) and the item-count byte (`TupleSerializer`'s `putUByte`), then each
@@ -798,12 +798,9 @@ mod tests {
         use crate::eval::test_util::eval_out;
         use ergotree_ir::chain::context::Context;
         use ergotree_ir::chain::ergo_box::box_value::BoxValue;
-        use ergotree_ir::chain::ergo_box::{
-            ErgoBox, EvaluatedTuple, NonMandatoryRegisters, RegisterValue,
-        };
+        use ergotree_ir::chain::ergo_box::{ErgoBox, NonMandatoryRegisters, RegisterValue};
         use ergotree_ir::chain::tx_id::TxId;
         use ergotree_ir::ergo_tree::ErgoTree;
-        use ergotree_ir::mir::tuple::Tuple;
         use sigma_test_util::force_any_val;
 
         fn cost_of(e: &Expr) -> u64 {
@@ -842,8 +839,8 @@ mod tests {
         }
 
         let const_reg = RegisterValue::Parsed((1i8, 2i8).into());
-        let tuple = Tuple::new(vec![Expr::Const(1i8.into()), Expr::Const(2i8.into())]).unwrap();
-        let tup_expr_reg = RegisterValue::ParsedTupleExpr(EvaluatedTuple::new(tuple).unwrap());
+        // `86 02 02 01 02 02`: `Tuple(1: Byte, 2: Byte)`
+        let tup_expr_reg = RegisterValue::sigma_parse_bytes(&[0x86, 0x02, 0x02, 0x01, 0x02, 0x02]);
 
         let const_box = cost_of(&serialize_mc(&box_with_r4(const_reg)));
         let tup_expr_box = cost_of(&serialize_mc(&box_with_r4(tup_expr_reg)));

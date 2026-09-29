@@ -1,6 +1,7 @@
 use super::bin_op::bin_op_sigma_parse;
 use super::bin_op::bin_op_sigma_serialize;
 use super::{op_code::OpCode, sigma_byte_writer::SigmaByteWrite};
+use crate::ergo_tree::ErgoTreeVersion;
 use crate::has_opcode::HasOpCode;
 use crate::has_opcode::HasStaticOpCode;
 use crate::mir::and::And;
@@ -96,7 +97,10 @@ impl Expr {
     }
 
     /// The value after its first byte `tag`, without its nesting level
-    fn parse_tagged<R: SigmaByteRead>(r: &mut R, tag: u8) -> Result<Self, SigmaParsingError> {
+    pub(crate) fn parse_tagged<R: SigmaByteRead>(
+        r: &mut R,
+        tag: u8,
+    ) -> Result<Self, SigmaParsingError> {
         if tag <= OpCode::LAST_CONSTANT_CODE.value() {
             let constant = Constant::parse_with_tag(r, tag)?;
             Ok(Expr::Const(constant))
@@ -117,6 +121,12 @@ impl Expr {
                         Ok(Expr::ConstPlaceholder(cp))
                     }
                 }
+                // sigmastate v6.0.6 reads `TrueLeaf` and `FalseLeaf` under their own opcodes
+                // (`ValueSerializer.scala:79-80`), but both are the Boolean constant
+                // (`values.scala:771-790`), written back through the constant path
+                // (`ValueSerializer.scala:362-370`): `7f` as `01 01`, `80` as `01 00`
+                OpCode::TRUE => Ok(Expr::Const(true.into())),
+                OpCode::FALSE => Ok(Expr::Const(false.into())),
                 OpCode::HEIGHT => Ok(Expr::GlobalVars(GlobalVars::Height)),
                 OpCode::SELF_BOX => Ok(Expr::GlobalVars(GlobalVars::SelfBox)),
                 OpCode::INPUTS => Ok(Expr::GlobalVars(GlobalVars::Inputs)),
@@ -278,7 +288,15 @@ impl SigmaSerializable for Expr {
             Expr::Map(op) => op.sigma_serialize_w_opcode(w),
             Expr::Filter(op) => op.sigma_serialize_w_opcode(w),
             Expr::BoolToSigmaProp(op) => op.sigma_serialize_w_opcode(w),
-            Expr::Upcast(op) => op.sigma_serialize_w_opcode(w),
+            // Below tree version 3, `ValueSerializer.serialize` writes an `Upcast` whose input is
+            // a constant as that constant, through the constant path (v6.0.6
+            // `ValueSerializer.scala:157-169`, `:362-372`)
+            Expr::Upcast(op) => match &*op.input {
+                input @ Expr::Const(_) if w.tree_version() < ErgoTreeVersion::V3 => {
+                    input.sigma_serialize(w)
+                }
+                _ => op.sigma_serialize_w_opcode(w),
+            },
             Expr::Downcast(op) => op.sigma_serialize_w_opcode(w),
             Expr::If(op) => op.sigma_serialize_w_opcode(w),
             Expr::ByIndex(op) => op.expr().sigma_serialize_w_opcode(w),

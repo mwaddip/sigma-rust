@@ -5,9 +5,11 @@ pub mod box_value;
 mod register;
 
 use crate::ergo_tree::ErgoTree;
+use crate::ergo_tree::ErgoTreeVersion;
 use crate::mir::constant::Constant;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
+use crate::serialization::sigma_byte_writer::SigmaByteWriter;
 use crate::serialization::SigmaParsingError;
 use crate::serialization::SigmaSerializable;
 use crate::serialization::SigmaSerializationError;
@@ -143,15 +145,27 @@ impl ErgoBox {
     }
 
     /// Serialized box bytes. For a box parsed off the wire this is the exact retained input
-    /// slice (`ErgoBox._bytes`); for a box built from fields it is the canonical serialization.
+    /// slice (`ErgoBox._bytes`); for a box built from fields it is the box as ergo writes one
+    /// it builds, below ErgoTree version 3 (see [`ErgoBox::default_context_bytes`]).
     /// `ExtractBytes` (`Box.bytes`) surfaces this, so non-canonically-encoded inputs keep their
     /// on-the-wire byte image. (Note `bytesWithoutRef`/`ErgoBoxCandidate` has no retained slice
     /// and always re-serializes canonically — see `ErgoBoxCandidate`.)
     pub fn bytes(&self) -> Result<Vec<u8>, SigmaSerializationError> {
         match &self.serialized_bytes {
             Some(bytes) => Ok(bytes.clone()),
-            None => self.sigma_serialize_bytes(),
+            None => self.default_context_bytes(),
         }
+    }
+
+    /// The box as ergo writes one it builds, a transaction's output: when `ErgoBox.bytes` is
+    /// first read, in the output checks of `ErgoTransaction.validateStateful` (ergo v6.0.6
+    /// `ErgoTransaction.scala:171-175`), outside any `withVersions`, so under the default
+    /// version context (1, 1), below ErgoTree version 3
+    fn default_context_bytes(&self) -> Result<Vec<u8>, SigmaSerializationError> {
+        let mut data = Vec::new();
+        let mut w = SigmaByteWriter::new(&mut data, None);
+        w.with_tree_version(ErgoTreeVersion::V0, |w| self.sigma_serialize(w))?;
+        Ok(data)
     }
 
     /// Create ErgoBox from ErgoBoxCandidate by adding transaction id
@@ -180,7 +194,7 @@ impl ErgoBox {
     }
 
     pub(crate) fn calc_box_id(&self) -> Result<BoxId, SigmaSerializationError> {
-        let bytes = self.sigma_serialize_bytes()?;
+        let bytes = self.default_context_bytes()?;
         let hash = blake2b256_hash(&bytes);
         Ok(Digest32::from(*hash).into())
     }
@@ -982,5 +996,41 @@ mod creation_height_bound_tests {
             .sigma_serialize_bytes()
             .unwrap();
         assert!(Constant::sigma_parse_bytes(&ok).is_ok());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod default_context_tests {
+    //! JVM parity: ergo writes a box it builds, a transaction's output, when `ErgoBox.bytes` is
+    //! first read: in the output checks of `ErgoTransaction.validateStateful` (ergo v6.0.6
+    //! `ErgoTransaction.scala:171-175`), outside any `withVersions`, so under the default
+    //! version context (1, 1) (sigmastate `VersionContext.scala:58-61`). Its id hashes them.
+    use super::*;
+    use crate::unsignedbigint256::UnsignedBigInt;
+    use core::str::FromStr;
+
+    #[test]
+    fn a_built_box_is_written_below_tree_version_3() {
+        // There an `UnsignedBigInt` has no encoding (`CoreDataSerializer.scala:39`, `:84-86`),
+        // so a box holding one in a register has no id
+        let regs = NonMandatoryRegisters::new([(
+            NonMandatoryRegisterId::R4,
+            Constant::from(UnsignedBigInt::from_str("0").unwrap()),
+        )])
+        .unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&[0x00, 0x08, 0xd3]).unwrap();
+        assert!(matches!(
+            ErgoBox::new(
+                BoxValue::SAFE_USER_MIN,
+                tree,
+                None,
+                regs,
+                0,
+                TxId::zero(),
+                0
+            ),
+            Err(SigmaSerializationError::NotSupported(_))
+        ));
     }
 }

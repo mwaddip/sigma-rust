@@ -40,19 +40,27 @@ impl Collection {
                 elem_tpe, items
             )));
         }
+        Ok(Self::from_typed_items(elem_tpe, items))
+    }
+
+    /// A collection of items already checked to be of `elem_tpe`. Boolean items that are all
+    /// constants take the bit-packed form, which sigmastate writes with the `85` serializer
+    /// however the collection was read (v6.0.6 `values.scala:871-875`).
+    fn from_typed_items(elem_tpe: SType, items: Vec<Expr>) -> Self {
         if elem_tpe == SType::SBoolean {
             let maybe_bools: Result<Vec<bool>, TryExtractFromError> = items
-                .clone()
-                .into_iter()
-                .map(|i| i.try_extract_into::<Constant>()?.try_extract_into::<bool>())
+                .iter()
+                .map(|i| {
+                    i.clone()
+                        .try_extract_into::<Constant>()?
+                        .try_extract_into::<bool>()
+                })
                 .collect();
-            match maybe_bools {
-                Ok(bools) => Ok(Collection::BoolConstants(bools)),
-                Err(_) => Ok(Collection::Exprs { elem_tpe, items }),
+            if let Ok(bools) = maybe_bools {
+                return Collection::BoolConstants(bools);
             }
-        } else {
-            Ok(Collection::Exprs { elem_tpe, items })
         }
+        Collection::Exprs { elem_tpe, items }
     }
 
     /// Create a collection from a vector of booleans
@@ -134,7 +142,7 @@ pub(crate) fn coll_sigma_parse<R: SigmaByteRead>(
         }
         items.push(item);
     }
-    Ok(Collection::Exprs { elem_tpe, items })
+    Ok(Collection::from_typed_items(elem_tpe, items))
 }
 
 pub(crate) fn bool_const_coll_sigma_parse<R: SigmaByteRead>(
@@ -198,5 +206,35 @@ mod tests {
             prop_assert_eq![sigma_serialize_roundtrip(&expr), expr];
         }
 
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod bool_constants_write_back_tests {
+    //! JVM parity: sigmastate writes a Boolean collection whose items are all `Constant`s with the
+    //! bit-packed `85` serializer, however it was read (v6.0.6 `values.scala:871-875`).
+    use super::*;
+
+    #[test]
+    fn a_83_collection_of_boolean_constants_is_written_back_as_85() {
+        // SANTA `extension_evaluated_values` X5-X7: `Coll(true, false)` with constant items, the
+        // same with `TrueLeaf`/`FalseLeaf` items, the empty `Coll[Boolean]`; then X4, a
+        // `Coll[Int]`, which comes back as read, and `Coll(HEIGHT > 0)`, whose item is no
+        // constant, so it keeps `83`
+        for (hex, written_back) in [
+            ("83020101010100", "850201"),
+            ("8302017f80", "850201"),
+            ("830001", "8500"),
+            ("83020404020404", "83020404020404"),
+            ("83010191a30400", "83010191a30400"),
+        ] {
+            let expr = Expr::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap();
+            assert_eq!(
+                base16::encode_lower(&expr.sigma_serialize_bytes().unwrap()),
+                written_back,
+                "{hex}"
+            );
+        }
     }
 }

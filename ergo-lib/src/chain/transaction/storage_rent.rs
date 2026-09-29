@@ -69,14 +69,15 @@ fn rent_verdict_for_empty_proof(
         return StorageRentVerdict::NotApplicable;
     }
     // `context.extension.values.contains(varId)` (`:77`)
-    let var = match context.extension.values.get(&STORAGE_EXTENSION_INDEX) {
-        Some(var) => var,
-        None => return StorageRentVerdict::NotApplicable,
-    };
     // Everything below sits inside `Try { .. }.recoverWith { case _ => super.verify(..) }`
-    // (`:78-83`): each failure falls back to ordinary script verification.
+    // (`:78-83`): each failure falls back to ordinary script verification, a value whose
+    // `.value` fails included.
+    let var = match context.extension.get_constant(STORAGE_EXTENSION_INDEX) {
+        Ok(Some(var)) => var,
+        Ok(None) | Err(_) => return StorageRentVerdict::NotApplicable,
+    };
     // `.value.asInstanceOf[Short]` (`:79`): only a Short constant passes.
-    let idx: i16 = match var.v.clone().try_extract_into() {
+    let idx: i16 = match var.v.try_extract_into() {
         Ok(idx) => idx,
         Err(_) => return StorageRentVerdict::NotApplicable,
     };
@@ -210,8 +211,7 @@ pub(crate) mod test_support {
             .map(|(b, v)| {
                 let mut ext = ContextExtension::empty();
                 if let Some(idx) = v {
-                    ext.values
-                        .insert(STORAGE_EXTENSION_INDEX, Constant::from(*idx));
+                    ext.values.insert(STORAGE_EXTENSION_INDEX, (*idx).into());
                 }
                 Input::new(
                     b.box_id(),
@@ -258,14 +258,12 @@ mod tests {
     use ergotree_ir::chain::context_extension::ContextExtension;
     use ergotree_ir::chain::ergo_box::box_value::BoxValue;
     use ergotree_ir::chain::ergo_box::{
-        ErgoBoxCandidate, EvaluatedTuple, NonMandatoryRegisterId, NonMandatoryRegisters,
-        RegisterValue,
+        ErgoBoxCandidate, NonMandatoryRegisterId, NonMandatoryRegisters, RegisterValue,
     };
     use ergotree_ir::chain::tx_id::TxId;
     use ergotree_ir::ergo_tree::ErgoTree;
     use ergotree_ir::mir::constant::Constant;
     use ergotree_ir::mir::expr::Expr;
-    use ergotree_ir::mir::tuple::Tuple;
     use sigma_test_util::force_any_val;
 
     /// Live mainnet storageFeeFactor, and `Parameters::default()`.
@@ -374,13 +372,10 @@ mod tests {
     /// The value `(1, 2)` as a register holding a Tuple expression, and as one
     /// holding the equal tuple Constant.
     fn tuple_expr_and_constant() -> (RegisterValue, RegisterValue) {
-        let tuple = Tuple::new(vec![Expr::Const(1i32.into()), Expr::Const(2i32.into())]).unwrap();
-        let et = EvaluatedTuple::new(tuple).unwrap();
-        let constant = et.as_constant().clone();
-        (
-            RegisterValue::ParsedTupleExpr(et),
-            RegisterValue::Parsed(constant),
-        )
+        // `86 02 04 02 04 04`: `Tuple(1, 2)`
+        let expr = RegisterValue::sigma_parse_bytes(&[0x86, 0x02, 0x04, 0x02, 0x04, 0x04]);
+        let constant = expr.as_constant().unwrap().clone();
+        (expr, RegisterValue::Parsed(constant))
     }
 
     #[test]
@@ -398,7 +393,7 @@ mod tests {
             self_box
                 .additional_registers
                 .get(NonMandatoryRegisterId::R4),
-            Some(RegisterValue::ParsedTupleExpr(_))
+            Some(RegisterValue::ParsedExpr(_))
         ));
         // ... and the output's as a Constant.
         let mut out = recreated(&self_box, 5_000_000_000, H);
@@ -444,7 +439,7 @@ mod tests {
     ) -> T {
         let mut ext = ContextExtension::empty();
         if let Some(c) = var127 {
-            ext.values.insert(STORAGE_EXTENSION_INDEX, c);
+            ext.values.insert(STORAGE_EXTENSION_INDEX, c.into());
         }
         let base = force_any_val::<Context>();
         let mut pre_header = base.pre_header.clone();

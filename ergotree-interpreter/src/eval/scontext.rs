@@ -120,17 +120,18 @@ pub(crate) static GET_VAR_FROM_INPUT_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, arg
     };
     let input_idx = args[0].clone().try_extract_into::<i16>()? as usize;
     let var_id = args[1].clone().try_extract_into::<i8>()? as u8;
-    Ok(
-        match ctx
-            .extension_provider
-            .context_extension(input_idx)
-            .and_then(|extension| extension.values.get(&(var_id)))
-            .cloned()
-        {
-            Some(c) if c.tpe == **output_tpe => Value::Opt(Some(Box::new(c.v.into()))),
-            _ => Value::Opt(None),
-        },
-    )
+    // `CContext.getVarFromInput` (v6.0.6 `CContext.scala:76-82`): the variable's type decides
+    // first, `stypeToRType(v.tpe) == tT`, and its data is read only then; a variable of another
+    // type is `None` whatever its data
+    let var = ctx
+        .extension_provider
+        .context_extension(input_idx)
+        .and_then(|extension| extension.values.get(&var_id));
+    let var = match var {
+        Some(var) if var.script_type()?.as_ref() == Some(&**output_tpe) => var,
+        _ => return Ok(Value::Opt(None)),
+    };
+    Ok(Value::Opt(Some(Box::new(var.to_script_value()?.v.into()))))
 };
 
 #[cfg(test)]
@@ -356,5 +357,64 @@ mod tests {
             get_var_from_input::<i32>(&context, context.inputs.len() as i16 + 1, 4),
             None
         ); // input out of bounds
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod get_var_from_input_tests {
+    use crate::eval::env::Env;
+    use crate::eval::Evaluable;
+    use ergotree_ir::chain::context::arbitrary::DummyContextExtensionProvider;
+    use ergotree_ir::chain::context::Context;
+    use ergotree_ir::chain::context_extension::ContextExtension;
+    use ergotree_ir::chain::evaluated_value::EvaluatedValue;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::method_call::MethodCall;
+    use ergotree_ir::mir::value::Value;
+    use ergotree_ir::serialization::SigmaSerializable;
+    use ergotree_ir::types::scontext::GET_VAR_FROM_INPUT_METHOD;
+    use ergotree_ir::types::stuple::STuple;
+    use ergotree_ir::types::stype::SType;
+    use ergotree_ir::types::stype_param::STypeVar;
+    use sigma_test_util::force_any_val;
+
+    #[test]
+    fn get_var_from_input_checks_the_type_before_it_reads_the_data() {
+        // `CContext.getVarFromInput` (v6.0.6 `CContext.scala:76-82`) compares
+        // `stypeToRType(v.tpe)` with the asked type and reads the data only on a match (from
+        // source): input 1's var 0, `Tuple(1, HEIGHT)`, read as an Int, is `None`; its var 1, C1's
+        // `Coll[(Int, Int)]` holding a tuple expression, read at its own type, fails
+        let value =
+            |hex: &str| EvaluatedValue::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap();
+        let other = ContextExtension {
+            values: [
+                (0u8, value("86020402a3")),
+                (1u8, value("830158860204020404")),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut ctx = force_any_val::<Context>();
+        ctx.extension = Box::leak(Box::new(ContextExtension::empty()));
+        ctx.extension_provider = Box::leak(Box::new(DummyContextExtensionProvider(vec![
+            ContextExtension::empty(),
+            other,
+        ])));
+        let read = |var_id: i8, tpe: SType| {
+            let expr: Expr = MethodCall::with_type_args(
+                Expr::Context,
+                GET_VAR_FROM_INPUT_METHOD.clone(),
+                vec![1i16.into(), var_id.into()],
+                [(STypeVar::t(), tpe)].into_iter().collect(),
+            )
+            .unwrap()
+            .into();
+            expr.eval(&mut Env::empty(), &ctx).map(|v| v.to_static())
+        };
+        assert_eq!(read(0, SType::SInt).unwrap(), Value::Opt(None));
+        let pairs = SType::SColl(SType::STuple(STuple::pair(SType::SInt, SType::SInt)).into());
+        assert!(read(1, pairs).is_err());
     }
 }
