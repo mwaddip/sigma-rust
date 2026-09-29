@@ -18,6 +18,9 @@ impl Evaluable for Fold {
     ) -> Result<Value<'ctx>, EvalError> {
         let input_v = self.input.eval(env, ctx)?;
         let zero_v = self.zero.eval(env, ctx)?;
+        // `Fold.eval` checks the zero's value against its type before it evaluates the
+        // operator (`transformers.scala:224-228`)
+        crate::eval::check_value_of_type(&self.zero.tpe(), &zero_v)?;
         let fold_op_v = self.fold_op.eval(env, ctx)?;
         let input_v_clone = input_v.clone();
         let mut invoker = match &fold_op_v {

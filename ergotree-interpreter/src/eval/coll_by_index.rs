@@ -27,7 +27,13 @@ impl Evaluable for ByIndex {
         }?;
         match self.default.as_ref() {
             Some(default) => {
-                let mut default_v = || default.eval(env, ctx);
+                // `ByIndex.eval` checks the default's value against its type wherever it
+                // evaluates it (`transformers.scala:259-276`)
+                let mut default_v = || -> Result<Value<'ctx>, EvalError> {
+                    let d = default.eval(env, ctx)?;
+                    crate::eval::check_value_of_type(&default.tpe(), &d)?;
+                    Ok(d)
+                };
                 let val =
                     normalized_input_vals.get_val(index_v.try_extract_into::<i32>()? as usize);
                 if ctx.tree_version() >= ErgoTreeVersion::V3 {

@@ -1216,6 +1216,8 @@ mod value_check_tests {
     use ergotree_ir::chain::evaluated_value::EvaluatedValue;
     use ergotree_ir::mir::apply::Apply;
     use ergotree_ir::mir::block::BlockValue;
+    use ergotree_ir::mir::coll_by_index::ByIndex;
+    use ergotree_ir::mir::coll_fold::Fold;
     use ergotree_ir::mir::coll_size::SizeOf;
     use ergotree_ir::mir::collection::Collection;
     use ergotree_ir::mir::constant::Constant;
@@ -1372,7 +1374,13 @@ mod value_check_tests {
             false_branch: Box::new(zeros.into()),
         }
         .into();
-        let first: Expr = SelectField::new(if_expr, 1u8.try_into().unwrap())
+        check_first_item(if_expr);
+    }
+
+    /// `expr._1` fails with the tuple expression on the value check itself, before
+    /// `SelectField` would, and reads 1 with the constant twin
+    fn check_first_item(expr: Expr) {
+        let first: Expr = SelectField::new(expr, 1u8.try_into().unwrap())
             .unwrap()
             .into();
         assert!(matches!(
@@ -1383,5 +1391,39 @@ mod value_check_tests {
             try_eval_out::<i32>(&first, &ctx_with_var0("580204")).unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn a_fold_checks_its_zero() {
+        // `Coll[Int]().fold(getVar[(Int, Int)](0).get, { (a: ((Int, Int), Int)) => a._1 })._1`,
+        // from source (`transformers.scala:224-228`)
+        let acc_item = SType::STuple(STuple::pair(pair_type(), SType::SInt));
+        let acc: Expr = ValUse {
+            val_id: 1.into(),
+            tpe: acc_item.clone(),
+        }
+        .into();
+        let op: Expr = FuncValue::new(
+            vec![FuncArg {
+                idx: 1.into(),
+                tpe: acc_item,
+            }],
+            SelectField::new(acc, 1u8.try_into().unwrap())
+                .unwrap()
+                .into(),
+        )
+        .into();
+        let empty: Expr = Collection::new(SType::SInt, vec![]).unwrap().into();
+        check_first_item(Fold::new(empty, pair_var0(), op).unwrap().into());
+    }
+
+    #[test]
+    fn a_by_index_checks_its_default() {
+        // `Coll[(Int, Int)]().getOrElse(0, getVar[(Int, Int)](0).get)._1`, from source
+        // (`transformers.scala:258-276`)
+        let empty: Expr = Collection::new(pair_type(), vec![]).unwrap().into();
+        let at0 =
+            ByIndex::new(empty, Expr::Const(0i32.into()), Some(Box::new(pair_var0()))).unwrap();
+        check_first_item(at0.into());
     }
 }
