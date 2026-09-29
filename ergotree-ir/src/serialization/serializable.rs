@@ -143,10 +143,6 @@ pub enum SigmaParsingError {
     /// `ArithmeticException`)
     #[error("{0} {1} exceeds Int.MaxValue (getUIntExact)")]
     ExceedsIntMax(&'static str, u32),
-    /// A Box constant's register that holds an expression, not a value: sigmastate's cast to
-    /// `EvaluatedValue` throws a `ClassCastException`
-    #[error("unevaluated register value: {0}")]
-    UnevaluatedRegisterValue(String),
     /// A register or context-extension value that is not an `EvaluatedValue`: sigmastate's
     /// cast after `getValue` throws a `ClassCastException` (v6.0.6
     /// `ErgoBoxCandidate.scala:231`, `ContextExtension.scala:61`)
@@ -292,7 +288,6 @@ impl SigmaParsingError {
                 | SigmaParsingError::InvalidSigmaBooleanOpCode(_)
                 | SigmaParsingError::InvalidBigIntSize(_)
                 | SigmaParsingError::ExceedsIntMax(_, _)
-                | SigmaParsingError::UnevaluatedRegisterValue(_)
                 | SigmaParsingError::UnevaluatedValue(_)
                 | SigmaParsingError::NegativeTupleSize(_)
                 | SigmaParsingError::TooManyRegisters(_)

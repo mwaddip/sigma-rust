@@ -2262,7 +2262,7 @@ mod register_tests {
         // #16: R4 = `HEIGHT`
         assert!(matches!(
             ErgoTree::sigma_parse_bytes(&box_constant_tree(&[0x01, 0xa3])),
-            Err(SigmaParsingError::UnevaluatedRegisterValue(_))
+            Err(SigmaParsingError::UnevaluatedValue(_))
         ));
     }
 

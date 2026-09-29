@@ -173,7 +173,7 @@ impl SigmaSerializable for NonMandatoryRegisters {
                 }
                 // Any other expression fails that cast with a `ClassCastException`
                 _ => {
-                    return Err(SigmaParsingError::UnevaluatedRegisterValue(format!(
+                    return Err(SigmaParsingError::UnevaluatedValue(format!(
                         "register {0:?} holds {expr:?}, which is not a value",
                         RegisterId::try_from(idx)
                     )))
