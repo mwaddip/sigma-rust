@@ -102,6 +102,7 @@ mod tests {
                 .map(|i| {
                     ValDef {
                         id: i.into(),
+                        tpe_args: vec![],
                         rhs: Box::new(Expr::Const((i as i32).into())),
                     }
                     .into()
