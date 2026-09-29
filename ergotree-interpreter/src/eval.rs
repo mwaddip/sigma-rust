@@ -465,6 +465,9 @@ impl<'l, 'ctx> LambdaInvoker<'l, 'ctx> {
         args: Vec<Value<'ctx>>,
     ) -> Result<Value<'ctx>, EvalError> {
         for (arg, v) in self.lambda.args.iter().zip(args) {
+            // `FuncValue.eval`'s closure checks the argument against its type before it binds
+            // it, and the body's result after (`values.scala:1074`, `:1080`)
+            check_value_of_type(&arg.tpe, &v)?;
             // ADD_TO_ENV_COST per argument binding — Scala charges
             // AddToEnvironment inside the closure on every invocation
             // (`FuncValue.eval`); previously each invocation site charged
@@ -472,7 +475,9 @@ impl<'l, 'ctx> LambdaInvoker<'l, 'ctx> {
             ctx.add_jit_cost(ADD_TO_ENV_COST)?;
             self.env.insert(arg.idx, v);
         }
-        self.lambda.body.eval(&mut self.env, ctx)
+        let res = self.lambda.body.eval(&mut self.env, ctx)?;
+        check_value_of_type(&self.lambda.body.tpe(), &res)?;
+        Ok(res)
     }
 }
 
@@ -1194,5 +1199,137 @@ mod context_conversion_tests {
         reduce_to_crypto(&tree, &ctx).unwrap();
         let tree_len = tree.sigma_serialize_bytes().unwrap().len() as u64;
         assert_eq!(ctx.jit_cost_value(), tree_len * 20 + 2 * 20 + 5);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod value_check_tests {
+    //! JVM parity: a pair tuple expression's data is a collection typed as a pair
+    //! (`values.scala:818-822`), which fails `Value.checkType` where sigmastate checks a value
+    //! against its type: a lambda's argument and result (`values.scala:1074`, `:1080`), a
+    //! `ValDef`'s value and a block's result (`:1027`, `:1034`), and a `ValUse` (`:991`).
+    use super::*;
+    use crate::eval::test_util::try_eval_out;
+    use ergotree_ir::chain::context_extension::ContextExtension;
+    use ergotree_ir::chain::evaluated_value::EvaluatedValue;
+    use ergotree_ir::mir::apply::Apply;
+    use ergotree_ir::mir::block::BlockValue;
+    use ergotree_ir::mir::func_value::{FuncArg, FuncValue};
+    use ergotree_ir::mir::get_var::GetVar;
+    use ergotree_ir::mir::option_get::OptionGet;
+    use ergotree_ir::mir::unary_op::OneArgOpTryBuild;
+    use ergotree_ir::mir::val_def::ValDef;
+    use ergotree_ir::mir::val_use::ValUse;
+    use ergotree_ir::serialization::SigmaSerializable;
+    use ergotree_ir::types::stuple::STuple;
+    use sigma_test_util::force_any_val;
+
+    fn pair_type() -> SType {
+        SType::STuple(STuple::pair(SType::SInt, SType::SInt))
+    }
+
+    /// var 0 = `hex`: the tuple expression `Tuple(1, 2)`, or its constant twin `58 02 04`
+    fn ctx_with_var0(hex: &str) -> Context<'static> {
+        let value = EvaluatedValue::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap();
+        let ext = ContextExtension {
+            values: [(0u8, value)].into_iter().collect(),
+        };
+        Context {
+            extension: Box::leak(Box::new(ext)),
+            ..force_any_val::<Context>()
+        }
+    }
+
+    /// `getVar[(Int, Int)](0).get`
+    fn pair_var0() -> Expr {
+        let var0: Expr = GetVar {
+            var_id: 0,
+            var_tpe: pair_type(),
+        }
+        .into();
+        OptionGet::try_build(var0).unwrap().into()
+    }
+
+    fn check(expr: &Expr) {
+        assert!(try_eval_out::<i32>(expr, &ctx_with_var0("860204020404")).is_err());
+        assert_eq!(
+            try_eval_out::<i32>(expr, &ctx_with_var0("580204")).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_lambda_checks_its_argument() {
+        // SANTA T3's lambda, `{ (p: (Int, Int)) => 1 }`, applied to the pair
+        let lambda: Expr = FuncValue::new(
+            vec![FuncArg {
+                idx: 1.into(),
+                tpe: pair_type(),
+            }],
+            Expr::Const(1i32.into()),
+        )
+        .into();
+        check(&Apply::new(lambda, vec![pair_var0()]).unwrap().into());
+    }
+
+    #[test]
+    fn a_lambda_checks_its_result() {
+        // `{ (x: Int) => getVar[(Int, Int)](0).get }(1)._1`, from source
+        let lambda: Expr = FuncValue::new(
+            vec![FuncArg {
+                idx: 1.into(),
+                tpe: SType::SInt,
+            }],
+            pair_var0(),
+        )
+        .into();
+        let applied: Expr = Apply::new(lambda, vec![Expr::Const(1i32.into())])
+            .unwrap()
+            .into();
+        let first =
+            ergotree_ir::mir::select_field::SelectField::new(applied, 1u8.try_into().unwrap())
+                .unwrap();
+        // the result check fires before `SelectField` would
+        assert!(matches!(
+            try_eval_out::<i32>(&first.into(), &ctx_with_var0("860204020404")),
+            Err(e) if format!("{e:?}").contains("Invalid type returned by evaluator")
+        ));
+    }
+
+    #[test]
+    fn a_block_checks_its_val_defs() {
+        // `{ val p = getVar[(Int, Int)](0).get; 1 }`, from source
+        let block: Expr = BlockValue {
+            items: vec![ValDef {
+                id: 1.into(),
+                tpe_args: vec![],
+                rhs: Box::new(pair_var0()),
+            }
+            .into()],
+            result: Box::new(Expr::Const(1i32.into())),
+        }
+        .into();
+        check(&block);
+    }
+
+    #[test]
+    fn a_val_use_checks_its_value() {
+        // a `ValUse` of a pair bound to the collection, from source
+        let use_pair: Expr = ValUse {
+            val_id: 1.into(),
+            tpe: pair_type(),
+        }
+        .into();
+        let coll = EvaluatedValue::sigma_parse_bytes(&base16::decode("860204020404").unwrap())
+            .unwrap()
+            .to_script_value()
+            .unwrap()
+            .v;
+        let mut env = Env::empty();
+        env.insert(1.into(), coll.into());
+        let ctx = force_any_val::<Context>();
+        assert!(use_pair.eval(&mut env, &ctx).is_err());
     }
 }

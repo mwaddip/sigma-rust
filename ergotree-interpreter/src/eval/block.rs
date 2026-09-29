@@ -27,11 +27,16 @@ impl Evaluable for BlockValue {
                 let spanned_val_def = &i.clone().try_extract_into::<Spanned<ValDef>>()?;
                 let val_def = spanned_val_def.expr();
                 let v: Value = val_def.rhs.eval(env, ctx)?;
+                // `BlockValue.eval` checks each value against its `ValDef`'s type, and the
+                // result against the result's (`values.scala:1027`, `:1034`)
+                crate::eval::check_value_of_type(&val_def.rhs.tpe(), &v)?;
                 ctx.add_jit_cost(crate::eval::ADD_TO_ENV_COST)?;
                 env.insert(val_def.id, v);
             }
             // Keep all `ValDef`s introduced in this block
-            self.result.eval(env, ctx)
+            let res = self.result.eval(env, ctx)?;
+            crate::eval::check_value_of_type(&self.result.tpe(), &res)?;
+            Ok(res)
         } else {
             let mut existing_variables = HashMap::new();
             let mut new_variables = vec![];
@@ -42,6 +47,7 @@ impl Evaluable for BlockValue {
                 let val_def = spanned_val_def.expr();
                 let idx = val_def.id;
                 let v: Value = val_def.rhs.eval(env, ctx)?;
+                crate::eval::check_value_of_type(&val_def.rhs.tpe(), &v)?;
                 ctx.add_jit_cost(crate::eval::ADD_TO_ENV_COST)?;
                 if let Some(old_val) = env.get(idx) {
                     existing_variables.insert(idx, old_val.clone());
@@ -50,7 +56,10 @@ impl Evaluable for BlockValue {
                 }
                 env.insert(idx, v);
             }
-            let res = self.result.eval(env, ctx);
+            let res = self.result.eval(env, ctx).and_then(|res| {
+                crate::eval::check_value_of_type(&self.result.tpe(), &res)?;
+                Ok(res)
+            });
             new_variables.into_iter().for_each(|idx| {
                 env.remove(&idx);
             });
