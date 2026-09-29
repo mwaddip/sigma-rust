@@ -143,6 +143,14 @@ pub enum SigmaParsingError {
     /// `ArithmeticException`)
     #[error("{0} {1} exceeds Int.MaxValue (getUIntExact)")]
     ExceedsIntMax(&'static str, u32),
+    /// A Box constant's register that holds an expression, not a value: sigmastate's cast to
+    /// `EvaluatedValue` throws a `ClassCastException`
+    #[error("unevaluated register value: {0}")]
+    UnevaluatedRegisterValue(String),
+    /// A Box constant with more than the six non-mandatory registers: sigmastate's
+    /// register-id lookup throws an `ArrayIndexOutOfBoundsException` at the seventh
+    #[error("{0} registers, where only R4 to R9 exist")]
+    TooManyRegisters(u8),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -246,7 +254,8 @@ impl SigmaParsingError {
     /// `ValDef` escape too: their store lookups throw (`ConstantPlaceholderSerializer.scala:19`,
     /// `ValDefTypeStore.scala:11`). So do type code 0 (`InvalidTypePrefix`) and a type
     /// parameter that is not a type variable, and malformed data: an unknown SigmaBoolean
-    /// opcode, a bad BigInt size and a `getUIntExact` value above `Int.MaxValue`.
+    /// opcode, a bad BigInt size and a `getUIntExact` value above `Int.MaxValue`, and a Box
+    /// constant's register that holds no value, or a seventh register.
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -264,6 +273,8 @@ impl SigmaParsingError {
                 | SigmaParsingError::InvalidSigmaBooleanOpCode(_)
                 | SigmaParsingError::InvalidBigIntSize(_)
                 | SigmaParsingError::ExceedsIntMax(_, _)
+                | SigmaParsingError::UnevaluatedRegisterValue(_)
+                | SigmaParsingError::TooManyRegisters(_)
                 | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)

@@ -2228,3 +2228,63 @@ mod malformed_data_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod register_tests {
+    //! JVM parity: sigmastate reads a box's registers one at a time, looking each register's
+    //! id up before it reads the value and casting the value to `EvaluatedValue`
+    //! (`ErgoBoxCandidate.scala:229-231`). A seventh register fails the lookup and an
+    //! expression fails the cast. Neither is a `ValidationException`, so a size-flagged tree
+    //! holding such a Box constant rejects (SANTA `tree_degrade_gate`).
+    use super::*;
+
+    /// A size-flagged tree whose constant 0 is a `Box` with `registers` (SANTA
+    /// `tree_degrade_gate` #16-#18)
+    fn box_constant_tree(registers: &[u8]) -> Vec<u8> {
+        let nested_box = [
+            &[0xc0, 0x84, 0x3d, 0x00, 0x08, 0xd3, 0x01, 0x00][..], // value, tree, height, tokens
+            registers,
+            &[0; 33], // transaction id and index
+        ]
+        .concat();
+        let body = [&[0x02, 0x63][..], &nested_box, &[0x08, 0xd3, 0x73, 0x01]].concat();
+        [&[0x18, body.len() as u8][..], &body].concat()
+    }
+
+    /// `count` registers, each `Int` 1
+    fn int_registers(count: u8) -> Vec<u8> {
+        [&[count][..], &[0x04, 0x02].repeat(count as usize)].concat()
+    }
+
+    #[test]
+    fn a_register_holding_an_expression_rejects_a_sized_tree() {
+        // #16: R4 = `HEIGHT`
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&box_constant_tree(&[0x01, 0xa3])),
+            Err(SigmaParsingError::UnevaluatedRegisterValue(_))
+        ));
+    }
+
+    #[test]
+    fn a_seventh_register_rejects_a_sized_tree() {
+        // #17: seven registers; then seven whose last value is an unknown opcode, which the
+        // JVM never reads, as the seventh id's lookup fails first (from source)
+        let seventh_unread = [&[0x07][..], &[0x04, 0x02].repeat(6), &[0xfd]].concat();
+        for registers in [int_registers(7), seventh_unread] {
+            assert_eq!(
+                ErgoTree::sigma_parse_bytes(&box_constant_tree(&registers)),
+                Err(SigmaParsingError::TooManyRegisters(7))
+            );
+        }
+    }
+
+    #[test]
+    fn six_registers_parse() {
+        // #18
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&box_constant_tree(&int_registers(6))).unwrap(),
+            ErgoTree::Parsed(_)
+        ));
+    }
+}
