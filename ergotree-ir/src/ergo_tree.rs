@@ -2046,3 +2046,41 @@ mod array_length_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod store_lookup_tests {
+    //! JVM parity: a placeholder past the tree's constants and a `ValUse` with no `ValDef`
+    //! fail their store lookups with an `ArrayIndexOutOfBoundsException` and a
+    //! `NoSuchElementException`, which reject a size-flagged tree too.
+    use super::*;
+    use crate::mir::val_def::ValId;
+
+    #[test]
+    fn a_placeholder_past_the_constants_rejects_a_sized_tree() {
+        // SANTA `tree_degrade_gate` #0 and its twin #1
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&[0x08, 0x02, 0x73, 0x05]),
+            Err(SigmaParsingError::ConstantForPlaceholderNotFound(5))
+        );
+        let in_store = [0x18, 0x05, 0x01, 0x08, 0xd3, 0x73, 0x00];
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&in_store).unwrap(),
+            ErgoTree::Parsed(_)
+        ));
+    }
+
+    #[test]
+    fn a_val_use_without_its_val_def_rejects_a_sized_tree() {
+        // SANTA `tree_valuse_unbound` #0 and its bound twin #1
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&[0x08, 0x02, 0x72, 0x01]),
+            Err(SigmaParsingError::ValDefIdNotFound(ValId(1)))
+        );
+        let bound = [0x08, 0x08, 0xd8, 0x01, 0xd6, 0x01, 0x08, 0xd3, 0x72, 0x01];
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&bound).unwrap(),
+            ErgoTree::Parsed(_)
+        ));
+    }
+}

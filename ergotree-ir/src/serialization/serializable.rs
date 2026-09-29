@@ -222,7 +222,9 @@ impl SigmaParsingError {
     /// A CTHRESHOLD outside its bounds and a bitwise operation on a non-numeric operand
     /// escape as well: both fail a `require`, an `IllegalArgumentException`. So does the
     /// failure of an unsized tree nested in this one, which the JVM turns into a
-    /// `SerializerException`.
+    /// `SerializerException`. A placeholder past the tree's constants and a `ValUse` with no
+    /// `ValDef` escape too: their store lookups throw (`ConstantPlaceholderSerializer.scala:19`,
+    /// `ValDefTypeStore.scala:11`).
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -233,6 +235,8 @@ impl SigmaParsingError {
                 | SigmaParsingError::ScorexParsingError(_)
                 | SigmaParsingError::Io(_)
                 | SigmaParsingError::VlqEncode(_)
+                | SigmaParsingError::ConstantForPlaceholderNotFound(_)
+                | SigmaParsingError::ValDefIdNotFound(_)
                 | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)
