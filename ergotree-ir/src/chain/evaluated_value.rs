@@ -54,6 +54,137 @@ impl<T: Into<Constant>> From<T> for EvaluatedValue {
     }
 }
 
+/// What a script reads from a register or a context variable: sigmastate's
+/// `toAnyValue(v.value)(stypeToRType(v.tpe))`, which `toSigmaContext` builds for every context
+/// variable and `CBox` for every register (v6.0.6 `ErgoLikeContext.scala:158-161`,
+/// `CBox.scala:83-92`)
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub struct ScriptValue {
+    /// The type a script reads the value at: `None` for a tuple of fewer than two items, which no
+    /// script type here can name
+    pub tpe: Option<SType>,
+    /// The data
+    pub v: Literal,
+}
+
+impl EvaluatedValue {
+    /// sigmastate's `v.tpe`: `None` for a tuple of fewer than two items
+    pub fn tpe(&self) -> Option<SType> {
+        match self {
+            EvaluatedValue::Constant(c) => Some(c.tpe.clone()),
+            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => {
+                STuple::try_from(items.iter().map(Expr::tpe).collect::<Vec<_>>())
+                    .ok()
+                    .map(SType::STuple)
+            }
+            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => Some(c.tpe()),
+            EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => Some(SType::SGroupElement),
+        }
+    }
+
+    /// The value as a script reads it (see [`ScriptValue`]). Fails where sigmastate's conversion
+    /// throws: an item that is not a value itself, a tuple expression inside a collection of
+    /// pairs, or a type with no runtime form.
+    pub fn to_script_value(&self) -> Result<ScriptValue, TryExtractFromError> {
+        // `stypeToRType(v.tpe)`, then `v.value` (`ErgoLikeContext.scala:159-160`)
+        let has_runtime_type = match self {
+            EvaluatedValue::Constant(c) => has_runtime_type(&c.tpe),
+            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => {
+                items.iter().all(|item| has_runtime_type(&item.tpe()))
+            }
+            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => has_runtime_type(&c.tpe()),
+            EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => true,
+        };
+        if !has_runtime_type {
+            return Err(TryExtractFromError(format!(
+                "{self:?} has a type with no runtime form"
+            )));
+        }
+        let v = match self {
+            EvaluatedValue::Constant(c) => c.v.clone(),
+            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => tuple_script_data(items)?,
+            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => collection_script_data(c)?,
+            EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => {
+                Literal::GroupElement(generator().into())
+            }
+        };
+        Ok(ScriptValue { tpe: self.tpe(), v })
+    }
+}
+
+/// Whether sigmastate's `stypeToRType` converts `tpe` (v6.0.6 `Evaluation.scala:18-56`): not a
+/// type variable, nor a function of other than one argument or with type parameters
+fn has_runtime_type(tpe: &SType) -> bool {
+    match tpe {
+        SType::STypeVar(_) => false,
+        SType::SFunc(f) => {
+            f.t_dom.len() == 1
+                && f.tpe_params.is_empty()
+                && f.t_dom.iter().all(has_runtime_type)
+                && has_runtime_type(&f.t_range)
+        }
+        SType::SColl(elem) | SType::SOption(elem) => has_runtime_type(elem),
+        SType::STuple(t) => t.items.iter().all(has_runtime_type),
+        _ => true,
+    }
+}
+
+/// An item's data, where the item is a value itself: sigmastate casts each item to
+/// `EvaluatedValue`, an `AssertionError` otherwise (`CollectionUtil.scala:188-193`)
+fn item_script_data(item: &Expr) -> Result<Literal, TryExtractFromError> {
+    match item {
+        Expr::Const(c) => Ok(c.v.clone()),
+        Expr::Tuple(t) => tuple_script_data(t.items.as_slice()),
+        Expr::Collection(c) => collection_script_data(c),
+        Expr::GlobalVars(GlobalVars::GroupGenerator) => {
+            Ok(Literal::GroupElement(generator().into()))
+        }
+        other => Err(TryExtractFromError(format!("{other:?} is not a value"))),
+    }
+}
+
+/// `Tuple.value` (`values.scala:818-822`). A tuple of fewer than two items has no tuple data
+/// here, so it keeps sigmastate's `Coll[Any]`.
+fn tuple_script_data(items: &[Expr]) -> Result<Literal, TryExtractFromError> {
+    let data = items
+        .iter()
+        .map(item_script_data)
+        .collect::<Result<Vec<_>, _>>()?;
+    if data.len() < 2 {
+        return Ok(Literal::Coll(CollKind::from_collection(SType::SAny, data)?));
+    }
+    Ok(Literal::Tup(data.try_into().map_err(|_| {
+        TryExtractFromError(format!("a tuple of {} items", items.len()))
+    })?))
+}
+
+/// `ConcreteCollection.value` (`values.scala:882-885`): the items' data in an array of the
+/// element type's class. For a pair that class is `Tuple2`, which a tuple expression's data, a
+/// collection (`Tuple.value`), is not: an `ArrayStoreException`. Other tuples are collections
+/// themselves (`TupleData`, `package.scala:67`).
+fn collection_script_data(coll: &Collection) -> Result<Literal, TryExtractFromError> {
+    let (elem_tpe, data) = match coll {
+        Collection::BoolConstants(bools) => (
+            SType::SBoolean,
+            bools.iter().map(|b| Literal::Boolean(*b)).collect(),
+        ),
+        Collection::Exprs { elem_tpe, items } => {
+            let of_pairs = matches!(elem_tpe, SType::STuple(t) if t.items.len() == 2);
+            let data = items
+                .iter()
+                .map(|item| match item {
+                    Expr::Tuple(_) if of_pairs => Err(TryExtractFromError(format!(
+                        "{item:?} is not a pair's data"
+                    ))),
+                    _ => item_script_data(item),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (elem_tpe.clone(), data)
+        }
+    };
+    Ok(Literal::Coll(CollKind::from_collection(elem_tpe, data)?))
+}
+
 impl EvaluatedValue {
     /// sigmastate's `CheckV6Type` (rule 1019, v6.0.6 `ValidationRules.scala:165-194`), which
     /// the register and extension parsers run on each value: no `Option`, `Header` or
@@ -331,5 +462,71 @@ mod tests {
         for hex in ["86020402a3", "86010402", "8600"] {
             assert!(parse(hex).unwrap().to_constant().is_err(), "{hex}");
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod script_value_tests {
+    use super::*;
+
+    fn parse(hex: &str) -> EvaluatedValue {
+        EvaluatedValue::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_value_reads_at_its_type_with_its_data() {
+        // each value against the constant encoding of the same data: `TrueLeaf`, the generator,
+        // `Coll[Int](1, 2)`, `Tuple(1, 2)`, and a `Coll[(Int, Int)]` holding the pair constant
+        for (hex, constant_hex) in [
+            ("7f", "0101"),
+            (
+                "82",
+                "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            ),
+            ("83020404020404", "10020204"),
+            ("860204020404", "580204"),
+            ("830158580204", "0c58010204"),
+        ] {
+            let c = Constant::sigma_parse_bytes(&base16::decode(constant_hex).unwrap()).unwrap();
+            assert_eq!(
+                parse(hex).to_script_value().unwrap(),
+                ScriptValue {
+                    tpe: Some(c.tpe),
+                    v: c.v
+                },
+                "{hex}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tuple_of_any_size_converts() {
+        // `stypeToRType` builds a tuple type of any arity (`Evaluation.scala:37-48`): 1 and 0
+        // items convert with no type here, and 3 items (SANTA V7) at their tuple type
+        for hex in ["86010402", "8600"] {
+            assert_eq!(parse(hex).to_script_value().unwrap().tpe, None, "{hex}");
+        }
+        assert!(matches!(
+            parse("8603040204040406").to_script_value().unwrap().tpe,
+            Some(SType::STuple(t)) if t.items.len() == 3
+        ));
+    }
+
+    #[test]
+    fn to_script_value_fails_where_the_jvm_conversion_throws() {
+        // SANTA V1, `Tuple(1, HEIGHT)` (the items' cast, an `AssertionError`); C1, a
+        // `Coll[(Int, Int)]` holding a tuple expression (an `ArrayStoreException`); C2, an empty
+        // `Coll` of a 2-argument function (`stypeToRType`); and `Coll[Int](HEIGHT)`
+        for hex in [
+            "86020402a3",
+            "830158860204020404",
+            "8300700204040400",
+            "830104a3",
+        ] {
+            assert!(parse(hex).to_script_value().is_err(), "{hex}");
+        }
+        // C2's twin, a function of one argument, converts
+        assert!(parse("83007001040400").to_script_value().is_ok());
     }
 }
