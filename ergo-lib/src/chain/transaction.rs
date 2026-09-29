@@ -37,6 +37,7 @@ use ergotree_interpreter::sigma_protocol::prover::ProofBytes;
 use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
 use ergotree_ir::serialization::sigma_byte_reader::MAX_ARRAY_LENGTH;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
+use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWriter;
 use ergotree_ir::serialization::SigmaParsingError;
 use ergotree_ir::serialization::SigmaSerializable;
 use ergotree_ir::serialization::SigmaSerializationError;
@@ -75,10 +76,14 @@ use super::ergo_state_context::ErgoStateContext;
         into = "super::json::transaction::TransactionJson"
     )
 )]
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(Eq, Debug, Clone)]
 pub struct Transaction {
     /// transaction id
     pub(crate) tx_id: TxId,
+    /// The ErgoTree version the id and the message to sign are written at: the version the
+    /// transaction was read at, since ergo computes the id as it reads one (v6.0.6
+    /// `ErgoTransaction.scala:68`), or [`Transaction::BUILT_ID_VERSION`]
+    id_version: ErgoTreeVersion,
     /// inputs, that will be spent by this transaction.
     pub inputs: TxIoVec<Input>,
     /// inputs, that are not going to be spent by transaction, but will be reachable from inputs
@@ -95,9 +100,26 @@ pub struct Transaction {
     pub outputs: TxIoVec<ErgoBox>,
 }
 
+// The id version shows in the id: two transactions read at different versions are equal
+// unless it changed what their ids hash
+impl PartialEq for Transaction {
+    fn eq(&self, other: &Self) -> bool {
+        self.tx_id == other.tx_id
+            && self.inputs == other.inputs
+            && self.data_inputs == other.data_inputs
+            && self.output_candidates == other.output_candidates
+            && self.outputs == other.outputs
+    }
+}
+
 impl Transaction {
     /// Maximum number of outputs
     pub const MAX_OUTPUTS_COUNT: usize = u16::MAX as usize;
+
+    /// The version a transaction built here writes its id and message to sign at: 3, which an
+    /// ergo node reads a transaction from a peer at since 6.0 (v6.0.6
+    /// `ErgoNodeViewSynchronizer.scala:793`)
+    const BUILT_ID_VERSION: ErgoTreeVersion = ErgoTreeVersion::V3;
 
     /// Creates new transaction from vectors
     pub fn new_from_vec(
@@ -105,7 +127,21 @@ impl Transaction {
         data_inputs: Vec<DataInput>,
         output_candidates: Vec<ErgoBoxCandidate>,
     ) -> Result<Transaction, TransactionError> {
-        Ok(Transaction::new(
+        Transaction::new_from_vec_at(
+            inputs,
+            data_inputs,
+            output_candidates,
+            Transaction::BUILT_ID_VERSION,
+        )
+    }
+
+    fn new_from_vec_at(
+        inputs: Vec<Input>,
+        data_inputs: Vec<DataInput>,
+        output_candidates: Vec<ErgoBoxCandidate>,
+        id_version: ErgoTreeVersion,
+    ) -> Result<Transaction, TransactionError> {
+        Ok(Transaction::new_at(
             inputs
                 .try_into()
                 .map_err(TransactionError::InvalidInputsCount)?,
@@ -114,6 +150,7 @@ impl Transaction {
             output_candidates
                 .try_into()
                 .map_err(TransactionError::InvalidOutputCandidatesCount)?,
+            id_version,
         )?)
     }
 
@@ -122,6 +159,20 @@ impl Transaction {
         inputs: TxIoVec<Input>,
         data_inputs: Option<TxIoVec<DataInput>>,
         output_candidates: TxIoVec<ErgoBoxCandidate>,
+    ) -> Result<Transaction, SigmaSerializationError> {
+        Transaction::new_at(
+            inputs,
+            data_inputs,
+            output_candidates,
+            Transaction::BUILT_ID_VERSION,
+        )
+    }
+
+    fn new_at(
+        inputs: TxIoVec<Input>,
+        data_inputs: Option<TxIoVec<DataInput>>,
+        output_candidates: TxIoVec<ErgoBoxCandidate>,
+        id_version: ErgoTreeVersion,
     ) -> Result<Transaction, SigmaSerializationError> {
         let outputs_with_zero_tx_id =
             output_candidates
@@ -132,6 +183,7 @@ impl Transaction {
                 })?;
         let tx_to_sign = Transaction {
             tx_id: TxId::zero(),
+            id_version,
             inputs,
             data_inputs,
             output_candidates: output_candidates.clone(),
@@ -180,14 +232,17 @@ impl Transaction {
         Ok(TxId(blake2b256_hash(&bytes)))
     }
 
-    /// Serialized tx with empty proofs
+    /// Serialized tx with empty proofs, written at the version the id is
     pub fn bytes_to_sign(&self) -> Result<Vec<u8>, SigmaSerializationError> {
         let empty_proof_inputs = self.inputs.mapped_ref(|i| i.input_to_sign());
         let tx_to_sign = Transaction {
             inputs: empty_proof_inputs,
             ..(*self).clone()
         };
-        tx_to_sign.sigma_serialize_bytes()
+        let mut data = Vec::new();
+        let mut w = SigmaByteWriter::new(&mut data, None);
+        w.with_tree_version(self.id_version, |w| tx_to_sign.sigma_serialize(w))?;
+        Ok(data)
     }
 
     /// Get transaction id
@@ -248,39 +303,35 @@ where
 impl SigmaSerializable for Transaction {
     #[allow(clippy::unwrap_used)]
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
-        // Set tree version to V0 to match reference impl where global tree version is V0. This prevents including new types added in V6 (UnsignedBigInt, etc) in registers of boxes/contextextensions
-        w.with_tree_version(ErgoTreeVersion::V0, |w| {
-            // reference implementation - https://github.com/ScorexFoundation/sigmastate-interpreter/blob/9b20cb110effd1987ff76699d637174a4b2fb441/sigmastate/src/main/scala/org/ergoplatform/ErgoLikeTransaction.scala#L112-L112
-            w.put_usize_as_u16_unwrapped(self.inputs.len())?;
-            self.inputs.iter().try_for_each(|i| i.sigma_serialize(w))?;
-            if let Some(data_inputs) = &self.data_inputs {
-                w.put_usize_as_u16_unwrapped(data_inputs.len())?;
-                data_inputs.iter().try_for_each(|i| i.sigma_serialize(w))?;
-            } else {
-                w.put_u16(0)?;
-            }
+        // At the writer's version: ergo writes a transaction under the version context around
+        // it, a block's at the block version from v3 blocks (v6.0.6
+        // `BlockTransactions.scala:150-160`)
+        // reference implementation - https://github.com/ScorexFoundation/sigmastate-interpreter/blob/9b20cb110effd1987ff76699d637174a4b2fb441/sigmastate/src/main/scala/org/ergoplatform/ErgoLikeTransaction.scala#L112-L112
+        w.put_usize_as_u16_unwrapped(self.inputs.len())?;
+        self.inputs.iter().try_for_each(|i| i.sigma_serialize(w))?;
+        if let Some(data_inputs) = &self.data_inputs {
+            w.put_usize_as_u16_unwrapped(data_inputs.len())?;
+            data_inputs.iter().try_for_each(|i| i.sigma_serialize(w))?;
+        } else {
+            w.put_u16(0)?;
+        }
 
-            // Serialize distinct ids of tokens in transaction outputs.
-            let distinct_token_ids = distinct_token_ids(&self.output_candidates);
+        // Serialize distinct ids of tokens in transaction outputs.
+        let distinct_token_ids = distinct_token_ids(&self.output_candidates);
 
-            // Note that `self.output_candidates` is of type `TxIoVec` which has a max length of
-            // `u16::MAX`. Therefore the following unwrap is safe.
-            w.put_u32(u32::try_from(distinct_token_ids.len()).unwrap())?;
-            distinct_token_ids
-                .iter()
-                .try_for_each(|t_id| t_id.sigma_serialize(w))?;
+        // Note that `self.output_candidates` is of type `TxIoVec` which has a max length of
+        // `u16::MAX`. Therefore the following unwrap is safe.
+        w.put_u32(u32::try_from(distinct_token_ids.len()).unwrap())?;
+        distinct_token_ids
+            .iter()
+            .try_for_each(|t_id| t_id.sigma_serialize(w))?;
 
-            // serialize outputs
-            w.put_usize_as_u16_unwrapped(self.output_candidates.len())?;
-            self.output_candidates.iter().try_for_each(|o| {
-                ErgoBoxCandidate::serialize_body_with_indexed_digests(
-                    o,
-                    Some(&distinct_token_ids),
-                    w,
-                )
-            })?;
-            Ok(())
-        })
+        // serialize outputs
+        w.put_usize_as_u16_unwrapped(self.output_candidates.len())?;
+        self.output_candidates.iter().try_for_each(|o| {
+            ErgoBoxCandidate::serialize_body_with_indexed_digests(o, Some(&distinct_token_ids), w)
+        })?;
+        Ok(())
     }
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
@@ -289,50 +340,51 @@ impl SigmaSerializable for Transaction {
         // transactions included (`BlockTransactions.scala:187-200`). So a transaction starts
         // at level 0 with empty stores, whatever an earlier one left on the same stream.
         r.with_fresh_parse_state(|r| {
-            r.with_tree_version(ErgoTreeVersion::V0, |r| {
-                // reference implementation - https://github.com/ScorexFoundation/sigmastate-interpreter/blob/9b20cb110effd1987ff76699d637174a4b2fb441/sigmastate/src/main/scala/org/ergoplatform/ErgoLikeTransaction.scala#L146-L146
+            // At the reader's version: ergo reads a transaction under the version context
+            // around it, (3, 3) in a v6 block, the activated version from a peer
+            // (`BlockTransactions.scala:184-202`, `ErgoNodeViewSynchronizer.scala:793`)
+            // reference implementation - https://github.com/ScorexFoundation/sigmastate-interpreter/blob/9b20cb110effd1987ff76699d637174a4b2fb441/sigmastate/src/main/scala/org/ergoplatform/ErgoLikeTransaction.scala#L146-L146
 
-                // parse transaction inputs
-                let inputs_count = r.get_u16()?;
-                let mut inputs = Vec::new();
-                for _ in 0..inputs_count {
-                    inputs.push(Input::sigma_parse(r)?);
-                }
+            // parse transaction inputs
+            let inputs_count = r.get_u16()?;
+            let mut inputs = Vec::new();
+            for _ in 0..inputs_count {
+                inputs.push(Input::sigma_parse(r)?);
+            }
 
-                // parse transaction data inputs
-                let data_inputs_count = r.get_u16()?;
-                let mut data_inputs = Vec::new();
-                for _ in 0..data_inputs_count {
-                    data_inputs.push(DataInput::sigma_parse(r)?);
-                }
+            // parse transaction data inputs
+            let data_inputs_count = r.get_u16()?;
+            let mut data_inputs = Vec::new();
+            for _ in 0..data_inputs_count {
+                data_inputs.push(DataInput::sigma_parse(r)?);
+            }
 
-                // parse distinct ids of tokens in transaction outputs: sigmastate reads the count
-                // with `getUIntExact` and allocates with `safeNewArray`, which refuses more than
-                // `MaxArrayLength` (v6.0.6 `ErgoLikeTransaction.scala:162-166`)
-                let tokens_count = r.get_u32()?;
-                if tokens_count as usize > MAX_ARRAY_LENGTH {
-                    return Err(SigmaParsingError::ArrayLengthExceeded(
-                        tokens_count as usize,
-                    ));
-                }
-                let mut token_ids = IndexSet::with_hasher(Default::default());
-                for _ in 0..tokens_count {
-                    token_ids.insert(TokenId::sigma_parse(r)?);
-                }
+            // parse distinct ids of tokens in transaction outputs: sigmastate reads the count
+            // with `getUIntExact` and allocates with `safeNewArray`, which refuses more than
+            // `MaxArrayLength` (v6.0.6 `ErgoLikeTransaction.scala:162-166`)
+            let tokens_count = r.get_u32()?;
+            if tokens_count as usize > MAX_ARRAY_LENGTH {
+                return Err(SigmaParsingError::ArrayLengthExceeded(
+                    tokens_count as usize,
+                ));
+            }
+            let mut token_ids = IndexSet::with_hasher(Default::default());
+            for _ in 0..tokens_count {
+                token_ids.insert(TokenId::sigma_parse(r)?);
+            }
 
-                // parse outputs
-                let outputs_count = r.get_u16()?;
-                let mut outputs = Vec::new();
-                for _ in 0..outputs_count {
-                    outputs.push(ErgoBoxCandidate::parse_body_with_indexed_digests(
-                        Some(&token_ids),
-                        r,
-                    )?)
-                }
+            // parse outputs
+            let outputs_count = r.get_u16()?;
+            let mut outputs = Vec::new();
+            for _ in 0..outputs_count {
+                outputs.push(ErgoBoxCandidate::parse_body_with_indexed_digests(
+                    Some(&token_ids),
+                    r,
+                )?)
+            }
 
-                Transaction::new_from_vec(inputs, data_inputs, outputs)
-                    .map_err(|e| SigmaParsingError::Misc(format!("{}", e)))
-            })
+            Transaction::new_from_vec_at(inputs, data_inputs, outputs, r.tree_version())
+                .map_err(|e| SigmaParsingError::Misc(format!("{}", e)))
         })
     }
 }
@@ -468,7 +520,11 @@ mod tests {
 
     #[test]
     fn test_v6_types() {
-        // Test that boxes/contextextension can't contain V6 types
+        // An output is written below tree version 3, as ergo's default version context writes
+        // it (`ErgoTransaction.scala:171-175`), where an `UnsignedBigInt` register has no
+        // encoding. A context extension value is written at the transaction's version, 3 for
+        // one built here; rule 1019 rejects it when the transaction is read
+        // (`ContextExtension.scala:61-62`).
         let mut ergo_box = ErgoBoxCandidate {
             value: BoxValue::SAFE_USER_MIN,
             ergo_tree: force_any_val::<ErgoTree>(),
@@ -495,24 +551,26 @@ mod tests {
             Err(TransactionError::SigmaSerializationError(_))
         ));
         ergo_box.additional_registers = NonMandatoryRegisters::empty();
-        assert!(matches!(
-            Transaction::new_from_vec(
-                vec![Input::new(
-                    BoxId::zero(),
-                    ProverResult {
-                        proof: ProofBytes::Empty,
-                        extension: ContextExtension {
-                            values: IndexMap::from_iter([(
-                                0,
-                                UnsignedBigInt::from_str("0").unwrap().into()
-                            )])
-                        },
+        let tx = Transaction::new_from_vec(
+            vec![Input::new(
+                BoxId::zero(),
+                ProverResult {
+                    proof: ProofBytes::Empty,
+                    extension: ContextExtension {
+                        values: IndexMap::from_iter([(
+                            0,
+                            UnsignedBigInt::from_str("0").unwrap().into(),
+                        )]),
                     },
-                )],
-                vec![],
-                vec![ergo_box.clone()],
-            ),
-            Err(TransactionError::SigmaSerializationError(_))
+                },
+            )],
+            vec![],
+            vec![ergo_box.clone()],
+        )
+        .unwrap();
+        assert!(matches!(
+            Transaction::sigma_parse_bytes(&tx.sigma_serialize_bytes().unwrap()),
+            Err(SigmaParsingError::V6TypeError)
         ));
     }
 
@@ -670,21 +728,76 @@ mod tests {
 
     #[test]
     fn function_type_code_in_a_transaction_is_an_error_not_a_panic() {
-        // A transaction parses at ErgoTree version 0, where sigmastate's `CheckTypeCode`
-        // rejects type code 112 (the function type from v3): in a context extension value
-        // and in a register alike.
-        let sfunc = [0x70, 0x01, 0x04, 0x04, 0x00]; // (Int) => Int
+        // A constant of type `(Int) => Int`, in a context extension value and in a register.
+        // Below ErgoTree version 3 sigmastate's `CheckTypeCode` rejects type code 112; from
+        // version 3 it is the function type, whose data has no encoding
+        // (`CoreDataSerializer.scala:144-146`).
+        let sfunc = [0x70, 0x01, 0x04, 0x04, 0x00];
         let in_extension = tx_bytes(&[&[0x01, 0x01][..], &sfunc].concat(), &[0x00, 0x08, 0xd3]);
-        let mut in_register = tx_bytes(&[0], &[0x00, 0x08, 0xd3]);
-        in_register.pop(); // registers count
-        in_register.push(1);
-        in_register.extend_from_slice(&sfunc);
-        for tx in [in_extension, in_register] {
+        for tx in [in_extension, tx_with_r4(&sfunc)] {
             assert!(matches!(
-                Transaction::sigma_parse_bytes(&tx),
+                parse_at(&tx, ErgoTreeVersion::V0),
                 Err(SigmaParsingError::InvalidTypeCode(112))
             ));
+            assert!(parse_at(&tx, ErgoTreeVersion::V3).is_err());
         }
+    }
+
+    /// `tx` read at `version`
+    fn parse_at(tx: &[u8], version: ErgoTreeVersion) -> Result<Transaction, SigmaParsingError> {
+        let mut r = from_bytes(tx);
+        r.with_tree_version(version, Transaction::sigma_parse)
+    }
+
+    /// [`tx_bytes`] with an empty context extension, a `sigmaProp(true)` output tree and
+    /// `value` as the output's R4
+    fn tx_with_r4(value: &[u8]) -> Vec<u8> {
+        let mut tx = tx_bytes(&[0], &[0x00, 0x08, 0xd3]);
+        tx.pop(); // registers count
+        tx.push(1);
+        tx.extend_from_slice(value);
+        tx
+    }
+
+    #[test]
+    fn a_transaction_is_read_and_its_id_written_at_its_reader_s_version() {
+        // ergo reads a v6 block's transactions at version context (3, 3), and one from a peer
+        // at the activated version (v6.0.6 `BlockTransactions.scala:184-202`,
+        // `ErgoNodeViewSynchronizer.scala:793`), and computes the id there
+        // (`ErgoTransaction.scala:68`). From tree version 3, type code 112 is the function type
+        // (`TypeSerializer.scala:211`): SANTA C2, an empty `Coll[(Int, Int) => Int]` as a
+        // context extension value, and its twin `Coll[Int => Int]`. The input's proof is empty,
+        // so the signed bytes are the transaction's own.
+        for value in [
+            &[0x83, 0x00, 0x70, 0x02, 0x04, 0x04, 0x04, 0x00][..],
+            &[0x83, 0x00, 0x70, 0x01, 0x04, 0x04, 0x00],
+        ] {
+            let tx = tx_bytes(&[&[0x01, 0x00][..], value].concat(), &[0x00, 0x08, 0xd3]);
+            let read = parse_at(&tx, ErgoTreeVersion::V3).unwrap();
+            assert_eq!(read.id(), TxId(blake2b256_hash(&tx)), "{value:02x?}");
+            assert_eq!(read.bytes_to_sign().unwrap(), tx, "{value:02x?}");
+            assert!(
+                matches!(
+                    parse_at(&tx, ErgoTreeVersion::V0),
+                    Err(SigmaParsingError::InvalidTypeCode(112))
+                ),
+                "{value:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_output_the_default_context_cannot_write_fails_the_transaction() {
+        // ergo writes an output under its default version context (1, 1), where a function
+        // type has no encoding (`TypeSerializer.scala:111`), and the output checks throw
+        // (`ErgoTransaction.scala:171-175`): an output holding SANTA C2's twin as R4 fails the
+        // transaction read at version 3 as well
+        let tx = tx_with_r4(&[0x83, 0x00, 0x70, 0x01, 0x04, 0x04, 0x00]);
+        assert!(parse_at(&tx, ErgoTreeVersion::V3).is_err());
+        assert!(matches!(
+            parse_at(&tx, ErgoTreeVersion::V0),
+            Err(SigmaParsingError::InvalidTypeCode(112))
+        ));
     }
 
     #[test]
