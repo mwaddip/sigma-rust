@@ -173,7 +173,7 @@ mod tests {
         let b = force_any_val::<ErgoBox>()
             .with_additional_registers(vec![Constant::from(7i64)].try_into().unwrap());
         let mut ext = ContextExtension::empty();
-        ext.values.insert(1u8, Constant::from(idx));
+        ext.values.insert(1u8, idx.into());
         Context {
             self_box: Box::leak(Box::new(b)),
             extension: Box::leak(Box::new(ext)),

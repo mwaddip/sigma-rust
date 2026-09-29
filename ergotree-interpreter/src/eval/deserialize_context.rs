@@ -160,7 +160,7 @@ mod tests {
             let bytes = inner.sigma_serialize_bytes().unwrap();
             let len = bytes.len() as u64;
             let ext = ContextExtension {
-                values: [(0u8, Constant::from(bytes))].iter().cloned().collect(),
+                values: [(0u8, bytes.into())].into_iter().collect(),
             };
             let ctx = force_any_val::<Context>().with_extension(&ext);
             let before = ctx.jit_cost_value();
@@ -230,9 +230,8 @@ mod tests {
         }
         .into();
         // var 0 present but an Int, not a Coll[Byte]
-        let ctx_ext_val: Constant = 1i32.into();
         let ctx_ext = ContextExtension {
-            values: [(0u8, ctx_ext_val)].iter().cloned().collect(),
+            values: [(0u8, 1i32.into())].into_iter().collect(),
         };
         let ctx = force_any_val::<Context>().with_extension(&ctx_ext);
         assert!(try_eval_with_deserialize::<bool>(&expr, &ctx).unwrap());
@@ -246,9 +245,8 @@ mod tests {
         }
         .into();
         // should be byte array
-        let ctx_ext_val: Constant = 1i32.into();
         let ctx_ext = ContextExtension {
-            values: [(1u8, ctx_ext_val)].iter().cloned().collect(),
+            values: [(1u8, 1i32.into())].into_iter().collect(),
         };
         let ctx = force_any_val::<Context>().with_extension(&ctx_ext);
         assert!(try_eval_with_deserialize::<bool>(&expr, &ctx).is_err());
@@ -326,7 +324,7 @@ mod tests {
     // over the whole tree, dead branches included).
     #[test]
     fn deserialize_bearing_segregated_tree_evals_substituted() {
-        let inner_bytes: Constant = Expr::from(true).sigma_serialize_bytes().unwrap().into();
+        let inner_bytes = Expr::from(true).sigma_serialize_bytes().unwrap();
         for hex in [
             "1b0d02010101019573007301d40100", // deserializeContext(0) on the dead branch
             "1b0d02010101019573007301d40101", // deserializeContext(1) on the dead branch
@@ -340,10 +338,12 @@ mod tests {
             let tree = ErgoTree::sigma_parse_bytes_lenient(&bytes).unwrap();
 
             let ctx_ext = ContextExtension {
-                values: [(0u8, inner_bytes.clone()), (1u8, inner_bytes.clone())]
-                    .iter()
-                    .cloned()
-                    .collect(),
+                values: [
+                    (0u8, inner_bytes.clone().into()),
+                    (1u8, inner_bytes.clone().into()),
+                ]
+                .into_iter()
+                .collect(),
             };
             let mut ctx = force_any_val::<Context>().with_extension(&ctx_ext);
             ctx.pre_header.version = 4;

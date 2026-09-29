@@ -825,7 +825,6 @@ mod test {
     fn self_extension_key_above_0x7f_rejected_at_construction() {
         use crate::eval::test_util::{try_eval_out, try_eval_with_deserialize};
         use ergotree_ir::chain::context_extension::ContextExtension;
-        use ergotree_ir::mir::constant::Constant;
         use ergotree_ir::mir::get_var::GetVar;
         use ergotree_ir::mir::value::Value;
 
@@ -836,7 +835,7 @@ mod test {
 
         let ctx_with_key = |key: u8| -> Context<'static> {
             let mut ext = ContextExtension::empty();
-            ext.values.insert(key, Constant::from(1i32));
+            ext.values.insert(key, 1i32.into());
             let mut ctx = force_any_val::<Context>();
             ctx.extension = Box::leak(Box::new(ext));
             ctx
