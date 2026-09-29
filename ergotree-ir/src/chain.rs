@@ -4,6 +4,7 @@ pub mod address;
 pub mod context;
 pub mod context_extension;
 pub mod ergo_box;
+pub mod evaluated_value;
 #[cfg(feature = "json")]
 pub mod json;
 pub mod token;

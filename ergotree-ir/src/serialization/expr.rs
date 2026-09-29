@@ -96,7 +96,10 @@ impl Expr {
     }
 
     /// The value after its first byte `tag`, without its nesting level
-    fn parse_tagged<R: SigmaByteRead>(r: &mut R, tag: u8) -> Result<Self, SigmaParsingError> {
+    pub(crate) fn parse_tagged<R: SigmaByteRead>(
+        r: &mut R,
+        tag: u8,
+    ) -> Result<Self, SigmaParsingError> {
         if tag <= OpCode::LAST_CONSTANT_CODE.value() {
             let constant = Constant::parse_with_tag(r, tag)?;
             Ok(Expr::Const(constant))
