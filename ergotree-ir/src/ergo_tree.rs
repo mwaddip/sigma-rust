@@ -2316,4 +2316,25 @@ mod collection_input_tests {
             );
         }
     }
+
+    #[test]
+    fn a_collection_item_of_another_type_rejects_sized_or_not() {
+        // SANTA `tree_parse_acceptance` #20-#22: `sigmaProp(SizeOf(Coll[Int](1L)) == 1)`,
+        // unsized and size-flagged (`ConcreteCollectionSerializer.scala:38` asserts the item's
+        // type), then the right-typed twin `Coll[Int](1)`
+        for hex in ["00d193b183010405020402", "080ad193b183010405020402"] {
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap()),
+                    Err(SigmaParsingError::CollectionItemTypeMismatch(_))
+                ),
+                "{hex}"
+            );
+        }
+        let twin = base16::decode("00d193b183010404020402").unwrap();
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&twin).unwrap(),
+            ErgoTree::Parsed(_)
+        ));
+    }
 }
