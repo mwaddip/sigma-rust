@@ -115,10 +115,9 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
             .collect();
-        let mut lenient = Vec::with_capacity(bytes.len() - 1);
-        lenient.push(bytes[0] & !0x08);
-        lenient.extend_from_slice(&bytes[2..]); // size VLQ is 1 byte here
-        let tree = ErgoTree::sigma_parse_bytes(&lenient).unwrap();
+        // Arbitrary-typed root (eval-tier corpus): the lenient entry skips only the
+        // SigmaProp-root check; the real header (size bit set) keeps Rule-1012 happy.
+        let tree = ErgoTree::sigma_parse_bytes_lenient(&bytes).unwrap();
         tree.proposition().unwrap()
     }
 
