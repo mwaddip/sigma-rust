@@ -2338,3 +2338,31 @@ mod collection_input_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod true_false_leaf_tests {
+    //! JVM parity: sigmastate reads `TrueLeaf` and `FalseLeaf` under their own opcodes `7f` and
+    //! `80` (`ValueSerializer.scala:79-80`). Both are the Boolean constant (`values.scala:771-790`),
+    //! so they are written back through the constant path (`ValueSerializer.scala:362-370`).
+    use super::*;
+
+    #[test]
+    fn true_and_false_leaf_parse_and_are_written_back_as_constants() {
+        // SANTA `tree_parse_acceptance` #2, #3: `sigmaProp(TrueLeaf)`, `sigmaProp(FalseLeaf)`,
+        // then the size-flagged form of #2, whose size is rewritten like any parsed sized tree
+        for (hex, written_back) in [
+            ("00d17f", "00d10101"),
+            ("00d180", "00d10100"),
+            ("0802d17f", "0803d10101"),
+        ] {
+            let tree = ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap();
+            assert!(matches!(tree, ErgoTree::Parsed(_)), "{hex}");
+            assert_eq!(
+                base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
+                written_back,
+                "{hex}"
+            );
+        }
+    }
+}

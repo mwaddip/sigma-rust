@@ -117,6 +117,12 @@ impl Expr {
                         Ok(Expr::ConstPlaceholder(cp))
                     }
                 }
+                // sigmastate v6.0.6 reads `TrueLeaf` and `FalseLeaf` under their own opcodes
+                // (`ValueSerializer.scala:79-80`), but both are the Boolean constant
+                // (`values.scala:771-790`), written back through the constant path
+                // (`ValueSerializer.scala:362-370`): `7f` as `01 01`, `80` as `01 00`
+                OpCode::TRUE => Ok(Expr::Const(true.into())),
+                OpCode::FALSE => Ok(Expr::Const(false.into())),
                 OpCode::HEIGHT => Ok(Expr::GlobalVars(GlobalVars::Height)),
                 OpCode::SELF_BOX => Ok(Expr::GlobalVars(GlobalVars::SelfBox)),
                 OpCode::INPUTS => Ok(Expr::GlobalVars(GlobalVars::Inputs)),
