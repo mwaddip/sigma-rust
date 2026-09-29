@@ -698,8 +698,11 @@ mod evaluated_value_tests {
     //! concrete collection or the group generator. The tx id hashes each value as `putValue`
     //! writes it back (`:49`).
     use super::*;
+    use crate::ergo_tree::ErgoTreeVersion;
+    use crate::serialization::sigma_byte_writer::SigmaByteWriter;
     use alloc::format;
     use alloc::string::ToString;
+    use alloc::vec::Vec;
 
     /// One variable, id 0, holding `value`
     fn extension_hex(value: &str) -> String {
@@ -736,6 +739,29 @@ mod evaluated_value_tests {
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn an_upcast_of_a_constant_is_written_as_the_writer_s_version_writes_it() {
+        // SANTA X15, `Tuple(1, Upcast(1, Long))`: a v6 block's transaction, parsed at tree
+        // version 3, keeps the `Upcast`; below version 3 the constant is written in its place
+        // (`ValueSerializer.scala:157-169`)
+        let ext = parse("860204027e040205").unwrap();
+        let written_at = |version: ErgoTreeVersion| {
+            let mut data = Vec::new();
+            let mut w = SigmaByteWriter::new(&mut data, None);
+            w.with_tree_version(version, |w| ext.sigma_serialize(w))
+                .unwrap();
+            base16::encode_lower(&data)
+        };
+        assert_eq!(
+            written_at(ErgoTreeVersion::V0),
+            extension_hex("860204020402")
+        );
+        assert_eq!(
+            written_at(ErgoTreeVersion::V3),
+            extension_hex("860204027e040205")
+        );
     }
 
     #[test]

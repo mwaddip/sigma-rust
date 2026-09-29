@@ -786,6 +786,55 @@ mod tests {
         }
     }
 
+    /// `bytes` with each `Upcast(1, Long)` written as the constant 1
+    fn without_upcast(bytes: &[u8]) -> Vec<u8> {
+        let upcast = [0x7e, 0x04, 0x02, 0x05];
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i..].starts_with(&upcast) {
+                out.extend_from_slice(&[0x04, 0x02]);
+                i += upcast.len();
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_upcast_of_a_constant_stays_in_the_id_from_version_3_and_leaves_an_output_s_id() {
+        // SANTA X15, `Tuple(1, Upcast(1, Long))`, as a context extension value and as the
+        // output's R4. ergo computes the id as it reads the transaction, and writes the output
+        // under its default version context (1, 1) (`ErgoTransaction.scala:68`, `:171-175`);
+        // below tree version 3 an `Upcast` of a constant is written as the constant
+        // (`ValueSerializer.scala:157-169`). The input's proof is empty, so the signed bytes
+        // are the transaction's own.
+        let x15 = [0x86, 0x02, 0x04, 0x02, 0x7e, 0x04, 0x02, 0x05];
+        let mut tx = tx_bytes(&[&[0x01, 0x00][..], &x15].concat(), &[0x00, 0x08, 0xd3]);
+        tx.pop(); // registers count
+        tx.push(1);
+        tx.extend_from_slice(&x15);
+        let stripped = without_upcast(&tx);
+        assert_eq!(stripped.len(), tx.len() - 4);
+        for (version, signed) in [(ErgoTreeVersion::V3, &tx), (ErgoTreeVersion::V0, &stripped)] {
+            let read = parse_at(&tx, version).unwrap();
+            assert_eq!(read.bytes_to_sign().unwrap(), *signed, "{version:?}");
+            assert_eq!(read.id(), TxId(blake2b256_hash(signed)), "{version:?}");
+            let output = read.outputs.first();
+            let at_v3 = output.sigma_serialize_bytes().unwrap();
+            let written = without_upcast(&at_v3);
+            assert_eq!(written.len(), at_v3.len() - 2, "{version:?}");
+            assert_eq!(output.bytes().unwrap(), written, "{version:?}");
+            assert_eq!(
+                output.box_id(),
+                BoxId::from(blake2b256_hash(&written)),
+                "{version:?}"
+            );
+        }
+    }
+
     #[test]
     fn an_output_the_default_context_cannot_write_fails_the_transaction() {
         // ergo writes an output under its default version context (1, 1), where a function

@@ -2366,3 +2366,32 @@ mod true_false_leaf_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod upcast_write_back_tests {
+    //! JVM parity: a box writes its tree with `serializeErgoTree`, which writes a parsed tree's
+    //! root again, under the tree's own version (v6.0.6 `ErgoBoxCandidate.scala:142`,
+    //! `ErgoTreeSerializer.scala:105-114`). Below version 3 that writes an `Upcast` of a constant
+    //! as the constant (`ValueSerializer.scala:157-169`).
+    use super::*;
+
+    #[test]
+    fn a_tree_below_version_3_writes_an_upcast_of_a_constant_as_the_constant() {
+        // `sigmaProp(Upcast(1, Long) > 0L)` as a v0 tree, a v1 tree, whose size is rewritten,
+        // and a v3 tree, which keeps it
+        for (hex, written_back) in [
+            ("00d1917e0402050500", "00d19104020500"),
+            ("0908d1917e0402050500", "0906d19104020500"),
+            ("0b08d1917e0402050500", "0b08d1917e0402050500"),
+        ] {
+            let tree = ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap();
+            assert!(matches!(tree, ErgoTree::Parsed(_)), "{hex}");
+            assert_eq!(
+                base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
+                written_back,
+                "{hex}"
+            );
+        }
+    }
+}

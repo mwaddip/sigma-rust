@@ -1,6 +1,7 @@
 use super::bin_op::bin_op_sigma_parse;
 use super::bin_op::bin_op_sigma_serialize;
 use super::{op_code::OpCode, sigma_byte_writer::SigmaByteWrite};
+use crate::ergo_tree::ErgoTreeVersion;
 use crate::has_opcode::HasOpCode;
 use crate::has_opcode::HasStaticOpCode;
 use crate::mir::and::And;
@@ -287,7 +288,15 @@ impl SigmaSerializable for Expr {
             Expr::Map(op) => op.sigma_serialize_w_opcode(w),
             Expr::Filter(op) => op.sigma_serialize_w_opcode(w),
             Expr::BoolToSigmaProp(op) => op.sigma_serialize_w_opcode(w),
-            Expr::Upcast(op) => op.sigma_serialize_w_opcode(w),
+            // Below tree version 3, `ValueSerializer.serialize` writes an `Upcast` whose input is
+            // a constant as that constant, through the constant path (v6.0.6
+            // `ValueSerializer.scala:157-169`, `:362-372`)
+            Expr::Upcast(op) => match &*op.input {
+                input @ Expr::Const(_) if w.tree_version() < ErgoTreeVersion::V3 => {
+                    input.sigma_serialize(w)
+                }
+                _ => op.sigma_serialize_w_opcode(w),
+            },
             Expr::Downcast(op) => op.sigma_serialize_w_opcode(w),
             Expr::If(op) => op.sigma_serialize_w_opcode(w),
             Expr::ByIndex(op) => op.expr().sigma_serialize_w_opcode(w),

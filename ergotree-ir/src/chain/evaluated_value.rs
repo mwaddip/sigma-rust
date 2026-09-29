@@ -352,7 +352,10 @@ impl SigmaSerializable for EvaluatedValue {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::ergo_tree::ErgoTreeVersion;
+    use crate::serialization::sigma_byte_writer::SigmaByteWriter;
     use alloc::format;
+    use alloc::string::String;
 
     fn parse(hex: &str) -> Result<EvaluatedValue, SigmaParsingError> {
         EvaluatedValue::sigma_parse_bytes(&base16::decode(hex).unwrap())
@@ -419,6 +422,38 @@ mod tests {
             parse(&n6),
             Err(SigmaParsingError::NegativeTupleSize(-128))
         ));
+    }
+
+    /// `value` as a writer at `version` writes it
+    fn written_at(value: &EvaluatedValue, version: ErgoTreeVersion) -> String {
+        let mut data = Vec::new();
+        let mut w = SigmaByteWriter::new(&mut data, None);
+        w.with_tree_version(version, |w| value.sigma_serialize(w))
+            .unwrap();
+        base16::encode_lower(&data)
+    }
+
+    #[test]
+    fn below_tree_version_3_an_upcast_of_a_constant_is_written_as_the_constant() {
+        // SANTA X15, `Tuple(1, Upcast(1, Long))`; `Coll[Long](Upcast(1, Long))`;
+        // `Tuple(Plus(Upcast(1, Long), 2L))`; and `Tuple(Upcast(Upcast(1.toByte, Int), Long))`,
+        // where only the inner `Upcast` holds a constant (`ValueSerializer.scala:157-169`)
+        for (hex, below_v3) in [
+            ("860204027e040205", "860204020402"),
+            ("8301057e040205", "8301050402"),
+            ("86019a7e0402050504", "86019a04020504"),
+            ("86017e7e02010405", "86017e020105"),
+        ] {
+            let value = parse(hex).unwrap();
+            for version in [
+                ErgoTreeVersion::V0,
+                ErgoTreeVersion::V1,
+                ErgoTreeVersion::V2,
+            ] {
+                assert_eq!(written_at(&value, version), below_v3, "{hex} {version:?}");
+            }
+            assert_eq!(written_at(&value, ErgoTreeVersion::V3), hex);
+        }
     }
 
     #[test]
