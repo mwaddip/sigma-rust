@@ -194,7 +194,14 @@ impl ErgoBox {
     }
 
     pub(crate) fn calc_box_id(&self) -> Result<BoxId, SigmaSerializationError> {
-        let bytes = self.default_context_bytes()?;
+        // ergo builds a box its default context cannot write (a v6-typed or function-typed
+        // register) and fails only where it reads `ErgoBox.bytes`, in a transaction's output
+        // checks (`ErgoTransaction.scala:171-175`). Such a box's id hashes it as written at the
+        // highest version, so a transaction holding one reads, and fails those checks.
+        let bytes = match self.default_context_bytes() {
+            Ok(bytes) => bytes,
+            Err(_) => self.sigma_serialize_bytes()?,
+        };
         let hash = blake2b256_hash(&bytes);
         Ok(Digest32::from(*hash).into())
     }
@@ -1011,26 +1018,34 @@ mod default_context_tests {
     use core::str::FromStr;
 
     #[test]
-    fn a_built_box_is_written_below_tree_version_3() {
-        // There an `UnsignedBigInt` has no encoding (`CoreDataSerializer.scala:39`, `:84-86`),
-        // so a box holding one in a register has no id
+    fn a_box_the_default_context_cannot_write_builds_and_its_bytes_fail() {
+        // There an `UnsignedBigInt` has no encoding (`CoreDataSerializer.scala:39`, `:84-86`).
+        // ergo still builds such a box, and fails where it reads `ErgoBox.bytes`, as the output
+        // checks do. Its id here hashes the box as written at version 3.
         let regs = NonMandatoryRegisters::new([(
             NonMandatoryRegisterId::R4,
             Constant::from(UnsignedBigInt::from_str("0").unwrap()),
         )])
         .unwrap();
         let tree = ErgoTree::sigma_parse_bytes(&[0x00, 0x08, 0xd3]).unwrap();
+        let b = ErgoBox::new(
+            BoxValue::SAFE_USER_MIN,
+            tree,
+            None,
+            regs,
+            0,
+            TxId::zero(),
+            0,
+        )
+        .unwrap();
         assert!(matches!(
-            ErgoBox::new(
-                BoxValue::SAFE_USER_MIN,
-                tree,
-                None,
-                regs,
-                0,
-                TxId::zero(),
-                0
-            ),
+            b.bytes(),
             Err(SigmaSerializationError::NotSupported(_))
         ));
+        let at_v3 = b.sigma_serialize_bytes().unwrap();
+        assert_eq!(
+            b.box_id(),
+            BoxId::from(Digest32::from(*blake2b256_hash(&at_v3)))
+        );
     }
 }

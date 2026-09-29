@@ -1012,6 +1012,27 @@ mod test {
     }
 
     #[test]
+    fn an_output_the_default_context_cannot_write_fails_the_output_checks() {
+        // SANTA `evaluated-values-spend` entry 46: C2's twin, an empty `Coll[Int => Int]`, as
+        // R4. ergo's output checks write the output under its default version context, where
+        // a function type has no encoding (`TypeSerializer.scala:111`): the transaction is
+        // invalid (`ErgoTransaction.scala:171-175`)
+        use super::verify_output;
+        use ergotree_ir::serialization::SigmaSerializable;
+        let candidate = ErgoBoxCandidate::sigma_parse_bytes(
+            &base16::decode("c0843d0008d301000183007001040400").unwrap(),
+        )
+        .unwrap();
+        let output = ErgoBox::from_box_candidate(&candidate, TxId::zero(), 0).unwrap();
+        let mut state_context: ErgoStateContext = force_any_val();
+        state_context.pre_header.height = 1;
+        assert!(matches!(
+            verify_output(&state_context, &output, 0),
+            Err(TxValidationError::SigmaSerializationError(_))
+        ));
+    }
+
+    #[test]
     fn test_monotonic_box_creation() {
         let true_tree = ErgoTree::new(
             ErgoTreeHeader::v0(true),
