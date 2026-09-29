@@ -270,18 +270,17 @@ impl SigmaSerializable for BigInt256 {
     fn sigma_parse<R: crate::serialization::sigma_byte_reader::SigmaByteRead>(
         r: &mut R,
     ) -> Result<Self, crate::serialization::SigmaParsingError> {
+        // sigmastate refuses a size above 32 with a `SerializerException`, and `new BigInteger`
+        // an empty value with a `NumberFormatException` (v6.0.6 `CoreDataSerializer.scala:112-117`)
         let size = r.get_u16()?;
         if size > 32 {
-            return Err(SigmaParsingError::ValueOutOfBounds(format!(
-                "serialized BigInt size {0} bytes exceeds 32",
-                size
-            )));
+            return Err(SigmaParsingError::InvalidBigIntSize(size as usize));
         }
         let mut buf = vec![0u8; size as usize];
         r.get_bytes_into(&mut buf)?;
         match BigInt256::from_be_slice(&buf) {
             Some(x) => Ok(x),
-            None => Err(SigmaParsingError::ValueOutOfBounds(String::new())),
+            None => Err(SigmaParsingError::InvalidBigIntSize(size as usize)),
         }
     }
 }

@@ -62,10 +62,11 @@ impl SigmaSerializable for SigmaBoolean {
             }
             OpCode::TRIVIAL_PROP_TRUE => Ok(SigmaBoolean::TrivialProp(true)),
             OpCode::TRIVIAL_PROP_FALSE => Ok(SigmaBoolean::TrivialProp(false)),
-            _ => Err(SigmaParsingError::Misc(format!(
-                "unexpected op code in SigmaBoolean parsing: {:?}",
-                op_code
-            ))),
+            // sigmastate's opcode match has no default case: a `MatchError` (v6.0.6
+            // `SigmaBoolean.scala:75`)
+            _ => Err(SigmaParsingError::InvalidSigmaBooleanOpCode(
+                op_code.value(),
+            )),
         }?;
         r.set_level(r.level().saturating_sub(1))?;
         Ok(sigma_boolean)

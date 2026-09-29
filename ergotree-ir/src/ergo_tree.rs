@@ -2145,3 +2145,45 @@ mod type_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod malformed_data_tests {
+    //! JVM parity: an unknown SigmaBoolean opcode (a `MatchError`) and a BigInt size above 32
+    //! or of 0 (a `SerializerException`, a `NumberFormatException`) are no
+    //! `ValidationException`s, so a size-flagged tree rejects (SANTA `tree_degrade_gate`).
+    use super::*;
+
+    fn tree(hex: &str) -> Vec<u8> {
+        base16::decode(hex).unwrap()
+    }
+
+    #[test]
+    fn a_sigma_boolean_opcode_nothing_matches_rejects_a_sized_tree() {
+        // #3
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&tree("08020801")),
+            Err(SigmaParsingError::InvalidSigmaBooleanOpCode(1))
+        );
+    }
+
+    #[test]
+    fn a_big_int_of_a_bad_size_rejects_a_sized_tree() {
+        // #5, 33 bytes; then 0 bytes (from source); then the 32-byte twin #6, which parses and
+        // degrades on its root (rule 1001)
+        let size_33 = [&[0x08, 0x23, 0x06, 0x21, 0x00, 0x01][..], &[0; 31]].concat();
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&size_33),
+            Err(SigmaParsingError::InvalidBigIntSize(33))
+        );
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&[0x08, 0x02, 0x06, 0x00]),
+            Err(SigmaParsingError::InvalidBigIntSize(0))
+        );
+        let size_32 = [&[0x08, 0x22, 0x06, 0x20, 0x01][..], &[0; 31]].concat();
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&size_32).unwrap(),
+            ErgoTree::Unparsed { .. }
+        ));
+    }
+}

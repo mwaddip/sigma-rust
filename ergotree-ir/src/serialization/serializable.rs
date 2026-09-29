@@ -131,6 +131,14 @@ pub enum SigmaParsingError {
     /// `ClassCastException`, a failed `require`)
     #[error("invalid type parameter: {0}")]
     InvalidTypeParameter(String),
+    /// A SigmaBoolean opcode sigmastate's parser does not match (a `MatchError`)
+    #[error("unexpected SigmaBoolean opcode {0:#04x}")]
+    InvalidSigmaBooleanOpCode(u8),
+    /// A BigInt or UnsignedBigInt data size above 32 bytes, which sigmastate refuses with a
+    /// `SerializerException`, or a BigInt of 0 bytes, which `new BigInteger` refuses with a
+    /// `NumberFormatException`
+    #[error("invalid BigInt size {0}")]
+    InvalidBigIntSize(usize),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -233,7 +241,8 @@ impl SigmaParsingError {
     /// `SerializerException`. A placeholder past the tree's constants and a `ValUse` with no
     /// `ValDef` escape too: their store lookups throw (`ConstantPlaceholderSerializer.scala:19`,
     /// `ValDefTypeStore.scala:11`). So do type code 0 (`InvalidTypePrefix`) and a type
-    /// parameter that is not a type variable.
+    /// parameter that is not a type variable, and malformed data: an unknown SigmaBoolean
+    /// opcode and a bad BigInt size.
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -248,6 +257,8 @@ impl SigmaParsingError {
                 | SigmaParsingError::ValDefIdNotFound(_)
                 | SigmaParsingError::InvalidTypePrefix
                 | SigmaParsingError::InvalidTypeParameter(_)
+                | SigmaParsingError::InvalidSigmaBooleanOpCode(_)
+                | SigmaParsingError::InvalidBigIntSize(_)
                 | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)
