@@ -214,7 +214,7 @@ pub mod arbitrary {
                             pre_header,
                             extension: Box::leak(extensions[0].clone().into()),
                             last_block_utxo_root: AvlTreeData {
-                                digest: headers[0].state_root,
+                                digest: headers[0].state_root.0.to_vec(),
                                 tree_flags: AvlTreeFlags::new(true, true, true),
                                 key_length: 32,
                                 value_length_opt: None,

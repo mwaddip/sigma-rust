@@ -665,13 +665,13 @@ mod tests {
 
         // --- Phase A2c: AvlTree (delegated AvlTreeData serializer) ---
         let avl_dummy = ser_kind::<AvlTreeData>(Constant::from(AvlTreeData {
-            digest: ADDigest::zero(),
+            digest: ADDigest::zero().0.to_vec(),
             tree_flags: AvlTreeFlags::new(true, true, true),
             key_length: 32,
             value_length_opt: None,
         }));
         let avl_withlen = ser_kind::<AvlTreeData>(Constant::from(AvlTreeData {
-            digest: ADDigest::zero(),
+            digest: ADDigest::zero().0.to_vec(),
             tree_flags: AvlTreeFlags::new(true, true, true),
             key_length: 32,
             value_length_opt: Some(Box::new(8u32)),
