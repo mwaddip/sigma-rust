@@ -706,6 +706,19 @@ mod tests {
     }
 
     #[test]
+    fn an_inputs_count_written_above_u32_is_its_low_32_bits() {
+        // sigmastate reads the inputs count with `getUShort` (`ErgoLikeTransaction.scala:148`),
+        // which narrows it to an `Int` before its range check: written as 2^32 + 1, it is one
+        // input, and the id is over the count re-encoded
+        let canonical = tx_bytes(&[0], &[0x00, 0x08, 0xd3]);
+        let mut wrapped = vec![0x81, 0x80, 0x80, 0x80, 0x10];
+        wrapped.extend_from_slice(&canonical[1..]);
+        let tx = Transaction::sigma_parse_bytes(&wrapped).unwrap();
+        assert_eq!(tx.sigma_serialize_bytes().unwrap(), canonical);
+        assert_eq!(tx.id(), TxId(blake2b256_hash(&canonical)));
+    }
+
+    #[test]
     fn deeply_nested_extension_value_types_end_in_an_error_on_a_2_mib_stack() {
         // `Coll^n[Byte]` as a context extension value: type `0c`×(n−2) `1a`, then data
         // nested all the way down (`01`×(n−1) `00`) or an empty outer collection (`00`). On

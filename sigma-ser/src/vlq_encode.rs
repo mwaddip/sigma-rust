@@ -281,9 +281,12 @@ pub trait ReadSigmaVlqExt: io::Read + io::Seek + PositionLimit {
     }
 
     /// Read and decode using VLQ value written with [`WriteSigmaVlqExt::put_u16`]
+    ///
+    /// Only the low 32 bits of the value count, as in scorex-util's `getUShort`, which narrows
+    /// the value to an `Int` (`getULong().toInt`) before its range check: 2^32 + k reads as k.
     fn get_u16(&mut self) -> Result<u16, VlqEncodingError> {
         Self::get_u64(self).and_then(|v| {
-            u16::try_from(v).map_err(|err| VlqEncodingError::TryFrom(v.to_string(), err))
+            u16::try_from(v as u32).map_err(|err| VlqEncodingError::TryFrom(v.to_string(), err))
         })
     }
 
@@ -659,6 +662,19 @@ mod tests {
         roundtrip(16385, &[0x81, 0x80, 0x01]);
         roundtrip(65534, &[0xFE, 0xFF, 0x03]);
         roundtrip(65535, &[0xFF, 0xFF, 0x03]);
+    }
+
+    // scorex-util's `getUShort` is `getULong().toInt` and then the range check, so only the
+    // low 32 bits of the value count
+    #[test]
+    fn u16_reads_the_low_32_bits() {
+        let read = |bytes: &[u8]| Cursor::new(bytes).get_u16();
+        assert_eq!(read(&[0x80, 0x80, 0x80, 0x80, 0x10]).unwrap(), 0); // 2^32
+        assert_eq!(read(&[0x81, 0x80, 0x80, 0x80, 0x10]).unwrap(), 1); // 2^32 + 1
+        assert_eq!(read(&[0xff, 0xff, 0x83, 0x80, 0x10]).unwrap(), 65535); // 2^32 + 65535
+        assert!(read(&[0x80, 0x80, 0x84, 0x80, 0x10]).is_err()); // 2^32 + 65536
+        assert!(read(&[0x80, 0x80, 0x80, 0x80, 0x08]).is_err()); // 2^31, a negative Int
+        assert!(read(&[0x80, 0x80, 0x04]).is_err()); // 65536
     }
 
     #[test]

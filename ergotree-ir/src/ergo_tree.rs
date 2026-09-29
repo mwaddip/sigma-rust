@@ -1880,3 +1880,48 @@ mod constants_count_tests {
         assert_eq!(out, (vec![0x18, 0x03, 0x00, 0x08, 0xd3], 0));
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod ushort_count_tests {
+    //! JVM parity: sigmastate reads a collection's count with `getUShort`, which narrows the
+    //! value to an `Int` before its range check (`getULong().toInt`), so a count written as
+    //! 2^32 + k is k.
+    use super::*;
+
+    #[test]
+    fn a_collection_count_written_above_u32_is_its_low_32_bits() {
+        // SANTA `tree_count_wrap` #3-#5: `sigmaProp(SizeOf(coll) == n)`, each written back
+        // with the narrowed count
+        for (bytes, expected) in [
+            // `Coll[Boolean]()`, the count written as 2^32
+            (
+                &[
+                    0x00, 0xd1, 0x93, 0xb1, 0x85, 0x80, 0x80, 0x80, 0x80, 0x10, 0x04, 0x00,
+                ][..],
+                &[0x00, 0xd1, 0x93, 0xb1, 0x85, 0x00, 0x04, 0x00][..],
+            ),
+            // `Coll(true)`, the count written as 2^32 + 1
+            (
+                &[
+                    0x00, 0xd1, 0x93, 0xb1, 0x85, 0x81, 0x80, 0x80, 0x80, 0x10, 0x01, 0x04, 0x02,
+                ],
+                &[0x00, 0xd1, 0x93, 0xb1, 0x85, 0x01, 0x01, 0x04, 0x02],
+            ),
+            // `Coll[Int]()`, the count written as 2^32
+            (
+                &[
+                    0x00, 0xd1, 0x93, 0xb1, 0x83, 0x80, 0x80, 0x80, 0x80, 0x10, 0x04, 0x04, 0x00,
+                ],
+                &[0x00, 0xd1, 0x93, 0xb1, 0x83, 0x00, 0x04, 0x04, 0x00],
+            ),
+        ] {
+            let tree = ErgoTree::sigma_parse_bytes(bytes).unwrap();
+            assert_eq!(
+                tree.sigma_serialize_bytes().unwrap(),
+                expected,
+                "{bytes:02x?}"
+            );
+        }
+    }
+}
