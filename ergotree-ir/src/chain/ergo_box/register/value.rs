@@ -97,16 +97,17 @@ impl RegisterValue {
         }
     }
 
-    /// The register value as ergo's default version context (1, 1) writes it, below ErgoTree
-    /// version 3; an unparsed value keeps its bytes
+    /// The register value as a writer at ErgoTree `version` writes it; an unparsed value keeps
+    /// its bytes
     #[cfg(feature = "json")]
-    pub(crate) fn default_context_bytes(
+    pub(crate) fn bytes_at(
         &self,
+        version: crate::ergo_tree::ErgoTreeVersion,
     ) -> Result<Vec<u8>, crate::serialization::SigmaSerializationError> {
-        use crate::serialization::sigma_byte_writer::default_context_bytes;
+        use crate::serialization::sigma_byte_writer::bytes_at;
         match self {
-            RegisterValue::Parsed(c) => default_context_bytes(c),
-            RegisterValue::ParsedExpr(e) => default_context_bytes(&e.value),
+            RegisterValue::Parsed(c) => bytes_at(c, version),
+            RegisterValue::ParsedExpr(e) => bytes_at(&e.value, version),
             RegisterValue::Invalid {
                 bytes,
                 error_msg: _,
