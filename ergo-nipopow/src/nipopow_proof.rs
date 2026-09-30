@@ -282,6 +282,10 @@ pub enum NipopowProofError {
     /// expose.
     #[error("Popow header reader returned None for an expected header")]
     MissingPopowHeader,
+    /// [`crate::NipopowAlgos::update_interlinks`] was given an empty interlinks vector for a
+    /// non-genesis header
+    #[error("Interlinks vector cannot be empty for a non-genesis header")]
+    EmptyInterlinks,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

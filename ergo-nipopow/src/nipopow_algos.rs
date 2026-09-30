@@ -397,15 +397,20 @@ impl NipopowAlgos {
     pub fn update_interlinks(
         prev_header: Header,
         prev_interlinks: Vec<BlockId>,
-    ) -> Result<Vec<BlockId>, AutolykosPowSchemeError> {
+    ) -> Result<Vec<BlockId>, NipopowProofError> {
         let is_genesis = prev_header.height == 1;
         if !is_genesis {
-            // Interlinks vector cannot be empty in case of non-genesis header
-            assert!(!prev_interlinks.is_empty());
-            let genesis = prev_interlinks[0];
+            // `require(prevInterlinks.nonEmpty, ..)` (ergo 6.0.3 `NipopowAlgos.scala:47`) throws,
+            // and the extension validator's `Try` turns that into a rule 402 failure
+            let genesis = prev_interlinks
+                .first()
+                .copied()
+                .ok_or(NipopowProofError::EmptyInterlinks)?;
             let nipopow_algos = NipopowAlgos::default();
-            let prev_level = nipopow_algos.max_level_of(&prev_header)? as usize;
+            // `if (prevLevel > 0)` (`:51`) tests the signed level; convert only once it's positive
+            let prev_level = nipopow_algos.max_level_of(&prev_header)?;
             if prev_level > 0 {
+                let prev_level = prev_level as usize;
                 // Adapted:
                 //   `(genesis +: tail.dropRight(prevLevel)) ++Seq.fill(prevLevel)(prevHeader.id)`
                 // from scala
@@ -639,6 +644,60 @@ mod tests {
 
     fn blockid(byte: u8) -> BlockId {
         BlockId(Digest32::from([byte; 32]))
+    }
+
+    /// A v2 header at `height`. With `n_bits` `0x1A010000` the target is about 2^56, so the
+    /// hit of any nonce is far above it and the header's level is negative.
+    fn header_at_height(height: u32, n_bits: u32) -> Header {
+        use ergo_chain_types::{ADDigest, AutolykosSolution, EcPoint, Votes};
+        Header {
+            version: 2,
+            id: blockid(1),
+            parent_id: blockid(0),
+            ad_proofs_root: Digest32::zero(),
+            state_root: ADDigest::zero(),
+            transaction_root: Digest32::zero(),
+            timestamp: 0,
+            n_bits,
+            height,
+            extension_root: Digest32::zero(),
+            autolykos_solution: AutolykosSolution {
+                miner_pk: Box::<EcPoint>::default(),
+                pow_onetime_pk: None,
+                nonce: vec![0; 8],
+                pow_distance: None,
+            },
+            votes: Votes([0, 0, 0]),
+            unparsed_bytes: Box::new([]),
+        }
+    }
+
+    #[test]
+    fn update_interlinks_rejects_empty_interlinks_for_non_genesis() {
+        // JVM `updateInterlinks` requires a non-empty vector for a non-genesis header (ergo 6.0.3
+        // `NipopowAlgos.scala:47`), and the extension validator runs it inside `Try.map`
+        // (`ExtensionValidator.scala:36-41`): the block fails rule 402, the node doesn't crash.
+        let header = header_at_height(2, 0x1A01_0000);
+        assert_eq!(
+            NipopowAlgos::update_interlinks(header, vec![]),
+            Err(NipopowProofError::EmptyInterlinks)
+        );
+    }
+
+    #[test]
+    fn update_interlinks_keeps_the_vector_below_level_one() {
+        // JVM `if (prevLevel > 0)` tests the signed level and otherwise returns `prevInterlinks`
+        // unchanged (`NipopowAlgos.scala:51-54`)
+        let header = header_at_height(2, 0x1A01_0000);
+        assert!(matches!(
+            NipopowAlgos::default().max_level_of(&header),
+            Ok(level) if level < 0
+        ));
+        let interlinks = vec![blockid(0xa0), blockid(0xb0)];
+        assert_eq!(
+            NipopowAlgos::update_interlinks(header, interlinks.clone()),
+            Ok(interlinks)
+        );
     }
 
     #[test]
