@@ -15,6 +15,7 @@ use crate::serialization::SigmaSerializable;
 use crate::serialization::SigmaSerializationError;
 use crate::serialization::SigmaSerializeResult;
 
+use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 pub use box_id::*;
@@ -84,6 +85,41 @@ pub struct ErgoBox {
     /// `ErgoBox._bytes`: `ErgoBox.bytes` returns this slice verbatim, so a box carrying a
     /// non-canonically-encoded value keeps its on-the-wire byte image (and thus `id`).
     pub(crate) serialized_bytes: Option<Vec<u8>>,
+    /// `bytesWithNoRef`, written by its first reader (see [`ErgoBox::bytes_without_ref`])
+    pub(crate) bytes_with_no_ref: FirstReadBytes,
+}
+
+/// ergo's `ErgoBoxCandidate.bytesWithNoRef`, a lazy val (sigma-state 6.0.6
+/// `ErgoBoxCandidate.scala:54`): written once, by its first reader. It is no part of the box's
+/// identity, and a copy of the box is a new box, which its own first reader writes.
+pub(crate) struct FirstReadBytes(once_cell::race::OnceBox<Vec<u8>>);
+
+impl Default for FirstReadBytes {
+    fn default() -> Self {
+        FirstReadBytes(once_cell::race::OnceBox::new())
+    }
+}
+
+impl Clone for FirstReadBytes {
+    fn clone(&self) -> Self {
+        FirstReadBytes::default()
+    }
+}
+
+impl PartialEq for FirstReadBytes {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for FirstReadBytes {}
+
+impl core::fmt::Debug for FirstReadBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("FirstReadBytes")
+            .field(&self.0.get())
+            .finish()
+    }
 }
 
 // Mirror the reference impl's `ErgoBox.equals` (ErgoBox.scala:188-191), which compares the
@@ -131,6 +167,7 @@ impl ErgoBox {
             transaction_id,
             index,
             serialized_bytes: None,
+            bytes_with_no_ref: FirstReadBytes::default(),
         };
         let box_id = box_with_zero_id.calc_box_id()?;
         Ok(ErgoBox {
@@ -185,6 +222,7 @@ impl ErgoBox {
             transaction_id,
             index,
             serialized_bytes: None,
+            bytes_with_no_ref: FirstReadBytes::default(),
         };
         let box_id = box_with_zero_id.calc_box_id()?;
         Ok(ErgoBox {
@@ -245,10 +283,23 @@ impl ErgoBox {
         (self.creation_height as i32, bytes.as_vec_i8())
     }
 
-    /// Returns serialized ErgoBox without tx_id and index
-    pub fn bytes_without_ref(&self) -> Result<Vec<i8>, SigmaSerializationError> {
-        let candidate: ErgoBoxCandidate = self.clone().into();
-        Ok(candidate.sigma_serialize_bytes()?.as_vec_i8())
+    /// The box without its transaction id and index, as its first reader writes it. ergo's
+    /// `bytesWithNoRef` is a lazy val (sigma-state 6.0.6 `ErgoBoxCandidate.scala:54`) that
+    /// nothing reads before a script does: the first script to read it writes it, under its own
+    /// tree `version`, and every later read of this box gets those bytes (SANTA
+    /// `evaluated-values-spend` entries 51-62).
+    pub fn bytes_without_ref(
+        &self,
+        version: ErgoTreeVersion,
+    ) -> Result<Vec<i8>, SigmaSerializationError> {
+        let bytes = self.bytes_with_no_ref.0.get_or_try_init(|| {
+            let candidate: ErgoBoxCandidate = self.clone().into();
+            let mut data = Vec::new();
+            let mut w = SigmaByteWriter::new(&mut data, None);
+            w.with_tree_version(version, |w| candidate.sigma_serialize(w))?;
+            Ok::<_, SigmaSerializationError>(Box::new(data))
+        })?;
+        Ok(bytes.as_vec_i8())
     }
 }
 
@@ -294,6 +345,7 @@ impl SigmaSerializable for ErgoBox {
             transaction_id: tx_id,
             index,
             serialized_bytes: Some(box_bytes),
+            bytes_with_no_ref: FirstReadBytes::default(),
         })
     }
 }
@@ -595,6 +647,7 @@ pub mod arbitrary {
         pub fn with_additional_registers(self, registers: NonMandatoryRegisters) -> ErgoBox {
             ErgoBox {
                 additional_registers: registers,
+                bytes_with_no_ref: FirstReadBytes::default(),
                 ..self
             }
         }
