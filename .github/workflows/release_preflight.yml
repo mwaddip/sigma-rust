@@ -80,8 +80,8 @@ jobs:
           node <<'NODE'
           const fs = require("node:fs");
           const expected = [
-            ["pkg-nodejs/package.json", "ergo-lib-wasm-nodejs@0.29.0"],
-            ["pkg-browser/package.json", "ergo-lib-wasm-browser@0.29.0"],
+            ["pkg-nodejs/package.json", "ergo-lib-wasm-nodejs@0.30.0"],
+            ["pkg-browser/package.json", "ergo-lib-wasm-browser@0.30.0"],
           ];
           for (const [path, identity] of expected) {
             const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
