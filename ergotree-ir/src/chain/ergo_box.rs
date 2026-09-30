@@ -183,7 +183,7 @@ impl ErgoBox {
 
     /// Serialized box bytes. For a box parsed off the wire this is the exact retained input
     /// slice (`ErgoBox._bytes`); for a box built from fields it is the box as ergo writes one
-    /// it builds, below ErgoTree version 3 (see [`ErgoBox::default_context_bytes`]).
+    /// it builds, below ErgoTree version 3.
     /// `ExtractBytes` (`Box.bytes`) surfaces this, so non-canonically-encoded inputs keep their
     /// on-the-wire byte image. (Note `bytesWithoutRef`/`ErgoBoxCandidate` has no retained slice
     /// and always re-serializes canonically — see `ErgoBoxCandidate`.)
