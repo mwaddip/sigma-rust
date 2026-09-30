@@ -838,6 +838,22 @@ mod tests {
     }
 
     #[test]
+    fn json_of_a_transaction_read_below_version_3_reads_back() {
+        // ergo's JSON writes register and context extension values under its default version
+        // context (1, 1) (sigma-state 6.0.6 `JsonCodecs.scala:184-185`). A transaction read below
+        // version 3 has its id written there too, so its JSON reads back with the same id.
+        let x15 = [0x86, 0x02, 0x04, 0x02, 0x7e, 0x04, 0x02, 0x05];
+        let mut tx = tx_bytes(&[&[0x01, 0x00][..], &x15].concat(), &[0x00, 0x08, 0xd3]);
+        tx.pop(); // registers count
+        tx.push(1);
+        tx.extend_from_slice(&x15);
+        let read = parse_at(&tx, ErgoTreeVersion::V0).unwrap();
+        let json = serde_json::to_string(&read).unwrap();
+        let back: Transaction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id(), read.id());
+    }
+
+    #[test]
     fn an_output_the_default_context_cannot_write_is_read() {
         // SANTA `evaluated-values-spend` entry 46: C2's twin as the output's R4. ergo reads the
         // transaction at (3, 3); its output checks then write the output under the default

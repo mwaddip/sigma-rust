@@ -14,7 +14,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::convert::TryInto;
-use ergo_chain_types::Base16EncodedBytes;
 use hashbrown::HashMap;
 use thiserror::Error;
 
@@ -26,15 +25,37 @@ pub use value::*;
 
 /// Stores non-mandatory registers for the box
 #[derive(PartialEq, Eq, Debug, Clone)]
-#[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "json", derive(serde::Deserialize))]
 #[cfg_attr(
     feature = "json",
     serde(
-        into = "HashMap<NonMandatoryRegisterId, ergo_chain_types::Base16EncodedBytes>",
         try_from = "HashMap<NonMandatoryRegisterId, crate::chain::json::ergo_box::ConstantHolder>"
     )
 )]
 pub struct NonMandatoryRegisters(Vec<RegisterValue>);
+
+/// ergo's JSON writes each register value with `ValueSerializer.serialize` under the caller's
+/// version context (sigma-state 6.0.6 `JsonCodecs.scala:184-185`, `:298-302`), which its API
+/// routes leave at the default (1, 1): below ErgoTree version 3. A value that version can't
+/// write fails the JSON, as it throws there.
+#[cfg(feature = "json")]
+impl serde::Serialize for NonMandatoryRegisters {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::{Error, SerializeMap};
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (i, value) in self.0.iter().enumerate() {
+            let bytes = value.default_context_bytes().map_err(Error::custom)?;
+            map.serialize_entry(
+                &NonMandatoryRegisterId::get_by_zero_index(i),
+                &ergo_chain_types::Base16EncodedBytes::new(&bytes),
+            )?;
+        }
+        map.end()
+    }
+}
 
 impl NonMandatoryRegisters {
     /// Maximum number of non-mandatory registers
@@ -164,24 +185,6 @@ pub enum NonMandatoryRegistersError {
     /// Set of non-mandatory indexes are not densely packed
     #[error("registers are not densely packed (register R{0} is missing)")]
     NonDenselyPacked(u8),
-}
-
-impl From<NonMandatoryRegisters>
-    for HashMap<NonMandatoryRegisterId, ergo_chain_types::Base16EncodedBytes>
-{
-    fn from(v: NonMandatoryRegisters) -> Self {
-        v.0.into_iter()
-            .enumerate()
-            .map(|(i, reg_value)| {
-                (
-                    NonMandatoryRegisterId::get_by_zero_index(i),
-                    // no way of returning an error without writing custom JSON serializer
-                    #[allow(clippy::unwrap_used)]
-                    Base16EncodedBytes::new(&reg_value.sigma_serialize_bytes()),
-                )
-            })
-            .collect()
-    }
 }
 
 impl From<NonMandatoryRegisters> for HashMap<NonMandatoryRegisterId, RegisterValue> {
@@ -399,6 +402,26 @@ mod tests {
         );
         assert_eq!(only_r4.get(NonMandatoryRegisterId::R5), None);
         assert_eq!(only_r4.get(NonMandatoryRegisterId::R9), None);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_writes_a_register_as_ergo_s_default_context_does() {
+        // ergo's JSON writes a register value under the caller's version context, which its API
+        // routes leave at the default (1, 1) (sigma-state 6.0.6 `JsonCodecs.scala:184-185`,
+        // `:298-302`). Below ErgoTree version 3, X15's `Upcast` is written as the constant, and a
+        // function-typed value, C2's twin, has no encoding, so writing it fails.
+        let x15 =
+            RegisterValue::sigma_parse_bytes(&[0x86, 0x02, 0x04, 0x02, 0x7e, 0x04, 0x02, 0x05]);
+        let regs = NonMandatoryRegisters::try_from(vec![x15]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&regs).unwrap(),
+            serde_json::json!({ "R4": "860204020402" })
+        );
+        let c2_twin = RegisterValue::sigma_parse_bytes(&[0x83, 0x00, 0x70, 0x01, 0x04, 0x04, 0x00]);
+        assert!(!matches!(c2_twin, RegisterValue::Invalid { .. }));
+        let regs = NonMandatoryRegisters::try_from(vec![c2_twin]).unwrap();
+        assert!(serde_json::to_string(&regs).is_err());
     }
 }
 

@@ -97,6 +97,23 @@ impl RegisterValue {
         }
     }
 
+    /// The register value as ergo's default version context (1, 1) writes it, below ErgoTree
+    /// version 3; an unparsed value keeps its bytes
+    #[cfg(feature = "json")]
+    pub(crate) fn default_context_bytes(
+        &self,
+    ) -> Result<Vec<u8>, crate::serialization::SigmaSerializationError> {
+        use crate::serialization::sigma_byte_writer::default_context_bytes;
+        match self {
+            RegisterValue::Parsed(c) => default_context_bytes(c),
+            RegisterValue::ParsedExpr(e) => default_context_bytes(&e.value),
+            RegisterValue::Invalid {
+                bytes,
+                error_msg: _,
+            } => Ok(bytes.clone()),
+        }
+    }
+
     /// Parse bytes to RegisterValue: any value sigmastate's cast to `EvaluatedValue` accepts, or
     /// the bytes as `Invalid`
     pub fn sigma_parse_bytes(bytes: &[u8]) -> Self {

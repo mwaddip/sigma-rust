@@ -197,19 +197,24 @@ impl<H: BuildHasher> TryFrom<indexmap::IndexMap<String, String, H>> for ContextE
     }
 }
 
+/// ergo's `contextExtensionEncoder` writes each value as a register's: with
+/// `ValueSerializer.serialize` under the caller's version context (sigma-state 6.0.6
+/// `JsonCodecs.scala:239-242`, `:184-185`), which its API routes leave at the default (1, 1),
+/// below ErgoTree version 3. A value that version can't write fails the JSON, as it throws there.
 #[cfg(feature = "json")]
 impl serde::Serialize for ContextExtension {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
+        use crate::serialization::sigma_byte_writer::default_context_bytes;
         use serde::ser::Error;
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(self.values.len()))?;
         for (k, v) in &self.values {
             map.serialize_entry(
                 &format!("{}", k),
-                &base16::encode_lower(&v.sigma_serialize_bytes().map_err(Error::custom)?),
+                &base16::encode_lower(&default_context_bytes(v).map_err(Error::custom)?),
             )?;
         }
         map.end()
@@ -277,6 +282,26 @@ mod tests {
     const SCALA_212_CONTEXT_EXTENSION_8_BYTES: [u8; 25] = [
         8, 0, 4, 0, 5, 4, 10, 1, 4, 2, 6, 4, 12, 2, 4, 4, 7, 4, 14, 3, 4, 6, 4, 4, 8,
     ];
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_writes_a_value_as_ergo_s_default_context_does() {
+        // `contextExtensionEncoder` writes each value as a register's, under the caller's version
+        // context (sigma-state 6.0.6 `JsonCodecs.scala:239-242`, `:184-185`), which ergo's API
+        // routes leave at the default (1, 1): below ErgoTree version 3
+        let x15 = [0x86, 0x02, 0x04, 0x02, 0x7e, 0x04, 0x02, 0x05];
+        let mut ext = ContextExtension::empty();
+        ext.values
+            .insert(1, EvaluatedValue::sigma_parse_bytes(&x15).unwrap());
+        assert_eq!(
+            serde_json::to_value(&ext).unwrap(),
+            serde_json::json!({ "1": "860204020402" })
+        );
+        let c2_twin = [0x83, 0x00, 0x70, 0x01, 0x04, 0x04, 0x00];
+        ext.values
+            .insert(1, EvaluatedValue::sigma_parse_bytes(&c2_twin).unwrap());
+        assert!(serde_json::to_string(&ext).is_err());
+    }
 
     fn context_extension_with_int_constants(
         keys: impl IntoIterator<Item = u8>,
