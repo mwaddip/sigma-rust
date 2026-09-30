@@ -19,13 +19,10 @@ use ergotree_ir::chain::IndexSet;
 use ergotree_ir::serialization::SigmaSerializationError;
 
 /// Unsigned (inputs without proofs) transaction
-#[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "json", derive(serde::Deserialize))]
 #[cfg_attr(
     feature = "json",
-    serde(
-        try_from = "crate::chain::json::transaction::UnsignedTransactionJson",
-        into = "crate::chain::json::transaction::UnsignedTransactionJson"
-    )
+    serde(try_from = "crate::chain::json::transaction::UnsignedTransactionJson")
 )]
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct UnsignedTransaction {
@@ -171,5 +168,43 @@ mod tests {
             prop_assert!(!v.bytes_to_sign().unwrap().is_empty());
         }
 
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_reads_back_to_the_same_transaction() {
+        // SANTA X15, `Tuple(1, Upcast(1, Long))`, as the input's context extension variable 1
+        // and as the output's R4. An unsigned transaction's id and message to sign are written
+        // at version 3, and so are its JSON's values, whose `Upcast`s stay
+        use ergotree_ir::chain::context_extension::ContextExtension;
+        use ergotree_ir::chain::ergo_box::box_value::BoxValue;
+        use ergotree_ir::chain::ergo_box::{BoxId, NonMandatoryRegisters, RegisterValue};
+        use ergotree_ir::ergo_tree::ErgoTree;
+        use ergotree_ir::serialization::SigmaSerializable;
+        let x15 = [0x86, 0x02, 0x04, 0x02, 0x7e, 0x04, 0x02, 0x05];
+        let input = UnsignedInput::new(
+            BoxId::zero(),
+            ContextExtension::sigma_parse_bytes(&[&[0x01, 0x01][..], &x15].concat()).unwrap(),
+        );
+        let output = ErgoBoxCandidate {
+            value: BoxValue::SAFE_USER_MIN,
+            ergo_tree: ErgoTree::sigma_parse_bytes(&[0x00, 0x08, 0xd3]).unwrap(),
+            tokens: None,
+            additional_registers: NonMandatoryRegisters::try_from(vec![
+                RegisterValue::sigma_parse_bytes(&x15),
+            ])
+            .unwrap(),
+            creation_height: 1,
+        };
+        let tx = UnsignedTransaction::new_from_vec(vec![input], vec![], vec![output]).unwrap();
+        let json = serde_json::to_value(&tx).unwrap();
+        assert_eq!(json["inputs"][0]["extension"]["1"], "860204027e040205");
+        assert_eq!(
+            json["outputs"][0]["additionalRegisters"]["R4"],
+            "860204027e040205"
+        );
+        let back: UnsignedTransaction = serde_json::from_value(json).unwrap();
+        assert_eq!(back.id(), tx.id());
+        assert_eq!(back, tx);
     }
 }

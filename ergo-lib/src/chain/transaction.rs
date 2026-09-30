@@ -115,8 +115,8 @@ impl Transaction {
 
     /// The version a transaction built here writes its id and message to sign at: 3, which an
     /// ergo node reads a transaction from a peer at since 6.0 (v6.0.6
-    /// `ErgoNodeViewSynchronizer.scala:793`)
-    const BUILT_ID_VERSION: ErgoTreeVersion = ErgoTreeVersion::V3;
+    /// `ErgoNodeViewSynchronizer.scala:793`). An unsigned transaction's are written there too.
+    pub(crate) const BUILT_ID_VERSION: ErgoTreeVersion = ErgoTreeVersion::V3;
 
     /// Creates new transaction from vectors
     pub fn new_from_vec(

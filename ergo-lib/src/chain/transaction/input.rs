@@ -40,9 +40,38 @@ impl Serialize for UnsignedInput {
     where
         S: serde::Serializer,
     {
+        self.json_at(ErgoTreeVersion::V0).serialize(serializer)
+    }
+}
+
+#[cfg(feature = "json")]
+impl UnsignedInput {
+    /// JSON of the input, with its context extension values as a writer at ErgoTree `version`
+    /// writes them
+    pub(crate) fn json_at(&self, version: ErgoTreeVersion) -> impl Serialize + '_ {
+        UnsignedInputJson {
+            input: self,
+            version,
+        }
+    }
+}
+
+/// [`UnsignedInput::json_at`]
+#[cfg(feature = "json")]
+struct UnsignedInputJson<'a> {
+    input: &'a UnsignedInput,
+    version: ErgoTreeVersion,
+}
+
+#[cfg(feature = "json")]
+impl Serialize for UnsignedInputJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         let mut s = serializer.serialize_struct("UnsignedInput", 2)?;
-        s.serialize_field("boxId", &self.box_id)?;
-        s.serialize_field("extension", &self.extension)?;
+        s.serialize_field("boxId", &self.input.box_id)?;
+        s.serialize_field("extension", &self.input.extension.json_at(self.version))?;
         s.end()
     }
 }
