@@ -9,14 +9,16 @@ use hashbrown::HashMap;
 use ergotree_ir::chain::address::AddressEncoderError;
 use ergotree_ir::chain::ergo_box::box_value::BoxValue;
 use ergotree_ir::chain::ergo_box::BoxTokens;
+use ergotree_ir::chain::ergo_box::ErgoBox;
 use ergotree_ir::chain::ergo_box::ErgoBoxCandidate;
 use ergotree_ir::chain::ergo_box::NonMandatoryRegisterId;
 use ergotree_ir::chain::ergo_box::NonMandatoryRegisters;
 use ergotree_ir::chain::ergo_box::NonMandatoryRegistersError;
 use ergotree_ir::chain::token::Token;
+use ergotree_ir::chain::tx_id::TxId;
 use ergotree_ir::ergo_tree::ErgoTree;
 use ergotree_ir::mir::constant::Constant;
-use ergotree_ir::serialization::{SigmaParsingError, SigmaSerializable, SigmaSerializationError};
+use ergotree_ir::serialization::{SigmaParsingError, SigmaSerializationError};
 use thiserror::Error;
 
 /// ErgoBoxCandidate builder errors
@@ -120,10 +122,22 @@ impl ErgoBoxCandidateBuilder {
         &self.value
     }
 
-    /// Calculate serialized box size(in bytes)
+    /// The box size, in bytes, ergo's wallet charges the minimum value for (ergo 6.0.3
+    /// `BoxUtils.scala:18-24`): a mock of this box with the largest value and creation height,
+    /// as a transaction's output at index 1, written as ergo's default version context writes
+    /// it
     pub fn calc_box_size_bytes(&self) -> Result<usize, ErgoBoxCandidateBuilderError> {
-        let b = self.build_box_unchecked()?;
-        Ok(b.sigma_serialize_bytes()?.len())
+        let candidate = self.build_box_unchecked()?;
+        let mock = ErgoBoxCandidate {
+            // `BoxValue`'s own upper bound, so in range
+            #[allow(clippy::unwrap_used)]
+            value: BoxValue::try_from(BoxValue::MAX_RAW).unwrap(),
+            creation_height: i32::MAX as u32,
+            ..candidate
+        };
+        Ok(ErgoBox::from_box_candidate(&mock, TxId::zero(), 1)?
+            .bytes()?
+            .len())
     }
 
     /// Calculate minimal box value for the current box serialized size(in bytes)
@@ -255,7 +269,9 @@ impl ErgoBoxCandidateBuilder {
 
     fn build_box(&self) -> Result<ErgoBoxCandidate, ErgoBoxCandidateBuilderError> {
         let b = self.build_box_unchecked()?;
-        let box_size_bytes = b.sigma_serialize_bytes()?.len();
+        // `outputs.forall(c => c.value >= BoxUtils.minimalErgoAmountSimulated(c, ..))`
+        // (ergo 6.0.3 `ErgoWalletSupport.scala:323`)
+        let box_size_bytes = self.calc_box_size_bytes()?;
 
         // Won't be overflowing an i64, so unwrap is safe.
         #[allow(clippy::unwrap_used)]
@@ -283,6 +299,7 @@ mod tests {
 
     use ergotree_ir::base16_str::Base16Str;
     use ergotree_ir::chain::token::TokenId;
+    use ergotree_ir::serialization::SigmaSerializable;
     use sigma_test_util::force_any_val;
     use NonMandatoryRegisterId::*;
 
@@ -322,12 +339,18 @@ mod tests {
     }
 
     #[test]
-    fn test_box_size_estimation() {
-        let builder =
-            ErgoBoxCandidateBuilder::new(BoxValue::SAFE_USER_MIN, force_any_val::<ErgoTree>(), 1);
-        let estimated_box_size = builder.calc_box_size_bytes().unwrap();
-        let b = builder.build().unwrap();
-        assert_eq!(b.sigma_serialize_bytes().unwrap().len(), estimated_box_size);
+    fn box_size_is_ergo_s_simulated_box() {
+        // ergo's wallet charges the minimum value for a mock of the box with the largest value
+        // and creation height, as a transaction's output at index 1, written under its default
+        // version context (ergo 6.0.3 `BoxUtils.scala:18-24`, `:41`). For `sigmaProp(true)`
+        // that's 9 + 3 + 5 + 1 + 1 bytes of candidate, 32 of transaction id and 1 of index,
+        // whatever the box's own value and height.
+        let tree = ErgoTree::sigma_parse_bytes(&[0x00, 0x08, 0xd3]).unwrap();
+        for (value, height) in [(BoxValue::SAFE_USER_MIN, 1), (BoxValue::MIN, 1_000_000)] {
+            let builder = ErgoBoxCandidateBuilder::new(value, tree.clone(), height);
+            assert_eq!(builder.calc_box_size_bytes().unwrap(), 52);
+            assert_eq!(builder.calc_min_box_value().unwrap().as_u64(), &(52 * 360));
+        }
     }
 
     #[test]

@@ -77,6 +77,7 @@ impl TryFrom<ErgoBoxJson> for ErgoBox {
             transaction_id: box_json.transaction_id,
             index: box_json.index,
             serialized_bytes: None,
+            bytes_with_no_ref: Default::default(),
         };
         let box_id = box_with_zero_id.calc_box_id()?;
         let ergo_box = ErgoBox {

@@ -119,3 +119,15 @@ impl<'a, W: Write> SigmaByteWrite for SigmaByteWriter<'a, W> {
         }
     }
 }
+
+/// `value` as ergo writes it under its default version context (1, 1): below ErgoTree
+/// version 3, where an `Upcast` of a constant is written as the constant
+#[cfg(feature = "json")]
+pub(crate) fn default_context_bytes<T: super::SigmaSerializable>(
+    value: &T,
+) -> Result<alloc::vec::Vec<u8>, super::SigmaSerializationError> {
+    let mut data = alloc::vec::Vec::new();
+    let mut w = SigmaByteWriter::new(&mut data, None);
+    w.with_tree_version(ErgoTreeVersion::V0, |w| value.sigma_serialize(w))?;
+    Ok(data)
+}

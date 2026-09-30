@@ -154,7 +154,7 @@ pub(crate) static BYTES_WITHOUT_REF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _arg
     ctx.add_jit_cost(12)?; // ExtractBytesWithNoRef = Fixed(12)
     Ok(obj
         .try_extract_into::<Ref<'_, ErgoBox>>()?
-        .bytes_without_ref()?
+        .bytes_without_ref(ctx.tree_version())?
         .into())
 };
 
