@@ -842,7 +842,11 @@ mod tests {
                 .checked_add(&miners_fee)
                 .unwrap();
             let all_inputs = checked_sum(inputs.iter().map(|b| b.value)).unwrap();
-            prop_assume!(all_outputs < all_inputs);
+            // enough for the selector's change to reach `SAFE_USER_MIN`, above what ergo's wallet
+            // charges any change box here (`BoxUtils.scala:18-24`)
+            prop_assume!(all_outputs
+                .checked_add(&BoxValue::SAFE_USER_MIN)
+                .is_ok_and(|v| v <= all_inputs));
             let total_output_value: BoxValue = checked_sum(outputs.iter().map(|b| b.value))
                 .unwrap()
                 .checked_add(&miners_fee).unwrap();
