@@ -131,7 +131,7 @@ impl NipopowAlgos {
                 .unwrap();
             #[allow(clippy::unwrap_used)]
             let real_target = self.pow_scheme.pow_hit(header)?.to_f64().unwrap();
-            let level = required_target.log2() - real_target.log2();
+            let level = log2_via_ln(required_target) - log2_via_ln(real_target);
             Ok(level as i32)
         } else {
             Ok(i32::MAX)
@@ -397,15 +397,20 @@ impl NipopowAlgos {
     pub fn update_interlinks(
         prev_header: Header,
         prev_interlinks: Vec<BlockId>,
-    ) -> Result<Vec<BlockId>, AutolykosPowSchemeError> {
+    ) -> Result<Vec<BlockId>, NipopowProofError> {
         let is_genesis = prev_header.height == 1;
         if !is_genesis {
-            // Interlinks vector cannot be empty in case of non-genesis header
-            assert!(!prev_interlinks.is_empty());
-            let genesis = prev_interlinks[0];
+            // `require(prevInterlinks.nonEmpty, ..)` (ergo 6.0.3 `NipopowAlgos.scala:47`) throws,
+            // and the extension validator's `Try` turns that into a rule 402 failure
+            let genesis = prev_interlinks
+                .first()
+                .copied()
+                .ok_or(NipopowProofError::EmptyInterlinks)?;
             let nipopow_algos = NipopowAlgos::default();
-            let prev_level = nipopow_algos.max_level_of(&prev_header)? as usize;
+            // `if (prevLevel > 0)` (`:51`) tests the signed level; convert only once it's positive
+            let prev_level = nipopow_algos.max_level_of(&prev_header)?;
             if prev_level > 0 {
+                let prev_level = prev_level as usize;
                 // Adapted:
                 //   `(genesis +: tail.dropRight(prevLevel)) ++Seq.fill(prevLevel)(prevHeader.id)`
                 // from scala
@@ -480,6 +485,16 @@ fn kv_to_leaf(kv: &([u8; 2], Vec<u8>)) -> Vec<u8> {
         .chain(kv.1.iter().copied())
         .collect()
 }
+
+/// Computes a base-2 logarithm using the JVM reference's arithmetic shape.
+///
+/// The reference uses `Math.log(x) / Math.log(2)`. This avoids the known
+/// integer-boundary divergence from `f64::log2`, but does not claim general
+/// bit-exact parity across math-library implementations.
+fn log2_via_ln(x: f64) -> f64 {
+    x.ln() / core::f64::consts::LN_2
+}
+
 // creates a MerkleTree from a key/value pair of extension section
 fn extension_merkletree(kv: &[([u8; 2], Vec<u8>)]) -> ergo_merkle_tree::MerkleTree {
     let leafs = kv
@@ -610,8 +625,79 @@ fn prove_prefix<R: PopowHeaderReader + ?Sized>(
 mod tests {
     use super::*;
 
+    /// The secp256k1 order and order / 32 both round to exact powers of two
+    /// when converted to `f64`. OpenJDK 17 evaluates the corresponding level
+    /// as 4.999999999999972 and truncates it to 4, while native `f64::log2`
+    /// evaluates it as exactly 5.
+    #[test]
+    fn log2_via_ln_matches_jvm_boundary_vector() {
+        let required_target = 2f64.powi(256);
+        let real_target = 2f64.powi(251);
+
+        assert_eq!(log2_via_ln(real_target), 251.00000000000003);
+        let reference_level = log2_via_ln(required_target) - log2_via_ln(real_target);
+        assert_eq!(reference_level as i32, 4);
+
+        let native_level = required_target.log2() - real_target.log2();
+        assert_eq!(native_level as i32, 5);
+    }
+
     fn blockid(byte: u8) -> BlockId {
         BlockId(Digest32::from([byte; 32]))
+    }
+
+    /// A v2 header at `height`. With `n_bits` `0x1A010000` the target is about 2^56, so the
+    /// hit of any nonce is far above it and the header's level is negative.
+    fn header_at_height(height: u32, n_bits: u32) -> Header {
+        use ergo_chain_types::{ADDigest, AutolykosSolution, EcPoint, Votes};
+        Header {
+            version: 2,
+            id: blockid(1),
+            parent_id: blockid(0),
+            ad_proofs_root: Digest32::zero(),
+            state_root: ADDigest::zero(),
+            transaction_root: Digest32::zero(),
+            timestamp: 0,
+            n_bits,
+            height,
+            extension_root: Digest32::zero(),
+            autolykos_solution: AutolykosSolution {
+                miner_pk: Box::<EcPoint>::default(),
+                pow_onetime_pk: None,
+                nonce: vec![0; 8],
+                pow_distance: None,
+            },
+            votes: Votes([0, 0, 0]),
+            unparsed_bytes: Box::new([]),
+        }
+    }
+
+    #[test]
+    fn update_interlinks_rejects_empty_interlinks_for_non_genesis() {
+        // JVM `updateInterlinks` requires a non-empty vector for a non-genesis header (ergo 6.0.3
+        // `NipopowAlgos.scala:47`), and the extension validator runs it inside `Try.map`
+        // (`ExtensionValidator.scala:36-41`): the block fails rule 402, the node doesn't crash.
+        let header = header_at_height(2, 0x1A01_0000);
+        assert_eq!(
+            NipopowAlgos::update_interlinks(header, vec![]),
+            Err(NipopowProofError::EmptyInterlinks)
+        );
+    }
+
+    #[test]
+    fn update_interlinks_keeps_the_vector_below_level_one() {
+        // JVM `if (prevLevel > 0)` tests the signed level and otherwise returns `prevInterlinks`
+        // unchanged (`NipopowAlgos.scala:51-54`)
+        let header = header_at_height(2, 0x1A01_0000);
+        assert!(matches!(
+            NipopowAlgos::default().max_level_of(&header),
+            Ok(level) if level < 0
+        ));
+        let interlinks = vec![blockid(0xa0), blockid(0xb0)];
+        assert_eq!(
+            NipopowAlgos::update_interlinks(header, interlinks.clone()),
+            Ok(interlinks)
+        );
     }
 
     #[test]
