@@ -135,7 +135,9 @@ impl Transaction {
         )
     }
 
-    fn new_from_vec_at(
+    /// Creates new transaction from vectors, writing its id and message to sign at
+    /// `id_version` (see [`Transaction::new_at`])
+    pub fn new_from_vec_at(
         inputs: Vec<Input>,
         data_inputs: Vec<DataInput>,
         output_candidates: Vec<ErgoBoxCandidate>,
@@ -168,7 +170,16 @@ impl Transaction {
         )
     }
 
-    fn new_at(
+    /// Creates new transaction, writing its id and message to sign at `id_version`.
+    ///
+    /// ergo computes the id as it constructs the transaction, under the version context of
+    /// the moment (ergo 6.0.3 `ErgoTransaction.scala:68`). One read from a peer gets the
+    /// activated version (`ErgoNodeViewSynchronizer.scala:778`). One built from JSON on the
+    /// submission route gets the default context, below 3 (`TransactionsApiRoute.scala:171`,
+    /// `ErgoBaseApiRoute.scala:121`), where an `Upcast` of a constant in a register or a
+    /// context extension value is written as the constant. Write the transaction's bytes at
+    /// the same version.
+    pub fn new_at(
         inputs: TxIoVec<Input>,
         data_inputs: Option<TxIoVec<DataInput>>,
         output_candidates: TxIoVec<ErgoBoxCandidate>,
