@@ -10,7 +10,6 @@ use ergotree_interpreter::sigma_protocol::prover::ProofBytes;
 use ergotree_ir::chain::context::Context;
 use ergotree_ir::chain::ergo_box::{ErgoBox, RegisterId};
 use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::serialization::SigmaSerializable;
 
 use crate::chain::ergo_state_context::ErgoStateContext;
 
@@ -90,7 +89,9 @@ fn rent_verdict_for_empty_proof(
         Some(output) => output,
         None => return StorageRentVerdict::NotApplicable,
     };
-    let box_bytes_len = match context.self_box.sigma_serialize_bytes() {
+    // `box.bytes.length` (`:43`): a parsed box's own bytes, or a built box as ergo's default
+    // context writes it (`ErgoBox.scala:87-92`), which is `ErgoBox::bytes`
+    let box_bytes_len = match context.self_box.bytes() {
         Ok(bytes) => bytes.len(),
         Err(_) => return StorageRentVerdict::NotApplicable,
     };
@@ -264,6 +265,7 @@ mod tests {
     use ergotree_ir::ergo_tree::ErgoTree;
     use ergotree_ir::mir::constant::Constant;
     use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::serialization::SigmaSerializable;
     use sigma_test_util::force_any_val;
 
     /// Live mainnet storageFeeFactor, and `Parameters::default()`.
@@ -415,6 +417,35 @@ mod tests {
         let self_box = with_regs(&expired_box(5_000_000_000, 0, 0), regs);
         let out = recreated(&self_box, 5_000_000_000, H);
         assert!(check_expired_box(&self_box, &out, 100, H, FACTOR));
+    }
+
+    #[test]
+    fn fee_is_on_the_bytes_ergo_reads() {
+        // `checkExpiredBox` charges `storageFeeFactor * box.bytes.length`
+        // (`ErgoInterpreter.scala:43`). `ErgoBox.bytes` is a parsed box's own bytes, or a built
+        // box as ergo's default context writes it, below tree version 3 (`ErgoBox.scala:87-92`),
+        // where a register's `Upcast` of a constant is written as the constant. So a built box
+        // with X15, `Tuple(1, Upcast(1, Long))`, in R4 is charged for 2 bytes fewer than it has
+        // at version 3.
+        let x15 =
+            RegisterValue::sigma_parse_bytes(&[0x86, 0x02, 0x04, 0x02, 0x7e, 0x04, 0x02, 0x05]);
+        let regs = NonMandatoryRegisters::try_from(vec![x15]).unwrap();
+        let b = with_regs(&expired_box(5_000_000_000, 0, 0), regs);
+        let len = b.bytes().unwrap().len() as u64;
+        assert_eq!(b.sigma_serialize_bytes().unwrap().len() as u64, len + 2);
+        let fee = len * FACTOR as u64;
+        let (p, var) = (STORAGE_PERIOD, Some(Constant::from(0i16)));
+        let paid = [recreated(&b, 5_000_000_000 - fee, p)];
+        assert_eq!(
+            verdict(&b, &paid, var.clone(), p),
+            StorageRentVerdict::Verdict(true)
+        );
+        // one byte's fee more than ergo charges
+        let overpaid = [recreated(&b, 5_000_000_000 - fee - FACTOR as u64, p)];
+        assert_eq!(
+            verdict(&b, &overpaid, var, p),
+            StorageRentVerdict::Verdict(false)
+        );
     }
 
     #[test]
