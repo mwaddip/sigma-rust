@@ -4,6 +4,8 @@
 use ergotree_interpreter::eval::reduce_to_crypto;
 use ergotree_interpreter::sigma_protocol::prover::ProverError;
 use ergotree_ir::chain::context_extension::ContextExtension;
+#[cfg(feature = "json")]
+use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
 use ergotree_ir::serialization::SigmaParsingError;
@@ -27,7 +29,7 @@ use crate::wallet::tx_context::TransactionContextError;
 /// see EIP-19 for more details -
 /// <https://github.com/ergoplatform/eips/blob/f280890a4163f2f2e988a0091c078e36912fc531/eip-0019.md>
 #[derive(PartialEq, Eq, Debug, Clone)]
-#[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "json", derive(serde::Deserialize))]
 pub struct ReducedInput {
     /// value of SigmaProp type which represents a statement verifiable via sigma protocol.
     #[cfg_attr(
@@ -42,6 +44,42 @@ pub struct ReducedInput {
     pub cost: u64,
     /// ContextExtension for the input
     pub extension: ContextExtension,
+}
+
+#[cfg(feature = "json")]
+impl serde::Serialize for ReducedInput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serde::Serialize::serialize(&self.json_at(ErgoTreeVersion::V0), serializer)
+    }
+}
+
+#[cfg(feature = "json")]
+impl ReducedInput {
+    /// JSON of the reduced input, with its context extension values as a writer at ErgoTree
+    /// `version` writes them
+    pub(crate) fn json_at(&self, version: ErgoTreeVersion) -> impl serde::Serialize + '_ {
+        ReducedInputJson {
+            sigma_prop: &self.sigma_prop,
+            cost: self.cost,
+            extension: self.extension.json_at(version),
+        }
+    }
+}
+
+/// A reduced input's JSON, with its context extension as `E`
+#[cfg(feature = "json")]
+#[derive(serde::Serialize)]
+struct ReducedInputJson<'a, E> {
+    #[serde(
+        rename = "sigmaProp",
+        serialize_with = "ergotree_ir::chain::json::sigma_protocol::serialize"
+    )]
+    sigma_prop: &'a SigmaBoolean,
+    cost: u64,
+    extension: E,
 }
 
 /// Represent `reduced` transaction, i.e. unsigned transaction where each unsigned input
@@ -64,8 +102,25 @@ pub struct ReducedTransaction {
     #[cfg_attr(feature = "json", serde(rename = "txCost"))]
     tx_cost: u32,
     /// Reduction result for each unsigned tx input
-    #[cfg_attr(feature = "json", serde(rename = "reducedInputs"))]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "reducedInputs", serialize_with = "reduced_inputs_json")
+    )]
     reduced_inputs: TxIoVec<ReducedInput>,
+}
+
+/// The reduced inputs' JSON, their context extension values written where the unsigned
+/// transaction's JSON writes its own copies: at the version its id is written at
+#[cfg(feature = "json")]
+fn reduced_inputs_json<S: serde::Serializer>(
+    inputs: &TxIoVec<ReducedInput>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(
+        inputs
+            .iter()
+            .map(|input| input.json_at(Transaction::BUILT_ID_VERSION)),
+    )
 }
 
 #[cfg(feature = "json")]
@@ -367,6 +422,31 @@ mod tests {
             serde_json::from_value::<ReducedTransaction>(serde_json::to_value(tx).unwrap())
                 .is_err()
         );
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn reduced_transaction_json_writes_both_extensions_where_the_id_is_written() {
+        // SANTA X15, `Tuple(1, Upcast(1, Long))`, as context extension variable 1. The unsigned
+        // transaction's id is written at version 3, and so are both copies of the extension in
+        // the JSON, which reads back to the same transaction
+        let x15 = ContextExtension::sigma_parse_bytes(&[
+            0x01, 0x01, 0x86, 0x02, 0x04, 0x02, 0x7e, 0x04, 0x02, 0x05,
+        ])
+        .unwrap();
+        let tx = with_extensions(x15.clone(), x15);
+        let json = serde_json::to_value(&tx).unwrap();
+        assert_eq!(
+            json["unsignedTx"]["inputs"][0]["extension"]["1"],
+            "860204027e040205"
+        );
+        assert_eq!(
+            json["reducedInputs"][0]["extension"]["1"],
+            "860204027e040205"
+        );
+        let parsed: ReducedTransaction = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.unsigned_tx.id(), tx.unsigned_tx.id());
+        assert_eq!(parsed, tx);
     }
 
     #[test]

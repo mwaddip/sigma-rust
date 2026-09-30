@@ -13,6 +13,8 @@ use ergotree_ir::serialization::SigmaSerializeResult;
 
 use crate::wallet::box_selector::ErgoBoxId;
 #[cfg(feature = "json")]
+use ergotree_ir::ergo_tree::ErgoTreeVersion;
+#[cfg(feature = "json")]
 use serde::ser::SerializeStruct;
 #[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
@@ -38,9 +40,38 @@ impl Serialize for UnsignedInput {
     where
         S: serde::Serializer,
     {
+        self.json_at(ErgoTreeVersion::V0).serialize(serializer)
+    }
+}
+
+#[cfg(feature = "json")]
+impl UnsignedInput {
+    /// JSON of the input, with its context extension values as a writer at ErgoTree `version`
+    /// writes them
+    pub(crate) fn json_at(&self, version: ErgoTreeVersion) -> impl Serialize + '_ {
+        UnsignedInputJson {
+            input: self,
+            version,
+        }
+    }
+}
+
+/// [`UnsignedInput::json_at`]
+#[cfg(feature = "json")]
+struct UnsignedInputJson<'a> {
+    input: &'a UnsignedInput,
+    version: ErgoTreeVersion,
+}
+
+#[cfg(feature = "json")]
+impl Serialize for UnsignedInputJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         let mut s = serializer.serialize_struct("UnsignedInput", 2)?;
-        s.serialize_field("boxId", &self.box_id)?;
-        s.serialize_field("extension", &self.extension)?;
+        s.serialize_field("boxId", &self.input.box_id)?;
+        s.serialize_field("extension", &self.input.extension.json_at(self.version))?;
         s.end()
     }
 }
@@ -72,7 +103,7 @@ impl<T: ErgoBoxId> From<T> for UnsignedInput {
 /// Fully signed transaction input
 #[derive(PartialEq, Eq, Debug, Clone)]
 #[cfg_attr(feature = "arbitrary", derive(proptest_derive::Arbitrary))]
-#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "json", derive(Deserialize))]
 pub struct Input {
     /// id of the box to spent
     #[cfg_attr(feature = "json", serde(rename = "boxId", alias = "id"))]
@@ -86,6 +117,51 @@ pub struct Input {
         )
     )]
     pub spending_proof: ProverResult,
+}
+
+#[cfg(feature = "json")]
+impl Serialize for Input {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.json_at(ErgoTreeVersion::V0).serialize(serializer)
+    }
+}
+
+#[cfg(feature = "json")]
+impl Input {
+    /// JSON of the input, with its context extension values as a writer at ErgoTree `version`
+    /// writes them
+    pub(crate) fn json_at(&self, version: ErgoTreeVersion) -> impl Serialize + '_ {
+        InputJson {
+            input: self,
+            version,
+        }
+    }
+}
+
+/// [`Input::json_at`]
+#[cfg(feature = "json")]
+struct InputJson<'a> {
+    input: &'a Input,
+    version: ErgoTreeVersion,
+}
+
+#[cfg(feature = "json")]
+impl Serialize for InputJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut s = serializer.serialize_struct("Input", 2)?;
+        s.serialize_field("boxId", &self.input.box_id)?;
+        s.serialize_field(
+            "spendingProof",
+            &self.input.spending_proof.json_at(self.version),
+        )?;
+        s.end()
+    }
 }
 
 impl Input {

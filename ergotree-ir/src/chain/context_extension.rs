@@ -207,14 +207,49 @@ impl serde::Serialize for ContextExtension {
     where
         S: serde::Serializer,
     {
-        use crate::serialization::sigma_byte_writer::default_context_bytes;
+        serde::Serialize::serialize(
+            &self.json_at(crate::ergo_tree::ErgoTreeVersion::V0),
+            serializer,
+        )
+    }
+}
+
+#[cfg(feature = "json")]
+impl ContextExtension {
+    /// JSON of the values, each as a writer at ErgoTree `version` writes it. A value that
+    /// version can't write fails the JSON.
+    pub fn json_at(
+        &self,
+        version: crate::ergo_tree::ErgoTreeVersion,
+    ) -> impl serde::Serialize + '_ {
+        ContextExtensionJson {
+            extension: self,
+            version,
+        }
+    }
+}
+
+/// [`ContextExtension::json_at`]
+#[cfg(feature = "json")]
+struct ContextExtensionJson<'a> {
+    extension: &'a ContextExtension,
+    version: crate::ergo_tree::ErgoTreeVersion,
+}
+
+#[cfg(feature = "json")]
+impl serde::Serialize for ContextExtensionJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use crate::serialization::sigma_byte_writer::bytes_at;
         use serde::ser::Error;
         use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(self.values.len()))?;
-        for (k, v) in &self.values {
+        let mut map = serializer.serialize_map(Some(self.extension.values.len()))?;
+        for (k, v) in &self.extension.values {
             map.serialize_entry(
                 &format!("{}", k),
-                &base16::encode_lower(&default_context_bytes(v).map_err(Error::custom)?),
+                &base16::encode_lower(&bytes_at(v, self.version).map_err(Error::custom)?),
             )?;
         }
         map.end()
@@ -786,6 +821,28 @@ mod evaluated_value_tests {
         assert_eq!(
             written_at(ErgoTreeVersion::V3),
             extension_hex("860204027e040205")
+        );
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_at_writes_each_value_as_the_version_writes_it() {
+        // X15's `Upcast` stays in the JSON from tree version 3; the extension's own JSON writes
+        // the value at 0
+        let ext = parse("860204027e040205").unwrap();
+        for (version, value) in [
+            (ErgoTreeVersion::V0, "860204020402"),
+            (ErgoTreeVersion::V3, "860204027e040205"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(ext.json_at(version)).unwrap(),
+                serde_json::json!({ "0": value }),
+                "{version:?}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&ext).unwrap(),
+            serde_json::to_value(ext.json_at(ErgoTreeVersion::V0)).unwrap()
         );
     }
 

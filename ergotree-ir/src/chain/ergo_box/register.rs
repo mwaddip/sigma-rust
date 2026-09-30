@@ -36,18 +36,52 @@ pub struct NonMandatoryRegisters(Vec<RegisterValue>);
 
 /// ergo's JSON writes each register value with `ValueSerializer.serialize` under the caller's
 /// version context (sigma-state 6.0.6 `JsonCodecs.scala:184-185`, `:298-302`), which its API
-/// routes leave at the default (1, 1): below ErgoTree version 3. A value that version can't
-/// write fails the JSON, as it throws there.
+/// routes leave at the default (1, 1): below ErgoTree version 3, where a box's id is written.
+/// A value that version can't write fails the JSON, as it throws there.
 #[cfg(feature = "json")]
 impl serde::Serialize for NonMandatoryRegisters {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
+        serde::Serialize::serialize(
+            &self.json_at(crate::ergo_tree::ErgoTreeVersion::V0),
+            serializer,
+        )
+    }
+}
+
+#[cfg(feature = "json")]
+impl NonMandatoryRegisters {
+    /// JSON of the registers, each value as a writer at ErgoTree `version` writes it
+    pub(crate) fn json_at(
+        &self,
+        version: crate::ergo_tree::ErgoTreeVersion,
+    ) -> impl serde::Serialize + '_ {
+        RegistersJson {
+            registers: self,
+            version,
+        }
+    }
+}
+
+/// [`NonMandatoryRegisters::json_at`]
+#[cfg(feature = "json")]
+struct RegistersJson<'a> {
+    registers: &'a NonMandatoryRegisters,
+    version: crate::ergo_tree::ErgoTreeVersion,
+}
+
+#[cfg(feature = "json")]
+impl serde::Serialize for RegistersJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         use serde::ser::{Error, SerializeMap};
-        let mut map = serializer.serialize_map(Some(self.0.len()))?;
-        for (i, value) in self.0.iter().enumerate() {
-            let bytes = value.default_context_bytes().map_err(Error::custom)?;
+        let mut map = serializer.serialize_map(Some(self.registers.0.len()))?;
+        for (i, value) in self.registers.0.iter().enumerate() {
+            let bytes = value.bytes_at(self.version).map_err(Error::custom)?;
             map.serialize_entry(
                 &NonMandatoryRegisterId::get_by_zero_index(i),
                 &ergo_chain_types::Base16EncodedBytes::new(&bytes),
@@ -422,6 +456,22 @@ mod tests {
         assert!(!matches!(c2_twin, RegisterValue::Invalid { .. }));
         let regs = NonMandatoryRegisters::try_from(vec![c2_twin]).unwrap();
         assert!(serde_json::to_string(&regs).is_err());
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_at_writes_each_register_value_as_the_version_writes_it() {
+        // From tree version 3, X15's `Upcast` stays in the JSON, and C2's twin, a function-typed
+        // value, has an encoding
+        let x15 =
+            RegisterValue::sigma_parse_bytes(&[0x86, 0x02, 0x04, 0x02, 0x7e, 0x04, 0x02, 0x05]);
+        let c2_twin = RegisterValue::sigma_parse_bytes(&[0x83, 0x00, 0x70, 0x01, 0x04, 0x04, 0x00]);
+        let regs = NonMandatoryRegisters::try_from(vec![x15, c2_twin]).unwrap();
+        assert_eq!(
+            serde_json::to_value(regs.json_at(ErgoTreeVersion::V3)).unwrap(),
+            serde_json::json!({ "R4": "860204027e040205", "R5": "83007001040400" })
+        );
+        assert!(serde_json::to_string(&regs.json_at(ErgoTreeVersion::V0)).is_err());
     }
 }
 

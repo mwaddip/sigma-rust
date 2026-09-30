@@ -10,27 +10,29 @@ use ergotree_ir::chain::ergo_box::ErgoBoxCandidate;
 use ergotree_ir::chain::tx_id::TxId;
 use serde::{Deserialize, Serialize};
 
+/// A transaction's JSON, with its inputs as `I` and its outputs as `O`
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
-pub struct TransactionJson {
+pub struct TransactionJson<I = Input, O = ErgoBox> {
     #[cfg_attr(feature = "json", serde(rename = "id"))]
     pub tx_id: TxId,
     /// inputs, that will be spent by this transaction.
     #[cfg_attr(feature = "json", serde(rename = "inputs"))]
-    pub inputs: Vec<Input>,
+    pub inputs: Vec<I>,
     /// inputs, that are not going to be spent by transaction, but will be reachable from inputs
     /// scripts. `dataInputs` scripts will not be executed, thus their scripts costs are not
     /// included in transaction cost and they do not contain spending proofs.
     #[cfg_attr(feature = "json", serde(rename = "dataInputs"))]
     pub data_inputs: Vec<DataInput>,
     #[cfg_attr(feature = "json", serde(rename = "outputs"))]
-    pub outputs: Vec<ErgoBox>,
+    pub outputs: Vec<O>,
 }
 
+/// An unsigned transaction's JSON, with its inputs as `I` and its outputs as `O`
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
-pub struct UnsignedTransactionJson {
+pub struct UnsignedTransactionJson<I = UnsignedInput, O = ErgoBoxCandidate> {
     /// unsigned inputs, that will be spent by this transaction.
     #[cfg_attr(feature = "json", serde(rename = "inputs"))]
-    pub inputs: Vec<UnsignedInput>,
+    pub inputs: Vec<I>,
     /// inputs, that are not going to be spent by transaction, but will be reachable from inputs
     /// scripts. `dataInputs` scripts will not be executed, thus their scripts costs are not
     /// included in transaction cost and they do not contain spending proofs.
@@ -38,19 +40,32 @@ pub struct UnsignedTransactionJson {
     pub data_inputs: Vec<DataInput>,
     /// box candidates to be created by this transaction
     #[cfg_attr(feature = "json", serde(rename = "outputs"))]
-    pub outputs: Vec<ErgoBoxCandidate>,
+    pub outputs: Vec<O>,
 }
 
-impl From<UnsignedTransaction> for UnsignedTransactionJson {
-    fn from(v: UnsignedTransaction) -> Self {
+/// An unsigned transaction's id and message to sign are written at version 3, as a built
+/// transaction's are, and so are its JSON's context extension and output register values: the
+/// JSON reads back to the same transaction
+impl Serialize for UnsignedTransaction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let version = Transaction::BUILT_ID_VERSION;
         UnsignedTransactionJson {
-            inputs: v.inputs.as_vec().clone(),
-            data_inputs: v
+            inputs: self.inputs.iter().map(|i| i.json_at(version)).collect(),
+            data_inputs: self
                 .data_inputs
+                .as_ref()
                 .map(|di| di.as_vec().clone())
                 .unwrap_or_default(),
-            outputs: v.output_candidates.as_vec().clone(),
+            outputs: self
+                .output_candidates
+                .iter()
+                .map(|o| o.json_at(version))
+                .collect(),
         }
+        .serialize(serializer)
     }
 }
 
@@ -63,17 +78,28 @@ impl TryFrom<UnsignedTransactionJson> for UnsignedTransaction {
     }
 }
 
-impl From<Transaction> for TransactionJson {
-    fn from(v: Transaction) -> Self {
+/// A transaction's JSON writes its context extension and output register values at the version
+/// its id and message to sign are written at, so the JSON reads back to that id. ergo's JSON
+/// writes them under the caller's version context, which its API routes leave at the default
+/// (1, 1), below ErgoTree version 3 (sigma-state 6.0.6 `JsonCodecs.scala:184-185`, `:239-242`):
+/// there a transaction read at 3, from a v6 block, has JSON whose values its id does not hash.
+impl Serialize for Transaction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let version = self.id_version;
         TransactionJson {
-            tx_id: v.id(),
-            inputs: v.inputs.as_vec().clone(),
-            data_inputs: v
+            tx_id: self.tx_id,
+            inputs: self.inputs.iter().map(|i| i.json_at(version)).collect(),
+            data_inputs: self
                 .data_inputs
+                .as_ref()
                 .map(|di| di.as_vec().clone())
                 .unwrap_or_default(),
-            outputs: v.outputs.to_vec(),
+            outputs: self.outputs.iter().map(|o| o.json_at(version)).collect(),
         }
+        .serialize(serializer)
     }
 }
 

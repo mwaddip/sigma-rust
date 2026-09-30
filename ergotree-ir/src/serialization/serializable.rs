@@ -101,9 +101,8 @@ pub enum SigmaParsingError {
         max = crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH
     )]
     TypeDepthExceeded(usize),
-    /// A declared item count above
-    /// [`MAX_ARRAY_LENGTH`](crate::serialization::sigma_byte_reader::MAX_ARRAY_LENGTH):
-    /// sigmastate's `safeNewArray` refuses it before any item is read
+    /// A declared item count above [`MAX_ARRAY_LENGTH`]: sigmastate's `safeNewArray` refuses it
+    /// before any item is read
     #[error(
         "cannot allocate an array of {0} items: the limit is {max}",
         max = crate::serialization::sigma_byte_reader::MAX_ARRAY_LENGTH

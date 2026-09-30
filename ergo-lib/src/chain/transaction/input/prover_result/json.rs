@@ -3,6 +3,7 @@ use core::str::FromStr;
 use alloc::string::String;
 use alloc::vec::Vec;
 use ergotree_ir::chain::context_extension::ContextExtension;
+use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use serde::ser::SerializeStruct;
 use serde::Serialize;
 
@@ -13,9 +14,35 @@ impl Serialize for ProverResult {
     where
         S: serde::Serializer,
     {
+        self.json_at(ErgoTreeVersion::V0).serialize(serializer)
+    }
+}
+
+impl ProverResult {
+    /// JSON of the proof, with the context extension values as a writer at ErgoTree `version`
+    /// writes them (see [`ContextExtension::json_at`])
+    pub(crate) fn json_at(&self, version: ErgoTreeVersion) -> impl Serialize + '_ {
+        ProverResultJson {
+            result: self,
+            version,
+        }
+    }
+}
+
+/// [`ProverResult::json_at`]
+struct ProverResultJson<'a> {
+    result: &'a ProverResult,
+    version: ErgoTreeVersion,
+}
+
+impl Serialize for ProverResultJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         let mut s = serializer.serialize_struct("ProverResult", 2)?;
-        s.serialize_field("proofBytes", &String::from(self.proof.clone()))?;
-        s.serialize_field("extension", &self.extension)?;
+        s.serialize_field("proofBytes", &String::from(self.result.proof.clone()))?;
+        s.serialize_field("extension", &self.result.extension.json_at(self.version))?;
         s.end()
     }
 }

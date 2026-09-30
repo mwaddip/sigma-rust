@@ -8,6 +8,7 @@ use crate::chain::ergo_box::RegisterValue;
 use crate::chain::token::Token;
 use crate::chain::tx_id::TxId;
 use crate::ergo_tree::ErgoTree;
+use crate::ergo_tree::ErgoTreeVersion;
 use crate::serialization::SigmaParsingError;
 use crate::serialization::SigmaSerializationError;
 use alloc::string::ToString;
@@ -25,8 +26,9 @@ use thiserror::Error;
 
 mod box_value;
 
+/// A box's JSON, with its registers as `R`
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
-pub struct ErgoBoxJson {
+pub struct ErgoBoxJson<R = NonMandatoryRegisters> {
     #[serde(rename = "boxId", alias = "id")]
     pub box_id: Option<BoxId>,
     /// amount of money associated with the box
@@ -40,7 +42,7 @@ pub struct ErgoBoxJson {
     pub tokens: Vec<Token>,
     ///  additional registers the box can carry over
     #[serde(rename = "additionalRegisters")]
-    pub additional_registers: NonMandatoryRegisters,
+    pub additional_registers: R,
     /// height when a transaction containing the box was created.
     /// This height is declared by user and should not exceed height of the block,
     /// containing the transaction with this box.
@@ -101,8 +103,9 @@ impl TryFrom<ErgoBoxJson> for ErgoBox {
     }
 }
 
-impl From<ErgoBox> for ErgoBoxJson {
-    fn from(ergo_box: ErgoBox) -> ErgoBoxJson {
+impl<R> ErgoBoxJson<R> {
+    /// The JSON of `ergo_box`, with `additional_registers` for its registers
+    fn from_box(ergo_box: &ErgoBox, additional_registers: R) -> Self {
         let tokens = ergo_box
             .tokens
             .as_ref()
@@ -112,9 +115,9 @@ impl From<ErgoBox> for ErgoBoxJson {
         ErgoBoxJson {
             box_id: Some(ergo_box.box_id),
             value: ergo_box.value,
-            ergo_tree: ergo_box.ergo_tree,
+            ergo_tree: ergo_box.ergo_tree.clone(),
             tokens,
-            additional_registers: ergo_box.additional_registers,
+            additional_registers,
             creation_height: ergo_box.creation_height,
             transaction_id: ergo_box.transaction_id,
             index: ergo_box.index,
@@ -122,8 +125,23 @@ impl From<ErgoBox> for ErgoBoxJson {
     }
 }
 
+impl From<ErgoBox> for ErgoBoxJson {
+    fn from(ergo_box: ErgoBox) -> ErgoBoxJson {
+        ErgoBoxJson::from_box(&ergo_box, ergo_box.additional_registers.clone())
+    }
+}
+
+impl ErgoBox {
+    /// JSON of the box with its register values as a writer at ErgoTree `version` writes them.
+    /// The box's own JSON writes them at version 0, where its id is written.
+    pub fn json_at(&self, version: ErgoTreeVersion) -> impl Serialize + '_ {
+        ErgoBoxJson::from_box(self, self.additional_registers.json_at(version))
+    }
+}
+
+/// A box candidate's JSON, with its registers as `R`
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
-pub struct ErgoBoxCandidateJson {
+pub struct ErgoBoxCandidateJson<R = NonMandatoryRegisters> {
     /// amount of money associated with the box
     #[serde(rename = "value")]
     pub value: BoxValue,
@@ -135,7 +153,7 @@ pub struct ErgoBoxCandidateJson {
     pub tokens: Vec<Token>,
     ///  additional registers the box can carry over
     #[serde(rename = "additionalRegisters")]
-    pub additional_registers: NonMandatoryRegisters,
+    pub additional_registers: R,
     /// height when a transaction containing the box was created.
     /// This height is declared by user and should not exceed height of the block,
     /// containing the transaction with this box.
@@ -143,21 +161,40 @@ pub struct ErgoBoxCandidateJson {
     pub creation_height: u32,
 }
 
-impl From<ErgoBoxCandidate> for ErgoBoxCandidateJson {
-    fn from(ergo_box_candidate: ErgoBoxCandidate) -> Self {
-        let tokens = ergo_box_candidate
+impl<R> ErgoBoxCandidateJson<R> {
+    /// The JSON of `candidate`, with `additional_registers` for its registers
+    fn from_candidate(candidate: &ErgoBoxCandidate, additional_registers: R) -> Self {
+        let tokens = candidate
             .tokens
             .as_ref()
             .map(BoxTokens::as_vec)
             .cloned()
             .unwrap_or_default(); // JSON serialization for assets requires that tokens be [] instead of null
         ErgoBoxCandidateJson {
-            value: ergo_box_candidate.value,
-            ergo_tree: ergo_box_candidate.ergo_tree,
+            value: candidate.value,
+            ergo_tree: candidate.ergo_tree.clone(),
             tokens,
-            additional_registers: ergo_box_candidate.additional_registers,
-            creation_height: ergo_box_candidate.creation_height,
+            additional_registers,
+            creation_height: candidate.creation_height,
         }
+    }
+}
+
+impl From<ErgoBoxCandidate> for ErgoBoxCandidateJson {
+    fn from(ergo_box_candidate: ErgoBoxCandidate) -> Self {
+        ErgoBoxCandidateJson::from_candidate(
+            &ergo_box_candidate,
+            ergo_box_candidate.additional_registers.clone(),
+        )
+    }
+}
+
+impl ErgoBoxCandidate {
+    /// JSON of the box candidate with its register values as a writer at ErgoTree `version`
+    /// writes them. The candidate's own JSON writes them at version 0, where the id of the box
+    /// it becomes is written.
+    pub fn json_at(&self, version: ErgoTreeVersion) -> impl Serialize + '_ {
+        ErgoBoxCandidateJson::from_candidate(self, self.additional_registers.json_at(version))
     }
 }
 
@@ -266,6 +303,50 @@ mod tests {
             prop_assert_eq![b, b_parsed];
         }
 
+    }
+
+    #[test]
+    fn json_at_writes_the_registers_as_the_version_writes_them() {
+        // X15, `Tuple(1, Upcast(1, Long))`, as R4 of a box and of a box candidate: its `Upcast`
+        // stays in the JSON from tree version 3. Their own JSON writes it at 0, where a box's id
+        // is written.
+        use crate::chain::ergo_box::box_value::BoxValue;
+        use crate::chain::ergo_box::ErgoBoxCandidate;
+        use crate::chain::ergo_box::RegisterValue;
+        use crate::chain::tx_id::TxId;
+        use crate::ergo_tree::{ErgoTree, ErgoTreeVersion};
+        use crate::serialization::SigmaSerializable;
+        let x15 =
+            RegisterValue::sigma_parse_bytes(&[0x86, 0x02, 0x04, 0x02, 0x7e, 0x04, 0x02, 0x05]);
+        let b = ErgoBox::new(
+            BoxValue::SAFE_USER_MIN,
+            ErgoTree::sigma_parse_bytes(&[0x00, 0x08, 0xd3]).unwrap(),
+            None,
+            NonMandatoryRegisters::try_from(vec![x15]).unwrap(),
+            1,
+            TxId::zero(),
+            0,
+        )
+        .unwrap();
+        let candidate = ErgoBoxCandidate::from(b.clone());
+        let r4 = |json: serde_json::Value| json["additionalRegisters"]["R4"].clone();
+        for (version, written) in [
+            (ErgoTreeVersion::V0, "860204020402"),
+            (ErgoTreeVersion::V3, "860204027e040205"),
+        ] {
+            let box_json = serde_json::to_value(b.json_at(version)).unwrap();
+            assert_eq!(r4(box_json), written, "{version:?}");
+            let candidate_json = serde_json::to_value(candidate.json_at(version)).unwrap();
+            assert_eq!(r4(candidate_json), written, "{version:?}");
+        }
+        assert_eq!(
+            serde_json::to_value(&b).unwrap(),
+            serde_json::to_value(b.json_at(ErgoTreeVersion::V0)).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&candidate).unwrap(),
+            serde_json::to_value(candidate.json_at(ErgoTreeVersion::V0)).unwrap()
+        );
     }
 
     #[test]
