@@ -24,6 +24,7 @@ permissions:
 jobs:
   rust-package:
     name: Package Rust workspace candidates
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ubuntu-latest
     steps:
       - name: Set Cargo target directory
@@ -41,6 +42,7 @@ jobs:
 
   wasm-packages:
     name: Package final WASM artifacts
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ubuntu-latest
     steps:
       - name: Set Cargo target directory
