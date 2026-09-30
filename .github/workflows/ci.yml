@@ -13,6 +13,7 @@ name: Tests
 jobs:
   build_wo_default_features:
     name: Build without default features
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -36,7 +37,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
+        os: ${{ github.repository == 'ergoplatform/sigma-rust' && fromJSON('["ubuntu-latest", "windows-latest", "macOS-latest"]') || fromJSON('["ubuntu-latest"]') }}
 
     steps:
       - uses: actions/checkout@v2
@@ -63,6 +64,7 @@ jobs:
 
   c_rest_callback_tests:
     name: C REST callback tests
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,6 +111,7 @@ jobs:
 
   js_tests:
     name: Run JS tests and publish alpha versions
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ubuntu-latest
     env:
       HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
@@ -235,6 +238,7 @@ jobs:
 
   ios_tests:
     name: Test Swift(iOS) bindings
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -281,6 +285,7 @@ jobs:
 
   android_tests:
     name: Test JNI(Android) bindings
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ubuntu-latest
     steps:
       - name: checkout

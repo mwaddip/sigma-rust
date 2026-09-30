@@ -21,6 +21,7 @@ permissions:
 
 jobs:
   linux:
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -56,6 +57,7 @@ jobs:
           path: dist
 
   musllinux:
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -87,6 +89,7 @@ jobs:
           path: dist
 
   windows:
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -114,6 +117,7 @@ jobs:
           path: dist
 
   macos:
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -140,6 +144,7 @@ jobs:
           path: dist
 
   sdist:
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -190,6 +195,7 @@ jobs:
           args: --non-interactive --skip-existing wheels-*/*
   test:
     name: Run python unit tests and doctests
+    if: github.repository == 'ergoplatform/sigma-rust'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
