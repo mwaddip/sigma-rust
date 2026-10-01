@@ -16,7 +16,6 @@ use crate::ergotree_interpreter::sigma_protocol::unproven_tree::NodePosition;
 use crate::ergotree_interpreter::sigma_protocol::FirstProverMessage;
 use crate::ergotree_ir::sigma_protocol::sigma_boolean::SigmaBoolean;
 use crate::ergotree_ir::sigma_protocol::sigma_boolean::SigmaConjecture;
-use crate::ergotree_ir::sigma_protocol::sigma_boolean::SigmaConjectureItems;
 use crate::ergotree_ir::sigma_protocol::sigma_boolean::SigmaProofOfKnowledgeTree;
 use crate::wallet::signing::{make_context, TransactionContext, TxSigningError};
 use alloc::vec::Vec;
@@ -51,8 +50,7 @@ pub fn bag_for_multi_sig(
     ) -> Result<(), SigParsingError> {
         match tree {
             UncheckedTree::UncheckedConjecture(unchecked_conjecture) => {
-                let items: SigmaConjectureItems<UncheckedTree> =
-                    unchecked_conjecture.children_ust();
+                let items = unchecked_conjecture.children_ust();
                 items
                     .iter()
                     .enumerate()

@@ -31,11 +31,15 @@ pub fn estimate_crypto_cost(prop: &SigmaBoolean) -> u64 {
                 TO_BYTES_CONJUNCTION + cor.items.iter().map(estimate_crypto_cost).sum::<u64>()
             }
             SigmaConjecture::Cthreshold(ct) => {
-                let n = ct.children.len() as u64;
-                let n_coefs = n - ct.k as u64;
+                let n = ct.children.as_slice().len() as u64;
+                // `k <= n` holds for a CTHRESHOLD read off the wire, but its fields are public
+                let n_coefs = n.saturating_sub(ct.k as u64);
                 let parse_poly = 10 + 10 * n_coefs;
                 let eval_poly = (3 + 3 * n_coefs) * n;
-                parse_poly + eval_poly + ct.children.iter().map(estimate_crypto_cost).sum::<u64>()
+                parse_poly
+                    + eval_poly
+                    + TO_BYTES_CONJUNCTION
+                    + ct.children.iter().map(estimate_crypto_cost).sum::<u64>()
             }
         },
     }
@@ -79,10 +83,7 @@ mod tests {
     fn test_cand_two_dlog() {
         let pd1 = force_any_val::<ProveDlog>();
         let pd2 = force_any_val::<ProveDlog>();
-        let items: SigmaConjectureItems<SigmaBoolean> =
-            vec![SigmaBoolean::from(pd1), SigmaBoolean::from(pd2)]
-                .try_into()
-                .unwrap();
+        let items = vec![SigmaBoolean::from(pd1), SigmaBoolean::from(pd2)];
         let cand = Cand { items };
         let prop = SigmaBoolean::from(cand);
         assert_eq!(estimate_crypto_cost(&prop), 15 + 3980 + 3980);
@@ -92,10 +93,7 @@ mod tests {
     fn test_cor_two_dlog() {
         let pd1 = force_any_val::<ProveDlog>();
         let pd2 = force_any_val::<ProveDlog>();
-        let items: SigmaConjectureItems<SigmaBoolean> =
-            vec![SigmaBoolean::from(pd1), SigmaBoolean::from(pd2)]
-                .try_into()
-                .unwrap();
+        let items = vec![SigmaBoolean::from(pd1), SigmaBoolean::from(pd2)];
         let cor = Cor { items };
         let prop = SigmaBoolean::from(cor);
         assert_eq!(estimate_crypto_cost(&prop), 15 + 3980 + 3980);
@@ -106,7 +104,7 @@ mod tests {
         let pd1 = force_any_val::<ProveDlog>();
         let pd2 = force_any_val::<ProveDlog>();
         let pd3 = force_any_val::<ProveDlog>();
-        let children: SigmaConjectureItems<SigmaBoolean> = vec![
+        let children = vec![
             SigmaBoolean::from(pd1),
             SigmaBoolean::from(pd2),
             SigmaBoolean::from(pd3),
@@ -115,7 +113,51 @@ mod tests {
         .unwrap();
         let ct = Cthreshold { k: 2, children };
         let prop = SigmaBoolean::from(ct);
-        // n=3, k=2, n_coefs=1, parse_poly=10+10=20, eval_poly=(3+3)*3=18, children=3*3980=11940
-        assert_eq!(estimate_crypto_cost(&prop), 20 + 18 + 11940);
+        // n=3, k=2, n_coefs=1, parse_poly=10+10=20, eval_poly=(3+3)*3=18, the node 15,
+        // children=3*3980=11940
+        assert_eq!(estimate_crypto_cost(&prop), 20 + 18 + 15 + 11940);
+    }
+
+    #[test]
+    fn test_cthreshold_k_above_its_children() {
+        // sigmastate cannot build this one (`SigmaBoolean.scala:223`) and it is not readable
+        // off the wire, but the fields are public. It is costed as a threshold with no
+        // coefficients: 10 to read the polynomial, 3 to evaluate it for the one child, and
+        // the node's 15.
+        let pd = force_any_val::<ProveDlog>();
+        let children = vec![SigmaBoolean::from(pd)].try_into().unwrap();
+        let ct = Cthreshold { k: 3, children };
+        assert_eq!(
+            estimate_crypto_cost(&SigmaBoolean::from(ct)),
+            10 + 3 + 15 + 3980
+        );
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+mod empty_conjecture_tests {
+    //! JVM parity: sigmastate charges every conjecture node 15 (`ToBytes_ProofTreeConjecture`),
+    //! whatever the number of its children, and a threshold its polynomial as well
+    //! (`Interpreter.scala:570-587`). SANTA's `sized-tree-spend` #6 and #9 give the block costs
+    //! of the two thresholds below: 5 for the constant, plus 25 / 10 and 41 / 10.
+    use super::*;
+    use ergotree_ir::serialization::SigmaSerializable;
+
+    fn cost(sigma_boolean: &[u8]) -> u64 {
+        estimate_crypto_cost(&SigmaBoolean::sigma_parse_bytes(sigma_boolean).unwrap())
+    }
+
+    #[test]
+    fn a_conjecture_without_children_costs_its_node() {
+        assert_eq!(cost(&[0x96, 0x00]), 15); // CAND()
+        assert_eq!(cost(&[0x97, 0x00]), 15); // COR()
+        assert_eq!(cost(&[0x98, 0x00, 0x00]), 10 + 15); // CTHRESHOLD(0, [])
+    }
+
+    #[test]
+    fn a_threshold_over_a_trivial_child_costs_its_polynomial_and_its_node() {
+        // CTHRESHOLD(0, [TrueProp]): one coefficient to parse, and to evaluate once
+        assert_eq!(cost(&[0x98, 0x00, 0x01, 0xd3]), 20 + 6 + 15);
     }
 }

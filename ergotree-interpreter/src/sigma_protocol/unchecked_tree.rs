@@ -5,14 +5,12 @@ use ergo_chain_types::Base16EncodedBytes;
 use ergotree_ir::sigma_protocol::sigma_boolean::ProveDhTuple;
 use ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaBoolean;
-use ergotree_ir::sigma_protocol::sigma_boolean::SigmaConjectureItems;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProofOfKnowledgeTree;
 use gf2_192::gf2_192poly::Gf2_192Poly;
 
 use super::dht_protocol::FirstDhTupleProverMessage;
 use super::dht_protocol::SecondDhTupleProverMessage;
 use super::proof_tree::ConjectureType;
-use super::proof_tree::ProofTree;
 use super::proof_tree::ProofTreeConjecture;
 use super::proof_tree::ProofTreeKind;
 use super::proof_tree::ProofTreeLeaf;
@@ -176,21 +174,21 @@ pub enum UncheckedConjecture {
         /// Challenge
         challenge: Challenge,
         /// Children
-        children: SigmaConjectureItems<UncheckedTree>,
+        children: Vec<UncheckedTree>,
     },
     /// Unchecked Or Conjecture
     CorUnchecked {
         /// Challenge
         challenge: Challenge,
         /// Children
-        children: SigmaConjectureItems<UncheckedTree>,
+        children: Vec<UncheckedTree>,
     },
     /// Unchecked Cthreshold Conjecture
     CthresholdUnchecked {
         /// Challenge
         challenge: Challenge,
         /// Children
-        children: SigmaConjectureItems<UncheckedTree>,
+        children: Vec<UncheckedTree>,
         /// K
         k: u8,
         /// Polynomial
@@ -200,7 +198,7 @@ pub enum UncheckedConjecture {
 
 impl UncheckedConjecture {
     /// Set New Children
-    pub fn with_children(self, new_children: SigmaConjectureItems<UncheckedTree>) -> Self {
+    pub fn with_children(self, new_children: Vec<UncheckedTree>) -> Self {
         match self {
             UncheckedConjecture::CandUnchecked {
                 challenge,
@@ -229,8 +227,39 @@ impl UncheckedConjecture {
             },
         }
     }
+    /// The same node over `f` of each child. Unlike [`Self::with_children`] over a copy of
+    /// [`Self::children_ust`], it copies no child.
+    pub(crate) fn map_children(self, f: impl FnMut(UncheckedTree) -> UncheckedTree) -> Self {
+        match self {
+            UncheckedConjecture::CandUnchecked {
+                challenge,
+                children,
+            } => UncheckedConjecture::CandUnchecked {
+                challenge,
+                children: children.into_iter().map(f).collect(),
+            },
+            UncheckedConjecture::CorUnchecked {
+                challenge,
+                children,
+            } => UncheckedConjecture::CorUnchecked {
+                challenge,
+                children: children.into_iter().map(f).collect(),
+            },
+            UncheckedConjecture::CthresholdUnchecked {
+                challenge,
+                children,
+                k,
+                polynomial,
+            } => UncheckedConjecture::CthresholdUnchecked {
+                challenge,
+                children: children.into_iter().map(f).collect(),
+                k,
+                polynomial,
+            },
+        }
+    }
     /// Get Children
-    pub fn children_ust(self) -> SigmaConjectureItems<UncheckedTree> {
+    pub fn children_ust(&self) -> &[UncheckedTree] {
         match self {
             UncheckedConjecture::CandUnchecked {
                 challenge: _,
@@ -309,32 +338,24 @@ impl ProofTreeConjecture for UncheckedConjecture {
         }
     }
 
-    /// Get Children
-    fn children(&self) -> SigmaConjectureItems<ProofTree> {
+    fn threshold_k(&self) -> Option<u8> {
         match self {
-            UncheckedConjecture::CandUnchecked {
-                challenge: _,
-                children,
-            } => children.mapped_ref(|ust| ust.clone().into()),
-            UncheckedConjecture::CorUnchecked {
-                challenge: _,
-                children,
-            } => children.mapped_ref(|ust| ust.clone().into()),
-            UncheckedConjecture::CthresholdUnchecked {
-                challenge: _,
-                children,
-                k: _,
-                polynomial: _,
-            } => children.mapped_ref(|ust| ust.clone().into()),
+            UncheckedConjecture::CthresholdUnchecked { k, .. } => Some(*k),
+            _ => None,
         }
+    }
+
+    fn child_kinds(&self) -> Vec<ProofTreeKind<'_>> {
+        self.children_ust()
+            .iter()
+            .map(UncheckedTree::as_tree_kind)
+            .collect()
     }
 }
 
 #[cfg(feature = "arbitrary")]
 #[allow(clippy::unwrap_used)]
 mod arbitrary {
-    use core::convert::TryInto;
-
     use crate::sigma_protocol::gf2_192::gf2_192poly_from_byte_array;
 
     use super::*;
@@ -359,13 +380,13 @@ mod arbitrary {
                     prop_oneof![
                         (vec(elem.clone(), 2..=3), any::<Challenge>())
                             .prop_map(|(elems, challenge)| UncheckedConjecture::CandUnchecked {
-                                children: elems.try_into().unwrap(),
+                                children: elems,
                                 challenge,
                             })
                             .prop_map_into(),
                         (vec(elem.clone(), 2..=3), any::<Challenge>())
                             .prop_map(|(elems, challenge)| UncheckedConjecture::CorUnchecked {
-                                children: elems.try_into().unwrap(),
+                                children: elems,
                                 challenge
                             })
                             .prop_map_into(),
@@ -378,7 +399,7 @@ mod arbitrary {
                                 .unwrap();
                                 UncheckedConjecture::CthresholdUnchecked {
                                     k: (elems.len() - 1) as u8,
-                                    children: elems.try_into().unwrap(),
+                                    children: elems,
                                     challenge,
                                     polynomial,
                                 }

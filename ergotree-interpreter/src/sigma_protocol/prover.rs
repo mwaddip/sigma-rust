@@ -20,7 +20,6 @@ use crate::sigma_protocol::UnprovenLeaf;
 use alloc::vec::Vec;
 use core::convert::TryInto;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaBoolean;
-use ergotree_ir::sigma_protocol::sigma_boolean::SigmaConjectureItems;
 use gf2_192::gf2_192poly::Gf2_192Poly;
 use gf2_192::gf2_192poly::Gf2_192PolyError;
 use gf2_192::Gf2_192Error;
@@ -261,9 +260,7 @@ fn mark_real<P: Prover + ?Sized>(
                 UnprovenTree::UnprovenConjecture(unp_conj) => match unp_conj {
                     UnprovenConjecture::CandUnproven(cand) => {
                         // If the node is AND, mark it "real" if all of its children are marked real; else mark it "simulated"
-                        let simulated = cast_to_unp(cand.children.clone())?
-                            .iter()
-                            .any(|c| c.simulated());
+                        let simulated = cast_to_unp(&cand.children)?.iter().any(|c| c.simulated());
                         Some(
                             CandUnproven {
                                 simulated,
@@ -274,9 +271,7 @@ fn mark_real<P: Prover + ?Sized>(
                     }
                     UnprovenConjecture::CorUnproven(cor) => {
                         // If the node is OR, mark it "real" if at least one child is marked real; else mark it "simulated"
-                        let simulated = cast_to_unp(cor.children.clone())?
-                            .iter()
-                            .all(|c| c.simulated());
+                        let simulated = cast_to_unp(&cor.children)?.iter().all(|c| c.simulated());
                         Some(
                             CorUnproven {
                                 simulated,
@@ -287,7 +282,7 @@ fn mark_real<P: Prover + ?Sized>(
                     }
                     UnprovenConjecture::CthresholdUnproven(ct) => {
                         // If the node is THRESHOLD(k), mark it "real" if at least k of its children are marked real; else mark it "simulated"
-                        let simulated = cast_to_unp(ct.children.clone())?
+                        let simulated = cast_to_unp(&ct.children)?
                             .iter()
                             .filter(|c| c.is_real())
                             .count()
@@ -307,14 +302,17 @@ fn mark_real<P: Prover + ?Sized>(
 fn set_positions(uc: UnprovenConjecture) -> Result<UnprovenConjecture, ProverError> {
     let upd_children = uc
         .children()
-        .try_mapped(|c| match c {
+        .iter()
+        .cloned()
+        .map(|c| match c {
             ProofTree::UncheckedTree(_) => Err(ProverError::Unexpected(
                 "set_positions: expected UnprovenTree, got UncheckedTree",
             )),
             ProofTree::UnprovenTree(unp) => Ok(unp),
-        })?
-        .enumerated()
-        .mapped(|(idx, utree)| utree.with_position(uc.position().child(idx)).into());
+        })
+        .enumerate()
+        .map(|(idx, utree)| utree.map(|utree| utree.with_position(uc.position().child(idx)).into()))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(match uc {
         UnprovenConjecture::CandUnproven(cand) => cand.with_children(upd_children).into(),
         UnprovenConjecture::CorUnproven(cor) => cor.with_children(upd_children).into(),
@@ -327,37 +325,40 @@ fn set_positions(uc: UnprovenConjecture) -> Result<UnprovenConjecture, ProverErr
 /// Which particular child is left "real" is not important for security;
 /// the choice can be guided by efficiency or convenience considerations.
 fn make_cor_children_simulated(cor: CorUnproven) -> Result<CorUnproven, ProverError> {
-    let casted_children = cast_to_unp(cor.children)?;
+    let casted_children = cast_to_unp(&cor.children)?;
     let first_real_child = casted_children.iter().find(|it| it.is_real()).ok_or({
         ProverError::Unexpected(
             "make_cor_children_simulated: no real child is found amoung Cor children",
         )
     })?;
     let children = casted_children
-        .clone()
-        .mapped(|c| {
-            if &c == first_real_child || c.simulated() {
-                c
+        .iter()
+        .map(|c| {
+            if c == first_real_child || c.simulated() {
+                c.clone()
             } else {
-                c.with_simulated(true)
+                c.clone().with_simulated(true)
             }
         })
-        .mapped(|c| c.into());
+        .map(|c| c.into())
+        .collect();
     Ok(CorUnproven { children, ..cor })
 }
 
-fn cast_to_unp(
-    children: SigmaConjectureItems<ProofTree>,
-) -> Result<SigmaConjectureItems<UnprovenTree>, ProverError> {
-    children.try_mapped(|c| {
-        if let ProofTree::UnprovenTree(ut) = c {
-            Ok(ut)
-        } else {
-            Err(ProverError::Unexpected(
-                "make_cor_children_simulated: expected UnprovenTree got UncheckedTree",
-            ))
-        }
-    })
+fn cast_to_unp(children: &[ProofTree]) -> Result<Vec<UnprovenTree>, ProverError> {
+    children
+        .iter()
+        .cloned()
+        .map(|c| {
+            if let ProofTree::UnprovenTree(ut) = c {
+                Ok(ut)
+            } else {
+                Err(ProverError::Unexpected(
+                    "make_cor_children_simulated: expected UnprovenTree got UncheckedTree",
+                ))
+            }
+        })
+        .collect()
 }
 
 /// Prover Step 3: This step will change some "real" nodes to "simulated" to make sure each node has
@@ -375,8 +376,10 @@ fn polish_simulated<P: Prover + ?Sized>(
                     // If the node is marked "simulated", mark all of its children "simulated"
                     let a: CandUnproven = if cand.simulated {
                         cand.clone().with_children(
-                            cast_to_unp(cand.children.clone())?
-                                .mapped(|c| c.with_simulated(true).into()),
+                            cast_to_unp(&cand.children)?
+                                .into_iter()
+                                .map(|c| c.with_simulated(true).into())
+                                .collect(),
                         )
                     } else {
                         cand.clone()
@@ -387,8 +390,10 @@ fn polish_simulated<P: Prover + ?Sized>(
                     // If the node is marked "simulated", mark all of its children "simulated"
                     let o: CorUnproven = if cor.simulated {
                         CorUnproven {
-                            children: cast_to_unp(cor.children.clone())?
-                                .mapped(|c| c.with_simulated(true).into()),
+                            children: cast_to_unp(&cor.children)?
+                                .into_iter()
+                                .map(|c| c.with_simulated(true).into())
+                                .collect(),
                             ..cor.clone()
                         }
                     } else {
@@ -401,8 +406,10 @@ fn polish_simulated<P: Prover + ?Sized>(
                     // If the node is marked "simulated", mark all of its children "simulated"
                     let t: CthresholdUnproven = if ct.simulated {
                         ct.clone().with_children(
-                            cast_to_unp(ct.children.clone())?
-                                .mapped(|c| c.with_simulated(true).into()),
+                            cast_to_unp(&ct.children)?
+                                .into_iter()
+                                .map(|c| c.with_simulated(true).into())
+                                .collect(),
                         )
                     } else {
                         // If the node is THRESHOLD(k) marked "real", mark all but k of its children "simulated"
@@ -413,8 +420,8 @@ fn polish_simulated<P: Prover + ?Sized>(
                         // We'll mark the first k real ones real
                         let mut count_of_real = 0;
                         let mut children_indices_to_be_marked_simulated = Vec::new();
-                        let unproven_children = cast_to_unp(ct.children.clone())?;
-                        for (idx, kid) in unproven_children.clone().enumerated() {
+                        let unproven_children = cast_to_unp(&ct.children)?;
+                        for (idx, kid) in unproven_children.iter().enumerate() {
                             if kid.is_real() {
                                 count_of_real += 1;
                                 if count_of_real > ct.k {
@@ -422,15 +429,20 @@ fn polish_simulated<P: Prover + ?Sized>(
                                 };
                             };
                         }
-                        ct.clone()
-                            .with_children(unproven_children.enumerated().mapped(|(idx, c)| {
-                                if children_indices_to_be_marked_simulated.contains(&idx) {
-                                    c.with_simulated(true)
-                                } else {
-                                    c
-                                }
-                                .into()
-                            }))
+                        ct.clone().with_children(
+                            unproven_children
+                                .into_iter()
+                                .enumerate()
+                                .map(|(idx, c)| {
+                                    if children_indices_to_be_marked_simulated.contains(&idx) {
+                                        c.with_simulated(true)
+                                    } else {
+                                        c
+                                    }
+                                    .into()
+                                })
+                                .collect(),
+                        )
                     };
                     Ok(Some(set_positions(t.into())?.into()))
                 }
@@ -455,7 +467,8 @@ fn step4_real_conj(
         //real OR Threshold case
         UnprovenConjecture::CorUnproven(_) | UnprovenConjecture::CthresholdUnproven(_) => {
             let new_children = cast_to_unp(uc.children())?
-                .try_mapped(|c| -> Result<_, ProverError> {
+                .into_iter()
+                .map(|c| -> Result<_, ProverError> {
                     if c.is_real() {
                         Ok(c)
                     } else {
@@ -480,8 +493,9 @@ fn step4_real_conj(
                         };
                         Ok(c.with_challenge(new_challenge))
                     }
-                })?
-                .mapped(|c| c.into());
+                })
+                .map(|c| c.map(ProofTree::from))
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(Some(
                 uc.with_children(new_children).into(), // CorUnproven {
                                                        //     children: new_children,
@@ -499,8 +513,10 @@ fn step4_simulated_and_conj(cand: CandUnproven) -> Result<Option<ProofTree>, Pro
     if let Some(challenge) = cand.challenge_opt.clone() {
         let new_children = cand
             .children
-            .clone()
-            .mapped(|it| it.with_challenge(challenge.clone()));
+            .iter()
+            .cloned()
+            .map(|it| it.with_challenge(challenge.clone()))
+            .collect();
         Ok(Some(
             CandUnproven {
                 children: new_children,
@@ -522,7 +538,7 @@ fn step4_simulated_or_conj(cor: CorUnproven) -> Result<Option<ProofTree>, Prover
     // the other children and e_0.
     assert!(cor.simulated);
     if let Some(challenge) = cor.challenge_opt.clone() {
-        let unproven_children = cast_to_unp(cor.children.clone())?;
+        let unproven_children = cast_to_unp(&cor.children)?;
         let mut tail: Vec<UnprovenTree> = unproven_children
             .clone()
             .into_iter()
@@ -537,19 +553,17 @@ fn step4_simulated_or_conj(cor: CorUnproven) -> Result<Option<ProofTree>, Prover
         }
         let head = unproven_children
             .first()
+            .ok_or_else(|| ProverError::Unexpected("Or.unproven_children is empty"))?
             .clone()
             .with_challenge(xored_challenge);
         let mut new_children = vec![head];
         new_children.append(&mut tail);
-        #[allow(clippy::unwrap_used)] // since quantity is preserved unwrap is safe here
         Ok(Some(
             CorUnproven {
                 children: new_children
                     .into_iter()
                     .map(|c| c.into())
-                    .collect::<Vec<ProofTree>>()
-                    .try_into()
-                    .unwrap(),
+                    .collect::<Vec<ProofTree>>(),
                 ..cor
             }
             .into(),
@@ -577,22 +591,27 @@ fn step4_simulated_threshold_conj(
     // to get challenges for child 1, 2, ..., n, respectively.
     assert!(ct.simulated);
     if let Some(challenge) = ct.challenge_opt.clone() {
-        let unproven_children = cast_to_unp(ct.children.clone())?;
-        let n = ct.children.len();
+        let unproven_children = cast_to_unp(&ct.children)?;
+        // `k <= n` holds for a CTHRESHOLD read off the wire, but its fields are public
+        let n_coeff =
+            ct.children
+                .len()
+                .checked_sub(ct.k as usize)
+                .ok_or(ProverError::Unexpected(
+                    "step4_simulated_threshold_conj: k above the number of children",
+                ))?;
         let q = gf2_192poly_from_byte_array(
             challenge,
-            super::crypto_utils::secure_random_bytes(super::SOUNDNESS_BYTES * (n - ct.k as usize)),
+            super::crypto_utils::secure_random_bytes(super::SOUNDNESS_BYTES * n_coeff),
         )?;
         let new_children = unproven_children
-            .enumerated()
-            .mapped(|(idx, c)| {
-                // Note the cast to `u8` is safe since `unproven_children` is of type
-                // `SigmaConjectureItems<_>` which is a `BoundedVec<_, 2, 255>`.
-                let one_based_idx = (idx + 1) as u8;
-                let new_challenge = q.evaluate(one_based_idx).into();
-                c.with_challenge(new_challenge)
+            .into_iter()
+            .enumerate()
+            .map(|(idx, c)| {
+                let new_challenge = q.evaluate(threshold_point(idx)?).into();
+                Ok(c.with_challenge(new_challenge).into())
             })
-            .mapped(|c| c.into());
+            .collect::<Result<Vec<_>, ProverError>>()?;
         Ok(Some(
             ct.with_children(new_children).with_polynomial(q)?.into(),
         ))
@@ -801,9 +820,10 @@ fn step9_real_and(cand: CandUnproven) -> Result<Option<ProofTree>, ProverError> 
     // If the node is AND, let each of its children have the challenge e_0
     if let Some(challenge) = cand.challenge_opt.clone() {
         let updated = cand
-            .clone()
             .children
-            .mapped(|child| child.with_challenge(challenge.clone()));
+            .iter()
+            .map(|child| child.with_challenge(challenge.clone()))
+            .collect();
         Ok(Some(cand.with_children(updated).into()))
     } else {
         Err(ProverError::Unexpected(
@@ -824,10 +844,17 @@ fn step9_real_or(cor: CorUnproven) -> Result<Option<ProofTree>, ProverError> {
             .iter()
             .flat_map(|c| c.challenge())
             .fold(root_challenge.clone(), |acc, c| acc.xor(c));
-        let children = cor.children.clone().mapped(|c| match c {
-            ProofTree::UnprovenTree(ref ut) if ut.is_real() => c.with_challenge(challenge.clone()),
-            _ => c,
-        });
+        let children = cor
+            .children
+            .iter()
+            .cloned()
+            .map(|c| match c {
+                ProofTree::UnprovenTree(ref ut) if ut.is_real() => {
+                    c.with_challenge(challenge.clone())
+                }
+                _ => c,
+            })
+            .collect();
         Ok(Some(
             CorUnproven {
                 children,
@@ -858,8 +885,8 @@ fn step9_real_threshold(ct: CthresholdUnproven) -> Result<Option<ProofTree>, Pro
     if let Some(challenge) = ct.challenge_opt.clone() {
         let mut points = Vec::new();
         let mut values = Vec::new();
-        for (idx, child) in ct.children.clone().enumerated() {
-            let one_based_idx = (idx + 1) as u8;
+        for (idx, child) in ct.children.iter().cloned().enumerate() {
+            let one_based_idx = threshold_point(idx)?;
             let challenge_opt = match child {
                 ProofTree::UncheckedTree(ut) => match ut {
                     UncheckedTree::UncheckedLeaf(ul) => Some(ul.challenge()),
@@ -878,17 +905,21 @@ fn step9_real_threshold(ct: CthresholdUnproven) -> Result<Option<ProofTree>, Pro
         let value_at_zero = challenge.into();
         let q = Gf2_192Poly::interpolate(&points, &values, value_at_zero)?;
 
-        let new_children = ct.children.clone().enumerated().mapped(|(idx, child)| {
-            // Note the cast to `u8` is safe since `ct.children` is of type
-            // `SigmaConjectureItems<_>` which is a `BoundedVec<_, 2, 255>`.
-            let one_based_idx = (idx + 1) as u8;
-            match &child {
-                ProofTree::UnprovenTree(ut) if ut.is_real() => {
-                    child.with_challenge(q.evaluate(one_based_idx).into())
-                }
-                _ => child,
-            }
-        });
+        let new_children = ct
+            .children
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(idx, child)| {
+                let one_based_idx = threshold_point(idx)?;
+                Ok(match &child {
+                    ProofTree::UnprovenTree(ut) if ut.is_real() => {
+                        child.with_challenge(q.evaluate(one_based_idx).into())
+                    }
+                    _ => child,
+                })
+            })
+            .collect::<Result<Vec<_>, ProverError>>()?;
         Ok(Some(
             ct.with_children(new_children).with_polynomial(q)?.into(),
         ))
@@ -1161,7 +1192,9 @@ fn convert_to_unproven(sb: SigmaBoolean) -> Result<UnprovenTree, ProverError> {
                 simulated: false,
                 children: cand
                     .items
-                    .try_mapped(|it| convert_to_unproven(it).map(Into::into))?,
+                    .into_iter()
+                    .map(|it| convert_to_unproven(it).map(Into::into))
+                    .collect::<Result<Vec<_>, _>>()?,
                 position: NodePosition::crypto_tree_prefix(),
             }
             .into(),
@@ -1171,7 +1204,9 @@ fn convert_to_unproven(sb: SigmaBoolean) -> Result<UnprovenTree, ProverError> {
                 simulated: false,
                 children: cor
                     .items
-                    .try_mapped(|it| convert_to_unproven(it).map(Into::into))?,
+                    .into_iter()
+                    .map(|it| convert_to_unproven(it).map(Into::into))
+                    .collect::<Result<Vec<_>, _>>()?,
                 position: NodePosition::crypto_tree_prefix(),
             }
             .into(),
@@ -1179,7 +1214,9 @@ fn convert_to_unproven(sb: SigmaBoolean) -> Result<UnprovenTree, ProverError> {
                 ct.clone(),
                 ct.k,
                 ct.children
-                    .try_mapped(|it| convert_to_unproven(it).map(Into::into))?,
+                    .into_iter()
+                    .map(|it| convert_to_unproven(it).map(Into::into))
+                    .collect::<Result<Vec<_>, _>>()?,
                 None,
                 false,
                 NodePosition::crypto_tree_prefix(),
@@ -1192,8 +1229,15 @@ fn convert_to_unproven(sb: SigmaBoolean) -> Result<UnprovenTree, ProverError> {
     })
 }
 
+/// The point at which a threshold's polynomial gives the challenge of its child `idx`: the
+/// child's 1-based index. A CTHRESHOLD has at most 255 children, so it fits a byte.
+fn threshold_point(idx: usize) -> Result<u8, ProverError> {
+    u8::try_from(idx + 1)
+        .map_err(|_| ProverError::Unexpected("a threshold with more than 255 children"))
+}
+
 fn convert_to_unchecked(tree: ProofTree) -> Result<UncheckedTree, ProverError> {
-    match &tree {
+    match tree {
         ProofTree::UncheckedTree(unch_tree) => match unch_tree {
             UncheckedTree::UncheckedLeaf(_) => Ok(unch_tree.clone()),
             UncheckedTree::UncheckedConjecture(_) => Err(ProverError::Unexpected(
@@ -1210,7 +1254,11 @@ fn convert_to_unchecked(tree: ProofTree) -> Result<UncheckedTree, ProverError> {
                         .challenge_opt
                         .clone()
                         .ok_or(ProverError::Unexpected("no challenge in CandUnproven"))?,
-                    children: cand.children.clone().try_mapped(convert_to_unchecked)?,
+                    children: cand
+                        .children
+                        .into_iter()
+                        .map(convert_to_unchecked)
+                        .collect::<Result<Vec<_>, _>>()?,
                 }
                 .into()),
                 UnprovenConjecture::CorUnproven(cor) => Ok(UncheckedConjecture::CorUnchecked {
@@ -1218,7 +1266,11 @@ fn convert_to_unchecked(tree: ProofTree) -> Result<UncheckedTree, ProverError> {
                         .challenge_opt
                         .clone()
                         .ok_or(ProverError::Unexpected("no challenge in CorUnproven"))?,
-                    children: cor.children.clone().try_mapped(convert_to_unchecked)?,
+                    children: cor
+                        .children
+                        .into_iter()
+                        .map(convert_to_unchecked)
+                        .collect::<Result<Vec<_>, _>>()?,
                 }
                 .into()),
                 UnprovenConjecture::CthresholdUnproven(ct) => {
@@ -1226,7 +1278,12 @@ fn convert_to_unchecked(tree: ProofTree) -> Result<UncheckedTree, ProverError> {
                         challenge: ct.challenge_opt.clone().ok_or({
                             ProverError::Unexpected("no challenge in CthresholdUnproven")
                         })?,
-                        children: ct.children.clone().try_mapped(convert_to_unchecked)?,
+                        children: ct
+                            .children
+                            .iter()
+                            .cloned()
+                            .map(convert_to_unchecked)
+                            .collect::<Result<Vec<_>, _>>()?,
                         k: ct.k,
                         polynomial: ct.polinomial_opt().ok_or({
                             ProverError::Unexpected("no polynomial in CthresholdUnproven")
@@ -1269,6 +1326,8 @@ mod tests {
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::sigma_and::SigmaAnd;
     use ergotree_ir::mir::sigma_or::SigmaOr;
+    use ergotree_ir::sigma_protocol::sigma_boolean::cor::Cor;
+    use ergotree_ir::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
     use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
     use ergotree_ir::types::stype::SType;
     use sigma_test_util::force_any_val;
@@ -1505,5 +1564,92 @@ mod tests {
         let ctx: Context = force_any_val::<Context>();
         let res = prover.prove(&tree, &ctx, message.as_slice(), &HintsBag::empty());
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn a_threshold_child_s_point_is_its_one_based_index() {
+        assert_eq!(threshold_point(0).unwrap(), 1);
+        assert_eq!(threshold_point(254).unwrap(), 255);
+        // a 256th child has no point in GF(2^192)'s byte-wide evaluation
+        assert!(threshold_point(255).is_err());
+    }
+
+    #[test]
+    fn a_simulated_threshold_with_k_above_its_children_is_an_error() {
+        // sigmastate cannot build this threshold (`SigmaBoolean.scala:223`) and it is not
+        // readable off the wire, but the fields are public. Under an OR whose other child is
+        // real it is simulated, and its polynomial would have `n - k` coefficients.
+        let secret = DlogProverInput::random();
+        let threshold = Cthreshold {
+            k: 3,
+            children: vec![DlogProverInput::random().public_image().into()]
+                .try_into()
+                .unwrap(),
+        };
+        let or = Cor::normalized(
+            vec![secret.public_image().into(), threshold.into()]
+                .try_into()
+                .unwrap(),
+        );
+        let prover = TestProver {
+            secrets: vec![PrivateInput::DlogProverInput(secret)],
+        };
+        let res = prover.generate_proof(or, &[0u8; 100], &HintsBag::empty());
+        assert!(matches!(res, Err(ProverError::Unexpected(_))));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod empty_conjecture_tests {
+    //! JVM parity: the prover marks `CAND()` real, as it has no simulated child, and proves it
+    //! with nothing but the root challenge. `COR()` has no real child, so its root is simulated
+    //! and the prover gives up (sigmastate: "Tree root should be real").
+    use super::*;
+    use crate::sigma_protocol::fiat_shamir::fiat_shamir_hash_fn;
+    use crate::sigma_protocol::verifier::verify_signature;
+    use crate::sigma_protocol::SOUNDNESS_BYTES;
+    use ergotree_ir::serialization::SigmaSerializable;
+
+    const MESSAGE: &[u8] = b"a message";
+
+    #[test]
+    fn cand_without_children_is_proven_by_its_root_challenge() {
+        let cand = SigmaBoolean::sigma_parse_bytes(&[0x96, 0x00]).unwrap();
+        let prover = TestProver { secrets: vec![] };
+        let proof = prover
+            .generate_proof(cand.clone(), MESSAGE, &HintsBag::empty())
+            .unwrap();
+        let bytes = Vec::<u8>::from(proof);
+        assert_eq!(bytes.len(), 24);
+        assert!(verify_signature(cand, MESSAGE, &bytes).unwrap());
+    }
+
+    #[test]
+    fn cthreshold_without_children_is_proven_by_its_root_challenge() {
+        // The proof is the challenge and `n - k` = 0 polynomial coefficients
+        // (`SigSerializer.scala:242-263`). The node's Fiat-Shamir bytes are `00`, the threshold
+        // type, `k`, and the child count as a Short (`UnprovenTree.scala:268-281`).
+        let cthreshold = SigmaBoolean::sigma_parse_bytes(&[0x98, 0x00, 0x00]).unwrap();
+        let prover = TestProver { secrets: vec![] };
+        let proof = prover
+            .generate_proof(cthreshold.clone(), MESSAGE, &HintsBag::empty())
+            .unwrap();
+        let bytes = Vec::<u8>::from(proof);
+        let root_challenge: [u8; SOUNDNESS_BYTES] =
+            fiat_shamir_hash_fn(&[&[0x00, 0x02, 0x00, 0x00, 0x00][..], MESSAGE].concat()).into();
+        assert_eq!(bytes, root_challenge.to_vec());
+        assert!(verify_signature(cthreshold.clone(), MESSAGE, &bytes).unwrap());
+        assert!(!verify_signature(cthreshold, MESSAGE, &[]).unwrap());
+    }
+
+    #[test]
+    fn cor_without_children_cannot_be_proven() {
+        let cor = SigmaBoolean::sigma_parse_bytes(&[0x97, 0x00]).unwrap();
+        let prover = TestProver { secrets: vec![] };
+        assert!(matches!(
+            prover.generate_proof(cor, MESSAGE, &HintsBag::empty()),
+            Err(ProverError::TreeRootIsNotReal)
+        ));
     }
 }

@@ -1,7 +1,5 @@
 //! Serialization of proof tree signatures
 
-use core::convert::TryInto;
-
 use super::gf2_192::gf2_192poly_from_byte_array;
 use super::prover::ProofBytes;
 use super::unchecked_tree::UncheckedConjecture;
@@ -18,6 +16,7 @@ use crate::sigma_protocol::UncheckedSchnorr;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core3::io::Read;
 use ergotree_ir::serialization::sigma_byte_reader;
 use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
@@ -80,26 +79,26 @@ fn sig_write_bytes<W: SigmaByteWrite>(
                 challenge: _,
                 children,
             } => {
-                // don't write last child's challenge -- it's computed by the verifier via XOR
-                let (last, elements) = children.split_last();
-                for child in elements {
-                    sig_write_bytes(child, w, true)?;
+                // don't write last child's challenge -- it's computed by the verifier via XOR.
+                // An OR without children, which no prover makes, has nothing more to write.
+                if let Some((last, elements)) = children.split_last() {
+                    for child in elements {
+                        sig_write_bytes(child, w, true)?;
+                    }
+                    sig_write_bytes(last, w, false)?;
                 }
-                sig_write_bytes(last, w, false)?;
                 Ok(())
             }
             UncheckedConjecture::CthresholdUnchecked {
                 challenge: _,
                 children,
-                k,
+                k: _,
                 polynomial,
             } => {
+                // write the polynomial, except the zero-degree coefficient. sigmastate writes
+                // it whatever its degree (`SigSerializer.scala:94-97`): a tree read from a
+                // proof that ended inside its coefficients has fewer than `n - k` of them
                 let mut polynomial_bytes = polynomial.to_bytes();
-                assert_eq!(
-                    polynomial_bytes.len(),
-                    (children.len() - *k as usize) * SOUNDNESS_BYTES
-                );
-                // write the polynomial, except the zero-degree coefficient
                 w.write_all(polynomial_bytes.as_mut_slice())?;
                 for child in children {
                     sig_write_bytes(child, w, false)?;
@@ -175,9 +174,11 @@ fn parse_sig_compute_challenges_reader<R: SigmaByteRead>(
             SigmaConjecture::Cand(cand) => {
                 // Verifier Step 2: If the node is AND, then all of its children get e_0 as
                 // the challenge
-                let children = cand.items.try_mapped_ref(|it| {
-                    parse_sig_compute_challenges_reader(it, r, Some(challenge.clone()))
-                })?;
+                let children = cand
+                    .items
+                    .iter()
+                    .map(|it| parse_sig_compute_challenges_reader(it, r, Some(challenge.clone())))
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(UncheckedConjecture::CandUnchecked {
                     challenge,
                     children,
@@ -192,23 +193,28 @@ fn parse_sig_compute_challenges_reader<R: SigmaByteRead>(
                 // Read all the children but the last and compute the XOR of all the challenges including e_0
                 let mut children: Vec<UncheckedTree> = Vec::with_capacity(cor.items.len());
 
-                let (last, rest) = cor.items.split_last();
+                // sigmastate takes the last child as `or.children(nChildren - 1)`, which throws
+                // for an OR without children (`SigSerializer.scala:228-234`): it never verifies
+                let (last, rest) = cor
+                    .items
+                    .split_last()
+                    .ok_or(SigParsingError::CorWithoutChildren)?;
                 for it in rest {
                     children.push(parse_sig_compute_challenges_reader(it, r, None)?);
                 }
+                // the children are read where they are: a copy of them is a copy of every
+                // subtree parsed so far
                 let xored_challenge = children
-                    .clone()
-                    .into_iter()
+                    .iter()
                     .map(|c| c.challenge())
                     .fold(challenge.clone(), |acc, c| acc.xor(c));
                 let last_child =
                     parse_sig_compute_challenges_reader(last, r, Some(xored_challenge))?;
                 children.push(last_child);
 
-                #[allow(clippy::unwrap_used)] // since quantity is preserved unwrap is safe here
                 Ok(UncheckedConjecture::CorUnchecked {
                     challenge,
-                    children: children.try_into().unwrap(),
+                    children,
                 }
                 .into())
             }
@@ -216,25 +222,36 @@ fn parse_sig_compute_challenges_reader<R: SigmaByteRead>(
                 // Verifier Step 2: If the node is THRESHOLD,
                 // evaluate the polynomial Q(x) at points 1, 2, ..., n to get challenges for child 1, 2, ..., n, respectively.
                 // Read the polynomial -- it has n-k coefficients
-                let n_children = ct.children.len();
-                let n_coeff = n_children - ct.k as usize;
+                // `k <= n` holds for a CTHRESHOLD read off the wire, but its fields are public
+                let n_coeff = ct
+                    .children
+                    .as_slice()
+                    .len()
+                    .checked_sub(ct.k as usize)
+                    .ok_or_else(|| SigParsingError::CthresholdKAboveChildren(exp.clone()))?;
                 let buf_size = n_coeff * SOUNDNESS_BYTES;
-                let mut coeff_bytes = vec![0u8; buf_size];
-                r.read_exact(&mut coeff_bytes)
+                // sigmastate reads them with `getBytesUnsafe`: when the proof ends before them
+                // it takes the bytes that are left (`SigSerializer.scala:250-252`,
+                // `CoreByteReader.scala:94-98`), and the polynomial takes the coefficients that
+                // are whole (`GF2_192_Poly.scala:50-58`)
+                let mut coeff_bytes = Vec::with_capacity(buf_size);
+                r.by_ref()
+                    .take(buf_size as u64)
+                    .read_to_end(&mut coeff_bytes)
                     .map_err(|_| SigParsingError::CthresholdCoeffRead(exp.clone()))?;
                 let polynomial = gf2_192poly_from_byte_array(challenge.clone(), coeff_bytes)?;
 
-                let children =
-                    ct.children
-                        .clone()
-                        .enumerated()
-                        .try_mapped_ref(|(idx, child)| {
-                            // Note the cast to `u8` is safe since `ct.children` is of type
-                            // `SigmaConjectureItems<_>` which is a `BoundedVec<_, 2, 255>`.
-                            let one_based_index = (idx + 1) as u8;
-                            let ch = polynomial.evaluate(one_based_index).into();
-                            parse_sig_compute_challenges_reader(child, r, Some(ch))
-                        })?;
+                let children = ct
+                    .children
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, child)| {
+                        // The cast is safe: a CTHRESHOLD holds at most 255 children
+                        let one_based_index = (idx + 1) as u8;
+                        let ch = polynomial.evaluate(one_based_index).into();
+                        parse_sig_compute_challenges_reader(child, r, Some(ch))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(UncheckedConjecture::CthresholdUnchecked {
                     challenge,
                     children,
@@ -279,8 +296,14 @@ pub enum SigParsingError {
     #[error("Scalar in ProveDhTumple reading erorr with exp: {0:?}")]
     ScalarReadProveDhTuple(SigmaBoolean),
 
+    #[error("Cor without children: it has no last child to take the remaining challenge")]
+    CorWithoutChildren,
+
     #[error("Cthreshold coeff reading erorr with exp: {0:?}")]
     CthresholdCoeffRead(SigmaBoolean),
+
+    #[error("Cthreshold with k above the number of its children, exp: {0:?}")]
+    CthresholdKAboveChildren(SigmaBoolean),
 
     #[error("Error: {0:?} for top level exp: {1:?}")]
     TopLevelExpWrap(Box<SigParsingError>, SigmaBoolean),
@@ -289,14 +312,29 @@ pub enum SigParsingError {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod test {
+    use alloc::boxed::Box;
+    use core::convert::TryInto;
     use core3::io::Cursor;
 
+    use ergo_chain_types::ec_point::generator;
     use ergotree_ir::serialization::{
-        constant_store::ConstantStore, sigma_byte_reader::SigmaByteReader,
+        constant_store::ConstantStore, sigma_byte_reader::SigmaByteReader, SigmaSerializable,
     };
+    use ergotree_ir::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
+    use ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
     use k256::Scalar;
 
+    use super::gf2_192poly_from_byte_array;
+    use super::parse_sig_compute_challenges;
     use super::read_scalar;
+    use super::serialize_sig;
+    use super::Challenge;
+    use super::SigmaBoolean;
+    use super::UncheckedConjecture;
+    use super::UncheckedTree;
+    use super::GROUP_SIZE;
+    use super::SOUNDNESS_BYTES;
+    use crate::sigma_protocol::fiat_shamir::FiatShamirHash;
 
     // Test scalar parsing and also test handling parsing when there are less than GROUP_SIZE bytes in the buffer
     #[test]
@@ -310,5 +348,80 @@ mod test {
             let scalar = read_scalar(&mut sr).unwrap();
             assert_eq!(*scalar.as_scalar_ref(), Scalar::ONE);
         }
+    }
+
+    #[test]
+    fn an_or_without_children_is_written_as_its_challenge_alone() {
+        // No prover makes one: `COR()` is never real. But the tree's children are a `Vec`, and
+        // its JSON form is an infallible conversion, so the writer takes it.
+        let challenge = Challenge::from(FiatShamirHash(Box::new([7u8; SOUNDNESS_BYTES])));
+        let tree: UncheckedTree = UncheckedConjecture::CorUnchecked {
+            challenge,
+            children: vec![],
+        }
+        .into();
+        assert_eq!(serialize_sig(tree).to_bytes(), vec![7u8; SOUNDNESS_BYTES]);
+    }
+
+    #[test]
+    fn a_threshold_with_k_above_its_children_is_refused() {
+        // sigmastate cannot build this one (`SigmaBoolean.scala:223`) and it is not readable
+        // off the wire, but the fields are public. The proof is long enough for a reader that
+        // takes `n - k` for 0: a challenge, then the child's response.
+        let pk = SigmaBoolean::from(ProveDlog::new(generator()));
+        let threshold = SigmaBoolean::from(Cthreshold {
+            k: 3,
+            children: vec![pk].try_into().unwrap(),
+        });
+        let proof = vec![0u8; SOUNDNESS_BYTES + GROUP_SIZE];
+        assert!(parse_sig_compute_challenges(&threshold, proof).is_err());
+    }
+
+    #[test]
+    fn a_threshold_takes_the_whole_coefficients_that_are_left() {
+        // sigmastate reads the `n - k` coefficients with `getBytesUnsafe`, which gives the bytes
+        // that are left when the proof ends before them (`SigSerializer.scala:250-252`,
+        // `CoreByteReader.scala:94-98`), and its polynomial takes the coefficients that are
+        // whole (`GF2_192_Poly.scala:50-58`). `CTHRESHOLD(0, [CAND(), CAND()])` asks for two:
+        // this proof is the challenge, one coefficient, and 5 bytes of the second.
+        let threshold =
+            SigmaBoolean::sigma_parse_bytes(&[0x98, 0x00, 0x02, 0x96, 0x00, 0x96, 0x00]).unwrap();
+        let coefficient = [9u8; SOUNDNESS_BYTES];
+        let proof = [&[7u8; SOUNDNESS_BYTES][..], &coefficient, &[1u8; 5]].concat();
+        let polynomial = match parse_sig_compute_challenges(&threshold, proof).unwrap() {
+            UncheckedTree::UncheckedConjecture(UncheckedConjecture::CthresholdUnchecked {
+                polynomial,
+                ..
+            }) => Some(polynomial),
+            _ => None,
+        };
+        assert_eq!(polynomial.unwrap().to_bytes(), coefficient);
+    }
+
+    #[test]
+    fn a_threshold_s_polynomial_is_written_as_it_is() {
+        // sigmastate writes `polynomial.toByteArray(false)`, whatever its degree
+        // (`SigSerializer.scala:94-97`). A tree read from a proof that ended inside its
+        // coefficients has fewer than `n - k` of them.
+        let challenge = Challenge::from(FiatShamirHash(Box::new([7u8; SOUNDNESS_BYTES])));
+        let child = || -> UncheckedTree {
+            UncheckedConjecture::CandUnchecked {
+                challenge: challenge.clone(),
+                children: vec![],
+            }
+            .into()
+        };
+        let tree: UncheckedTree = UncheckedConjecture::CthresholdUnchecked {
+            challenge: challenge.clone(),
+            children: vec![child(), child()],
+            k: 0,
+            polynomial: gf2_192poly_from_byte_array(challenge.clone(), vec![9u8; SOUNDNESS_BYTES])
+                .unwrap(),
+        }
+        .into();
+        assert_eq!(
+            serialize_sig(tree).to_bytes(),
+            [[7u8; SOUNDNESS_BYTES], [9u8; SOUNDNESS_BYTES]].concat()
+        );
     }
 }

@@ -946,9 +946,7 @@ mod tests {
     }
 
     fn cand(items: Vec<SigmaBoolean>) -> SigmaBoolean {
-        SigmaBoolean::SigmaConjecture(SigmaConjecture::Cand(Cand {
-            items: items.try_into().unwrap(),
-        }))
+        SigmaBoolean::SigmaConjecture(SigmaConjecture::Cand(Cand { items }))
     }
 
     fn cthreshold(k: u8, children: Vec<SigmaBoolean>) -> SigmaBoolean {

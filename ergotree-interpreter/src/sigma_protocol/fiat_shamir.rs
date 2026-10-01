@@ -1,8 +1,6 @@
 //! Fiat-Shamir transformation
 
 use super::proof_tree::ProofTreeKind;
-use crate::sigma_protocol::unchecked_tree::{UncheckedConjecture, UncheckedTree};
-use crate::sigma_protocol::unproven_tree::{UnprovenConjecture, UnprovenTree};
 use crate::sigma_protocol::ProverMessage;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -118,7 +116,7 @@ pub(crate) fn fiat_shamir_tree_to_bytes(
 ) -> Result<Vec<u8>, FiatShamirTreeSerializationError> {
     let mut data = Vec::new();
     let mut w = SigmaByteWriter::new(&mut data, None);
-    fiat_shamir_write_bytes(tree, &mut w)?;
+    fiat_shamir_write_bytes(tree.as_tree_kind(), &mut w)?;
     Ok(data)
 }
 
@@ -137,13 +135,13 @@ impl From<core3::io::Error> for FiatShamirTreeSerializationError {
 }
 
 fn fiat_shamir_write_bytes<W: SigmaByteWrite>(
-    tree: &ProofTree,
+    tree: ProofTreeKind<'_>,
     w: &mut W,
 ) -> Result<(), FiatShamirTreeSerializationError> {
     const INTERNAL_NODE_PREFIX: u8 = 0;
     const LEAF_PREFIX: u8 = 1;
 
-    Ok(match tree.as_tree_kind() {
+    Ok(match tree {
         ProofTreeKind::Leaf(leaf) => {
             #[allow(clippy::unwrap_used)]
             // Since expr is fairly simple it can only fail on OOM
@@ -170,32 +168,14 @@ fn fiat_shamir_write_bytes<W: SigmaByteWrite>(
         ProofTreeKind::Conjecture(c) => {
             w.put_u8(INTERNAL_NODE_PREFIX)?;
             w.put_u8(c.conjecture_type() as u8)?;
-            match tree {
-                ProofTree::UncheckedTree(unchecked) => match unchecked {
-                    UncheckedTree::UncheckedLeaf(_) => (),
-                    UncheckedTree::UncheckedConjecture(conj) => {
-                        if let UncheckedConjecture::CthresholdUnchecked {
-                            challenge: _,
-                            children: _,
-                            k,
-                            polynomial: _,
-                        } = conj
-                        {
-                            w.put_u8(*k)?
-                        }
-                    }
-                },
-                ProofTree::UnprovenTree(unproven) => match unproven {
-                    UnprovenTree::UnprovenLeaf(_) => (),
-                    UnprovenTree::UnprovenConjecture(conj) => {
-                        if let UnprovenConjecture::CthresholdUnproven(thresh) = conj {
-                            w.put_u8(thresh.k)?
-                        }
-                    }
-                },
+            if let Some(k) = c.threshold_k() {
+                w.put_u8(k)?
             }
-            w.put_i16_be_bytes(c.children().len() as i16)?;
-            for child in &c.children() {
+            // sigmastate walks the children where they are (`UnprovenTree.scala:283-287`).
+            // A copy of each, made at every level, costs the tree's size times its depth.
+            let children = c.child_kinds();
+            w.put_i16_be_bytes(children.len() as i16)?;
+            for child in children {
                 fiat_shamir_write_bytes(child, w)?;
             }
         }

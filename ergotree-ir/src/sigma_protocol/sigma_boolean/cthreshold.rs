@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 
 use super::cand::Cand;
 use super::cor::Cor;
+use super::CthresholdItems;
 use super::SigmaBoolean;
 use super::SigmaConjecture;
-use super::SigmaConjectureItems;
 use crate::has_opcode::HasStaticOpCode;
 use crate::serialization::op_code::OpCode;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
@@ -26,33 +26,33 @@ pub struct Cthreshold {
     // Our polynomial arithmetic can take only byte inputs
     pub k: u8,
     /// Items of the proposal
-    pub children: SigmaConjectureItems<SigmaBoolean>,
+    pub children: CthresholdItems<SigmaBoolean>,
 }
 
 impl Cthreshold {
     /// Reduce all possible TrivialProps in the tree
-    pub fn reduce(k: u8, children: SigmaConjectureItems<SigmaBoolean>) -> SigmaBoolean {
+    pub fn reduce(k: u8, children: CthresholdItems<SigmaBoolean>) -> SigmaBoolean {
         if k == 0 {
             return true.into();
         }
-        if k as usize > children.len() {
+        if k as usize > children.as_slice().len() {
             return false.into();
         }
 
         let mut curr_k = k;
-        let mut children_left = children.len();
+        let mut children_left = children.as_slice().len();
         let mut res: Vec<SigmaBoolean> = Vec::new();
 
         for (i, ch) in children.iter().enumerate() {
             if curr_k == 1 {
-                res.append(&mut children.as_vec()[i..children.len()].to_vec());
-                // should be 2 or more so unwrap is safe here
+                res.extend_from_slice(&children.as_slice()[i..]);
+                // `res` now holds child `i` and those after it, so the unwrap is safe
                 #[allow(clippy::unwrap_used)]
                 return Cor::normalized(res.try_into().unwrap());
             }
             if curr_k as usize == children_left {
-                res.append(&mut children.as_vec()[i..children.len()].to_vec());
-                // should be 2 or more so unwrap is safe here
+                res.extend_from_slice(&children.as_slice()[i..]);
+                // `res` now holds child `i` and those after it, so the unwrap is safe
                 #[allow(clippy::unwrap_used)]
                 return Cand::normalized(res.try_into().unwrap());
             }
@@ -70,15 +70,14 @@ impl Cthreshold {
             }
         }
 
-        // should be 2 or more so unwrap is safe here
+        // `res` holds 2 or more of the children here, so each conversion succeeds
         #[allow(clippy::unwrap_used)]
-        let sigmas: SigmaConjectureItems<SigmaBoolean> = res.try_into().unwrap();
         match curr_k as usize {
-            1 => Cor::normalized(sigmas),
-            ch if ch == children_left => Cand::normalized(sigmas),
+            1 => Cor::normalized(res.try_into().unwrap()),
+            ch if ch == children_left => Cand::normalized(res.try_into().unwrap()),
             _ => SigmaBoolean::SigmaConjecture(SigmaConjecture::Cthreshold(Cthreshold {
                 k: curr_k,
-                children: sigmas,
+                children: res.try_into().unwrap(),
             })),
         }
     }
@@ -110,7 +109,7 @@ impl SigmaSerializable for Cthreshold {
         w.put_u16(self.k as u16)?;
         // k is Scala `putUShort` => PutUnsignedNumericCost(3) under `Global.serialize`
         w.add_put_numeric_cost();
-        w.put_u16(self.children.len() as u16)?;
+        w.put_u16(self.children.as_slice().len() as u16)?;
         // child count is Scala `putUShort` => PutUnsignedNumericCost(3) under `Global.serialize`
         w.add_put_numeric_cost();
         self.children.iter().try_for_each(|i| i.sigma_serialize(w))
@@ -160,6 +159,35 @@ mod tests {
             let parsed = SigmaBoolean::sigma_parse_bytes(&bytes).unwrap();
             assert_eq!(parsed.sigma_serialize_bytes().unwrap(), bytes);
         }
+    }
+
+    #[test]
+    fn no_children_parse() {
+        // SANTA `conjecture_bounds` #6: `CTHRESHOLD(0, [])` passes the require
+        let bytes = cthreshold_bytes(&[0x00], &[0x00], 0);
+        let parsed = SigmaBoolean::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(
+            &parsed,
+            SigmaBoolean::SigmaConjecture(SigmaConjecture::Cthreshold(ct))
+                if ct.k == 0 && ct.children.as_slice().is_empty()
+        ));
+        assert_eq!(parsed.sigma_serialize_bytes().unwrap(), bytes);
+        // k = 1 with no children fails it
+        assert_eq!(
+            SigmaBoolean::sigma_parse_bytes(&cthreshold_bytes(&[0x01], &[0x00], 0)),
+            Err(SigmaParsingError::CthresholdOutOfBounds(1, 0))
+        );
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_roundtrip_without_children() {
+        // the JSON form is sigma-rust's own: the JVM node's decoder reads ProveDlog only
+        let bytes = cthreshold_bytes(&[0x00], &[0x00], 0);
+        let parsed = SigmaBoolean::sigma_parse_bytes(&bytes).unwrap();
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(json, r#"{"op":"152","k":0,"args":[]}"#);
+        assert_eq!(serde_json::from_str::<SigmaBoolean>(&json).unwrap(), parsed);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use core::fmt::Formatter;
 use ergo_chain_types::EcPoint;
 
 extern crate derive_more;
-use bounded_vec::BoundedVec;
+use bounded_vec::EmptyBoundedVec;
 use derive_more::From;
 use derive_more::Into;
 use derive_more::TryInto;
@@ -27,8 +27,9 @@ pub mod cand;
 pub mod cor;
 pub mod cthreshold;
 
-/// Sigma conjecture items type with bounds check (1..=255)
-pub type SigmaConjectureItems<T> = BoundedVec<T, 1, 255>;
+/// The children of a CTHRESHOLD: none to 255 of them, as sigmastate's constructor requires
+/// (`SigmaBoolean.scala:223`). CAND and COR hold a plain `Vec`.
+pub type CthresholdItems<T> = EmptyBoundedVec<T, 255>;
 
 /// Construct a new SigmaBoolean value representing public key of discrete logarithm signature protocol.
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -186,9 +187,9 @@ impl SigmaBoolean {
             SigmaBoolean::ProofOfKnowledge(SigmaProofOfKnowledgeTree::ProveDhTuple(_)) => 4,
             SigmaBoolean::SigmaConjecture(c) => {
                 let children = match c {
-                    SigmaConjecture::Cand(cand) => &cand.items,
-                    SigmaConjecture::Cor(cor) => &cor.items,
-                    SigmaConjecture::Cthreshold(ct) => &ct.children,
+                    SigmaConjecture::Cand(cand) => cand.items.as_slice(),
+                    SigmaConjecture::Cor(cor) => cor.items.as_slice(),
+                    SigmaConjecture::Cthreshold(ct) => ct.children.as_slice(),
                 };
                 1 + children.iter().map(|ch| ch.size()).sum::<usize>()
             }
@@ -409,14 +410,10 @@ mod arbitrary {
                 .prop_recursive(1, 8, 4, |elem| {
                     prop_oneof![
                         vec(elem.clone(), 2..=4)
-                            .prop_map(|elems| Cand {
-                                items: elems.try_into().unwrap()
-                            })
+                            .prop_map(|items| Cand { items })
                             .prop_map_into(),
                         vec(elem.clone(), 2..=4)
-                            .prop_map(|elems| Cor {
-                                items: elems.try_into().unwrap()
-                            })
+                            .prop_map(|items| Cor { items })
                             .prop_map_into(),
                         vec(elem, 2..=5)
                             .prop_map(|elems| Cthreshold {
@@ -481,9 +478,7 @@ mod tests {
             items: vec![
                 SigmaBoolean::TrivialProp(true),
                 SigmaBoolean::TrivialProp(false),
-            ]
-            .try_into()
-            .unwrap(),
+            ],
         }));
         assert_eq!(cand.size(), 3);
     }

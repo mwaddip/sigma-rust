@@ -389,14 +389,14 @@ mod arbitrary {
                 challenge: _,
                 children,
             }) => Cand {
-                items: children.mapped_ref(extract_sigma_boolean),
+                items: children.iter().map(extract_sigma_boolean).collect(),
             }
             .into(),
             UncheckedTree::UncheckedConjecture(UncheckedConjecture::CorUnchecked {
                 challenge: _,
                 children,
             }) => Cor {
-                items: children.mapped_ref(extract_sigma_boolean),
+                items: children.iter().map(extract_sigma_boolean).collect(),
             }
             .into(),
             UncheckedTree::UncheckedConjecture(UncheckedConjecture::CthresholdUnchecked {
@@ -405,7 +405,12 @@ mod arbitrary {
                 polynomial: _,
                 challenge: _,
             }) => Cthreshold {
-                children: children.mapped_ref(extract_sigma_boolean),
+                children: children
+                    .iter()
+                    .map(extract_sigma_boolean)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
                 k: *k,
             }
             .into(),

@@ -17,7 +17,6 @@ use ergotree_ir::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
 use ergotree_ir::sigma_protocol::sigma_boolean::ProveDhTuple;
 use ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaBoolean;
-use ergotree_ir::sigma_protocol::sigma_boolean::SigmaConjectureItems;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProofOfKnowledgeTree;
 use gf2_192::gf2_192poly::Gf2_192Poly;
 
@@ -205,15 +204,15 @@ pub(crate) enum UnprovenConjecture {
 }
 
 impl UnprovenConjecture {
-    pub(crate) fn children(&self) -> SigmaConjectureItems<ProofTree> {
+    pub(crate) fn children(&self) -> &[ProofTree] {
         match self {
-            UnprovenConjecture::CandUnproven(cand) => cand.children.clone(),
-            UnprovenConjecture::CorUnproven(cor) => cor.children.clone(),
-            UnprovenConjecture::CthresholdUnproven(ct) => ct.children.clone(),
+            UnprovenConjecture::CandUnproven(cand) => &cand.children,
+            UnprovenConjecture::CorUnproven(cor) => &cor.children,
+            UnprovenConjecture::CthresholdUnproven(ct) => &ct.children,
         }
     }
 
-    pub(crate) fn with_children(self, children: SigmaConjectureItems<ProofTree>) -> Self {
+    pub(crate) fn with_children(self, children: Vec<ProofTree>) -> Self {
         match self {
             UnprovenConjecture::CandUnproven(cand) => cand.with_children(children).into(),
             UnprovenConjecture::CorUnproven(cor) => cor.with_children(children).into(),
@@ -283,12 +282,18 @@ impl ProofTreeConjecture for UnprovenConjecture {
         }
     }
 
-    fn children(&self) -> SigmaConjectureItems<ProofTree> {
+    fn threshold_k(&self) -> Option<u8> {
         match self {
-            UnprovenConjecture::CandUnproven(cand) => cand.children.clone(),
-            UnprovenConjecture::CorUnproven(cor) => cor.children.clone(),
-            UnprovenConjecture::CthresholdUnproven(ct) => ct.children.clone(),
+            UnprovenConjecture::CthresholdUnproven(ct) => Some(ct.k),
+            _ => None,
         }
+    }
+
+    fn child_kinds(&self) -> Vec<ProofTreeKind<'_>> {
+        self.children()
+            .iter()
+            .map(ProofTree::as_tree_kind)
+            .collect()
     }
 }
 
@@ -433,7 +438,7 @@ pub(crate) struct CandUnproven {
     pub(crate) proposition: Cand,
     pub(crate) challenge_opt: Option<Challenge>,
     pub(crate) simulated: bool,
-    pub(crate) children: SigmaConjectureItems<ProofTree>,
+    pub(crate) children: Vec<ProofTree>,
     pub(crate) position: NodePosition,
 }
 
@@ -460,7 +465,7 @@ impl CandUnproven {
         Self { simulated, ..self }
     }
 
-    pub(crate) fn with_children(self, children: SigmaConjectureItems<ProofTree>) -> Self {
+    pub(crate) fn with_children(self, children: Vec<ProofTree>) -> Self {
         CandUnproven { children, ..self }
     }
 }
@@ -470,7 +475,7 @@ pub(crate) struct CorUnproven {
     pub(crate) proposition: Cor,
     pub(crate) challenge_opt: Option<Challenge>,
     pub(crate) simulated: bool,
-    pub(crate) children: SigmaConjectureItems<ProofTree>,
+    pub(crate) children: Vec<ProofTree>,
     pub(crate) position: NodePosition,
 }
 
@@ -497,7 +502,7 @@ impl CorUnproven {
         Self { simulated, ..self }
     }
 
-    pub(crate) fn with_children(self, children: SigmaConjectureItems<ProofTree>) -> Self {
+    pub(crate) fn with_children(self, children: Vec<ProofTree>) -> Self {
         Self { children, ..self }
     }
 }
@@ -506,7 +511,7 @@ impl CorUnproven {
 pub(crate) struct CthresholdUnproven {
     pub(crate) proposition: Cthreshold,
     pub(crate) k: u8,
-    pub(crate) children: SigmaConjectureItems<ProofTree>,
+    pub(crate) children: Vec<ProofTree>,
     polinomial_opt: Option<Gf2_192Poly>,
     pub(crate) challenge_opt: Option<Challenge>,
     pub(crate) simulated: bool,
@@ -517,7 +522,7 @@ impl CthresholdUnproven {
     pub(crate) fn new(
         proposition: Cthreshold,
         k: u8,
-        children: SigmaConjectureItems<ProofTree>,
+        children: Vec<ProofTree>,
         challenge_opt: Option<Challenge>,
         simulated: bool,
         position: NodePosition,
@@ -533,14 +538,21 @@ impl CthresholdUnproven {
         }
     }
 
-    pub(crate) fn with_children(self, children: SigmaConjectureItems<ProofTree>) -> Self {
+    pub(crate) fn with_children(self, children: Vec<ProofTree>) -> Self {
         Self { children, ..self }
     }
 
     #[allow(clippy::panic)]
     pub(crate) fn with_polynomial(self, q: Gf2_192Poly) -> Result<Self, ProverError> {
         let bytes = q.to_bytes();
-        if bytes.len() == (self.proposition.children.len() - self.k as usize) * SOUNDNESS_BYTES {
+        // `k <= n` holds for a CTHRESHOLD read off the wire, but its fields are public
+        let n_coeff = self
+            .proposition
+            .children
+            .as_slice()
+            .len()
+            .checked_sub(self.k as usize);
+        if n_coeff.map(|n| n * SOUNDNESS_BYTES) == Some(bytes.len()) {
             Ok(Self {
                 polinomial_opt: Some(q),
                 ..self

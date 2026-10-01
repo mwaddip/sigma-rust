@@ -114,14 +114,15 @@ pub fn verify_signature(
 fn check_commitments(sp: UncheckedTree, message: &[u8]) -> Result<bool, VerifierError> {
     // Perform Verifier Step 4
     let new_root = compute_commitments(sp);
-    let mut s = fiat_shamir_tree_to_bytes(&new_root.clone().into())?;
+    let root_challenge = new_root.challenge();
+    let mut s = fiat_shamir_tree_to_bytes(&new_root.into())?;
     s.extend_from_slice(message);
     // Verifier Steps 5-6: Convert the tree to a string `s` for input to the Fiat-Shamir hash function,
     // using the same conversion as the prover in 7
     // Accept the proof if the challenge at the root of the tree is equal to the Fiat-Shamir hash of `s`
     // (and, if applicable,  the associated data). Reject otherwise.
     let expected_challenge = fiat_shamir_hash_fn(s.as_slice());
-    Ok(new_root.challenge() == expected_challenge.into())
+    Ok(root_challenge == expected_challenge.into())
 }
 
 /// Verifier Step 4: For every leaf node, compute the commitment a from the challenge e and response $z$,
@@ -155,10 +156,9 @@ pub fn compute_commitments(sp: UncheckedTree) -> UncheckedTree {
                 .into()
             }
         },
-        UncheckedTree::UncheckedConjecture(conj) => conj
-            .clone()
-            .with_children(conj.children_ust().mapped(compute_commitments))
-            .into(),
+        // sigmastate leaves an internal node as it is (`Interpreter.scala:407-409`): its children
+        // are mapped where they are, not copied
+        UncheckedTree::UncheckedConjecture(conj) => conj.map_children(compute_commitments).into(),
     }
 }
 
@@ -172,11 +172,12 @@ impl Verifier for TestVerifier {}
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
 mod tests {
-    use core::convert::TryFrom;
+    use core::convert::{TryFrom, TryInto};
 
     use crate::sigma_protocol::private_input::{DhTupleProverInput, DlogProverInput, PrivateInput};
     use crate::sigma_protocol::prover::hint::HintsBag;
     use crate::sigma_protocol::prover::{Prover, TestProver};
+    use crate::sigma_protocol::SOUNDNESS_BYTES;
 
     use super::*;
     use ergotree_ir::mir::atleast::Atleast;
@@ -185,6 +186,7 @@ mod tests {
     use ergotree_ir::mir::sigma_and::SigmaAnd;
     use ergotree_ir::mir::sigma_or::SigmaOr;
     use ergotree_ir::mir::value::CollKind;
+    use ergotree_ir::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
     use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
     use ergotree_ir::types::stype::SType;
     use proptest::collection::vec;
@@ -441,5 +443,145 @@ mod tests {
                 message.as_slice());
             prop_assert_eq!(ver_res.unwrap().result, true)
         }
+    }
+
+    #[test]
+    fn a_threshold_proof_cut_inside_its_coefficients_is_false() {
+        // sigmastate reads what is left of the coefficients and of each response
+        // (`SigSerializer.scala:156-163`), and the commitments computed from them do not hash
+        // to the root challenge: the proof is false, and reading it is no error
+        let secret = DlogProverInput::random();
+        let threshold = SigmaBoolean::from(Cthreshold {
+            k: 1,
+            children: vec![
+                secret.public_image().into(),
+                DlogProverInput::random().public_image().into(),
+            ]
+            .try_into()
+            .unwrap(),
+        });
+        let message = b"a message";
+        let prover = TestProver {
+            secrets: vec![secret.into()],
+        };
+        let proof = prover
+            .generate_proof(threshold.clone(), message, &HintsBag::empty())
+            .unwrap()
+            .to_bytes();
+        assert!(verify_signature(threshold.clone(), message, &proof).unwrap());
+        // the root challenge, and 10 of the 24 bytes of the one coefficient
+        let cut = &proof[..SOUNDNESS_BYTES + 10];
+        assert!(!verify_signature(threshold, message, cut).unwrap());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod empty_conjecture_tests {
+    //! JVM parity: a conjecture constant is verified as it is. `CAND()`'s proof is its root
+    //! challenge alone, since every child takes that challenge (`SigSerializer.scala:210-217`).
+    //! `COR()` never verifies: its last child is `children(-1)`, which throws (`:228-234`), and
+    //! `verifySignature` returns false for any exception (`Interpreter.scala:462-482`).
+    use super::*;
+    use crate::sigma_protocol::SOUNDNESS_BYTES;
+    use alloc::vec::Vec;
+    use ergotree_ir::serialization::SigmaSerializable;
+    use ergotree_ir::sigma_protocol::sigma_boolean::cand::Cand;
+
+    const MESSAGE: &[u8] = b"a message";
+
+    /// The challenge that a proof of a tree without leaves carries: the hash of the tree's
+    /// Fiat-Shamir bytes and the message (`Interpreter.scala:388-400`). A conjecture's bytes are
+    /// `00`, its type, `k` for a threshold, and its child count as a Short
+    /// (`UnprovenTree.scala:268-281`).
+    fn root_challenge(tree: &[u8]) -> Vec<u8> {
+        let hash: [u8; SOUNDNESS_BYTES] = fiat_shamir_hash_fn(&[tree, MESSAGE].concat()).into();
+        hash.to_vec()
+    }
+
+    #[test]
+    fn cand_without_children_verifies_with_its_root_challenge() {
+        let cand = SigmaBoolean::sigma_parse_bytes(&[0x96, 0x00]).unwrap();
+        let proof = root_challenge(&[0x00, 0x00, 0x00, 0x00]);
+        assert!(verify_signature(cand.clone(), MESSAGE, &proof).unwrap());
+        assert!(!verify_signature(cand.clone(), MESSAGE, &[]).unwrap());
+        let mut wrong = proof;
+        wrong[0] ^= 1;
+        assert!(!verify_signature(cand, MESSAGE, &wrong).unwrap());
+    }
+
+    #[test]
+    fn cor_without_children_never_verifies() {
+        let cor = SigmaBoolean::sigma_parse_bytes(&[0x97, 0x00]).unwrap();
+        assert!(!verify_signature(cor.clone(), MESSAGE, &[]).unwrap());
+        // the proof that verifies `CAND()`, made for an OR node
+        let forged = root_challenge(&[0x00, 0x01, 0x00, 0x00]);
+        assert!(!matches!(verify_signature(cor, MESSAGE, &forged), Ok(true)));
+    }
+
+    #[test]
+    fn a_child_count_above_32767_is_hashed_as_sigmastate_s_short() {
+        // By source, no SANTA vector: `FiatShamirTree.toBytes` writes a conjecture's child count
+        // as `children.length.toShort` (`UnprovenTree.scala:279-280`), which wraps above 32767.
+        // `CAND(40000 × CAND())` is `96`, the count as a VLQ, and 40000 × `96 00`. In the
+        // Fiat-Shamir bytes 40000 is `9c 40`.
+        const N: usize = 40000;
+        let cand_bytes = [&[0x96, 0xc0, 0xb8, 0x02][..], &[0x96, 0x00].repeat(N)].concat();
+        let cand = SigmaBoolean::sigma_parse_bytes(&cand_bytes).unwrap();
+        let tree = [
+            &[0x00, 0x00, 0x9c, 0x40][..],
+            &[0x00, 0x00, 0x00, 0x00].repeat(N),
+        ]
+        .concat();
+        assert!(verify_signature(cand, MESSAGE, &root_challenge(&tree)).unwrap());
+    }
+
+    #[test]
+    fn a_child_count_above_65535_is_hashed_as_sigmastate_s_short() {
+        // By source as well. No such CAND is read off the wire, where the count is a
+        // `getUShort`, but a `SigmaAnd` node of up to 100000 items reduces to one.
+        // `children.length.toShort` keeps the low 16 bits: 70000 is `11 70`.
+        const N: usize = 70000;
+        let empty = SigmaBoolean::sigma_parse_bytes(&[0x96, 0x00]).unwrap();
+        let cand = SigmaBoolean::from(Cand {
+            items: vec![empty; N],
+        });
+        let tree = [
+            &[0x00, 0x00, 0x11, 0x70][..],
+            &[0x00, 0x00, 0x00, 0x00].repeat(N),
+        ]
+        .concat();
+        assert!(verify_signature(cand, MESSAGE, &root_challenge(&tree)).unwrap());
+    }
+
+    #[test]
+    fn a_threshold_proof_may_end_before_its_coefficients() {
+        // By source, no SANTA vector. `CTHRESHOLD(0, [CAND()])` asks a proof for one
+        // coefficient, which sigmastate reads with `getBytesUnsafe`: the bytes that are left
+        // (`SigSerializer.scala:250-252`, `CoreByteReader.scala:94-98`). With none the
+        // polynomial is the root challenge alone (`GF2_192_Poly.scala:50-58`), the child takes
+        // it, and the tree hashes as it does with the coefficient.
+        let threshold = SigmaBoolean::sigma_parse_bytes(&[0x98, 0x00, 0x01, 0x96, 0x00]).unwrap();
+        let proof = root_challenge(&[0x00, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+        assert!(verify_signature(threshold, MESSAGE, &proof).unwrap());
+    }
+
+    #[test]
+    fn an_or_s_missing_challenge_is_not_read_as_zeros() {
+        // sigmastate reads a child's challenge the same way, and then xors it into the 24
+        // bytes of the node's own (`SigSerializer.scala:227-233`): a challenge that is not all
+        // there throws in `Helpers.xorU` (`Helpers.scala:22-29`), which is false
+        // (`Interpreter.scala:462-482`).
+        let or = SigmaBoolean::sigma_parse_bytes(&[0x97, 0x02, 0x96, 0x00, 0x96, 0x00]).unwrap();
+        let root = root_challenge(&[
+            0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        assert!(!matches!(
+            verify_signature(or.clone(), MESSAGE, &root),
+            Ok(true)
+        ));
+        // the root is right: with a challenge for the first child, whatever it is, it verifies
+        let whole = [root, vec![5u8; SOUNDNESS_BYTES]].concat();
+        assert!(verify_signature(or, MESSAGE, &whole).unwrap());
     }
 }
