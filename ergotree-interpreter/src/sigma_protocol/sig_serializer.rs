@@ -16,6 +16,7 @@ use crate::sigma_protocol::UncheckedSchnorr;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core3::io::Read;
 use ergotree_ir::serialization::sigma_byte_reader;
 use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
@@ -91,15 +92,13 @@ fn sig_write_bytes<W: SigmaByteWrite>(
             UncheckedConjecture::CthresholdUnchecked {
                 challenge: _,
                 children,
-                k,
+                k: _,
                 polynomial,
             } => {
+                // write the polynomial, except the zero-degree coefficient. sigmastate writes
+                // it whatever its degree (`SigSerializer.scala:94-97`): a tree read from a
+                // proof that ended inside its coefficients has fewer than `n - k` of them
                 let mut polynomial_bytes = polynomial.to_bytes();
-                assert_eq!(
-                    polynomial_bytes.len(),
-                    (children.len() - *k as usize) * SOUNDNESS_BYTES
-                );
-                // write the polynomial, except the zero-degree coefficient
                 w.write_all(polynomial_bytes.as_mut_slice())?;
                 for child in children {
                     sig_write_bytes(child, w, false)?;
@@ -231,8 +230,14 @@ fn parse_sig_compute_challenges_reader<R: SigmaByteRead>(
                     .checked_sub(ct.k as usize)
                     .ok_or_else(|| SigParsingError::CthresholdKAboveChildren(exp.clone()))?;
                 let buf_size = n_coeff * SOUNDNESS_BYTES;
-                let mut coeff_bytes = vec![0u8; buf_size];
-                r.read_exact(&mut coeff_bytes)
+                // sigmastate reads them with `getBytesUnsafe`: when the proof ends before them
+                // it takes the bytes that are left (`SigSerializer.scala:250-252`,
+                // `CoreByteReader.scala:94-98`), and the polynomial takes the coefficients that
+                // are whole (`GF2_192_Poly.scala:50-58`)
+                let mut coeff_bytes = Vec::with_capacity(buf_size);
+                r.by_ref()
+                    .take(buf_size as u64)
+                    .read_to_end(&mut coeff_bytes)
                     .map_err(|_| SigParsingError::CthresholdCoeffRead(exp.clone()))?;
                 let polynomial = gf2_192poly_from_byte_array(challenge.clone(), coeff_bytes)?;
 
@@ -313,12 +318,13 @@ mod test {
 
     use ergo_chain_types::ec_point::generator;
     use ergotree_ir::serialization::{
-        constant_store::ConstantStore, sigma_byte_reader::SigmaByteReader,
+        constant_store::ConstantStore, sigma_byte_reader::SigmaByteReader, SigmaSerializable,
     };
     use ergotree_ir::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
     use ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
     use k256::Scalar;
 
+    use super::gf2_192poly_from_byte_array;
     use super::parse_sig_compute_challenges;
     use super::read_scalar;
     use super::serialize_sig;
@@ -369,5 +375,53 @@ mod test {
         });
         let proof = vec![0u8; SOUNDNESS_BYTES + GROUP_SIZE];
         assert!(parse_sig_compute_challenges(&threshold, proof).is_err());
+    }
+
+    #[test]
+    fn a_threshold_takes_the_whole_coefficients_that_are_left() {
+        // sigmastate reads the `n - k` coefficients with `getBytesUnsafe`, which gives the bytes
+        // that are left when the proof ends before them (`SigSerializer.scala:250-252`,
+        // `CoreByteReader.scala:94-98`), and its polynomial takes the coefficients that are
+        // whole (`GF2_192_Poly.scala:50-58`). `CTHRESHOLD(0, [CAND(), CAND()])` asks for two:
+        // this proof is the challenge, one coefficient, and 5 bytes of the second.
+        let threshold =
+            SigmaBoolean::sigma_parse_bytes(&[0x98, 0x00, 0x02, 0x96, 0x00, 0x96, 0x00]).unwrap();
+        let coefficient = [9u8; SOUNDNESS_BYTES];
+        let proof = [&[7u8; SOUNDNESS_BYTES][..], &coefficient, &[1u8; 5]].concat();
+        let polynomial = match parse_sig_compute_challenges(&threshold, proof).unwrap() {
+            UncheckedTree::UncheckedConjecture(UncheckedConjecture::CthresholdUnchecked {
+                polynomial,
+                ..
+            }) => Some(polynomial),
+            _ => None,
+        };
+        assert_eq!(polynomial.unwrap().to_bytes(), coefficient);
+    }
+
+    #[test]
+    fn a_threshold_s_polynomial_is_written_as_it_is() {
+        // sigmastate writes `polynomial.toByteArray(false)`, whatever its degree
+        // (`SigSerializer.scala:94-97`). A tree read from a proof that ended inside its
+        // coefficients has fewer than `n - k` of them.
+        let challenge = Challenge::from(FiatShamirHash(Box::new([7u8; SOUNDNESS_BYTES])));
+        let child = || -> UncheckedTree {
+            UncheckedConjecture::CandUnchecked {
+                challenge: challenge.clone(),
+                children: vec![],
+            }
+            .into()
+        };
+        let tree: UncheckedTree = UncheckedConjecture::CthresholdUnchecked {
+            challenge: challenge.clone(),
+            children: vec![child(), child()],
+            k: 0,
+            polynomial: gf2_192poly_from_byte_array(challenge.clone(), vec![9u8; SOUNDNESS_BYTES])
+                .unwrap(),
+        }
+        .into();
+        assert_eq!(
+            serialize_sig(tree).to_bytes(),
+            [[7u8; SOUNDNESS_BYTES], [9u8; SOUNDNESS_BYTES]].concat()
+        );
     }
 }

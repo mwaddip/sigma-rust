@@ -172,11 +172,12 @@ impl Verifier for TestVerifier {}
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
 mod tests {
-    use core::convert::TryFrom;
+    use core::convert::{TryFrom, TryInto};
 
     use crate::sigma_protocol::private_input::{DhTupleProverInput, DlogProverInput, PrivateInput};
     use crate::sigma_protocol::prover::hint::HintsBag;
     use crate::sigma_protocol::prover::{Prover, TestProver};
+    use crate::sigma_protocol::SOUNDNESS_BYTES;
 
     use super::*;
     use ergotree_ir::mir::atleast::Atleast;
@@ -185,6 +186,7 @@ mod tests {
     use ergotree_ir::mir::sigma_and::SigmaAnd;
     use ergotree_ir::mir::sigma_or::SigmaOr;
     use ergotree_ir::mir::value::CollKind;
+    use ergotree_ir::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
     use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
     use ergotree_ir::types::stype::SType;
     use proptest::collection::vec;
@@ -442,6 +444,35 @@ mod tests {
             prop_assert_eq!(ver_res.unwrap().result, true)
         }
     }
+
+    #[test]
+    fn a_threshold_proof_cut_inside_its_coefficients_is_false() {
+        // sigmastate reads what is left of the coefficients and of each response
+        // (`SigSerializer.scala:156-163`), and the commitments computed from them do not hash
+        // to the root challenge: the proof is false, and reading it is no error
+        let secret = DlogProverInput::random();
+        let threshold = SigmaBoolean::from(Cthreshold {
+            k: 1,
+            children: vec![
+                secret.public_image().into(),
+                DlogProverInput::random().public_image().into(),
+            ]
+            .try_into()
+            .unwrap(),
+        });
+        let message = b"a message";
+        let prover = TestProver {
+            secrets: vec![secret.into()],
+        };
+        let proof = prover
+            .generate_proof(threshold.clone(), message, &HintsBag::empty())
+            .unwrap()
+            .to_bytes();
+        assert!(verify_signature(threshold.clone(), message, &proof).unwrap());
+        // the root challenge, and 10 of the 24 bytes of the one coefficient
+        let cut = &proof[..SOUNDNESS_BYTES + 10];
+        assert!(!verify_signature(threshold, message, cut).unwrap());
+    }
 }
 
 #[cfg(test)]
@@ -502,5 +533,36 @@ mod empty_conjecture_tests {
         ]
         .concat();
         assert!(verify_signature(cand, MESSAGE, &root_challenge(&tree)).unwrap());
+    }
+
+    #[test]
+    fn a_threshold_proof_may_end_before_its_coefficients() {
+        // By source, no SANTA vector. `CTHRESHOLD(0, [CAND()])` asks a proof for one
+        // coefficient, which sigmastate reads with `getBytesUnsafe`: the bytes that are left
+        // (`SigSerializer.scala:250-252`, `CoreByteReader.scala:94-98`). With none the
+        // polynomial is the root challenge alone (`GF2_192_Poly.scala:50-58`), the child takes
+        // it, and the tree hashes as it does with the coefficient.
+        let threshold = SigmaBoolean::sigma_parse_bytes(&[0x98, 0x00, 0x01, 0x96, 0x00]).unwrap();
+        let proof = root_challenge(&[0x00, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+        assert!(verify_signature(threshold, MESSAGE, &proof).unwrap());
+    }
+
+    #[test]
+    fn an_or_s_missing_challenge_is_not_read_as_zeros() {
+        // sigmastate reads a child's challenge the same way, and then xors it into the 24
+        // bytes of the node's own (`SigSerializer.scala:227-233`): a challenge that is not all
+        // there throws in `Helpers.xorU` (`Helpers.scala:22-29`), which is false
+        // (`Interpreter.scala:462-482`).
+        let or = SigmaBoolean::sigma_parse_bytes(&[0x97, 0x02, 0x96, 0x00, 0x96, 0x00]).unwrap();
+        let root = root_challenge(&[
+            0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        assert!(!matches!(
+            verify_signature(or.clone(), MESSAGE, &root),
+            Ok(true)
+        ));
+        // the root is right: with a challenge for the first child, whatever it is, it verifies
+        let whole = [root, vec![5u8; SOUNDNESS_BYTES]].concat();
+        assert!(verify_signature(or, MESSAGE, &whole).unwrap());
     }
 }
