@@ -157,7 +157,13 @@ pub fn compute_commitments(sp: UncheckedTree) -> UncheckedTree {
         },
         UncheckedTree::UncheckedConjecture(conj) => conj
             .clone()
-            .with_children(conj.children_ust().mapped(compute_commitments))
+            .with_children(
+                conj.children_ust()
+                    .iter()
+                    .cloned()
+                    .map(compute_commitments)
+                    .collect(),
+            )
             .into(),
     }
 }

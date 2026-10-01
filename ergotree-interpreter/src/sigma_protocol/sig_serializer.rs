@@ -1,7 +1,5 @@
 //! Serialization of proof tree signatures
 
-use core::convert::TryInto;
-
 use super::gf2_192::gf2_192poly_from_byte_array;
 use super::prover::ProofBytes;
 use super::unchecked_tree::UncheckedConjecture;
@@ -80,12 +78,14 @@ fn sig_write_bytes<W: SigmaByteWrite>(
                 challenge: _,
                 children,
             } => {
-                // don't write last child's challenge -- it's computed by the verifier via XOR
-                let (last, elements) = children.split_last();
-                for child in elements {
-                    sig_write_bytes(child, w, true)?;
+                // don't write last child's challenge -- it's computed by the verifier via XOR.
+                // An OR without children, which no prover makes, has nothing more to write.
+                if let Some((last, elements)) = children.split_last() {
+                    for child in elements {
+                        sig_write_bytes(child, w, true)?;
+                    }
+                    sig_write_bytes(last, w, false)?;
                 }
-                sig_write_bytes(last, w, false)?;
                 Ok(())
             }
             UncheckedConjecture::CthresholdUnchecked {
@@ -175,9 +175,11 @@ fn parse_sig_compute_challenges_reader<R: SigmaByteRead>(
             SigmaConjecture::Cand(cand) => {
                 // Verifier Step 2: If the node is AND, then all of its children get e_0 as
                 // the challenge
-                let children = cand.items.try_mapped_ref(|it| {
-                    parse_sig_compute_challenges_reader(it, r, Some(challenge.clone()))
-                })?;
+                let children = cand
+                    .items
+                    .iter()
+                    .map(|it| parse_sig_compute_challenges_reader(it, r, Some(challenge.clone())))
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(UncheckedConjecture::CandUnchecked {
                     challenge,
                     children,
@@ -205,10 +207,9 @@ fn parse_sig_compute_challenges_reader<R: SigmaByteRead>(
                     parse_sig_compute_challenges_reader(last, r, Some(xored_challenge))?;
                 children.push(last_child);
 
-                #[allow(clippy::unwrap_used)] // since quantity is preserved unwrap is safe here
                 Ok(UncheckedConjecture::CorUnchecked {
                     challenge,
-                    children: children.try_into().unwrap(),
+                    children,
                 }
                 .into())
             }
@@ -224,17 +225,17 @@ fn parse_sig_compute_challenges_reader<R: SigmaByteRead>(
                     .map_err(|_| SigParsingError::CthresholdCoeffRead(exp.clone()))?;
                 let polynomial = gf2_192poly_from_byte_array(challenge.clone(), coeff_bytes)?;
 
-                let children =
-                    ct.children
-                        .clone()
-                        .enumerated()
-                        .try_mapped_ref(|(idx, child)| {
-                            // Note the cast to `u8` is safe since `ct.children` is of type
-                            // `SigmaConjectureItems<_>` which is a `BoundedVec<_, 2, 255>`.
-                            let one_based_index = (idx + 1) as u8;
-                            let ch = polynomial.evaluate(one_based_index).into();
-                            parse_sig_compute_challenges_reader(child, r, Some(ch))
-                        })?;
+                let children = ct
+                    .children
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, child)| {
+                        // The cast is safe: a CTHRESHOLD holds at most 255 children
+                        let one_based_index = (idx + 1) as u8;
+                        let ch = polynomial.evaluate(one_based_index).into();
+                        parse_sig_compute_challenges_reader(child, r, Some(ch))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(UncheckedConjecture::CthresholdUnchecked {
                     challenge,
                     children,
@@ -289,6 +290,7 @@ pub enum SigParsingError {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod test {
+    use alloc::boxed::Box;
     use core3::io::Cursor;
 
     use ergotree_ir::serialization::{
@@ -297,6 +299,12 @@ mod test {
     use k256::Scalar;
 
     use super::read_scalar;
+    use super::serialize_sig;
+    use super::Challenge;
+    use super::UncheckedConjecture;
+    use super::UncheckedTree;
+    use super::SOUNDNESS_BYTES;
+    use crate::sigma_protocol::fiat_shamir::FiatShamirHash;
 
     // Test scalar parsing and also test handling parsing when there are less than GROUP_SIZE bytes in the buffer
     #[test]
@@ -310,5 +318,18 @@ mod test {
             let scalar = read_scalar(&mut sr).unwrap();
             assert_eq!(*scalar.as_scalar_ref(), Scalar::ONE);
         }
+    }
+
+    #[test]
+    fn an_or_without_children_is_written_as_its_challenge_alone() {
+        // No prover makes one: `COR()` is never real. But the tree's children are a `Vec`, and
+        // its JSON form is an infallible conversion, so the writer takes it.
+        let challenge = Challenge::from(FiatShamirHash(Box::new([7u8; SOUNDNESS_BYTES])));
+        let tree: UncheckedTree = UncheckedConjecture::CorUnchecked {
+            challenge,
+            children: vec![],
+        }
+        .into();
+        assert_eq!(serialize_sig(tree).to_bytes(), vec![7u8; SOUNDNESS_BYTES]);
     }
 }
