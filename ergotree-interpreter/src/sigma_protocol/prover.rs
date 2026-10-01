@@ -558,7 +558,6 @@ fn step4_simulated_or_conj(cor: CorUnproven) -> Result<Option<ProofTree>, Prover
             .with_challenge(xored_challenge);
         let mut new_children = vec![head];
         new_children.append(&mut tail);
-        #[allow(clippy::unwrap_used)] // since quantity is preserved unwrap is safe here
         Ok(Some(
             CorUnproven {
                 children: new_children

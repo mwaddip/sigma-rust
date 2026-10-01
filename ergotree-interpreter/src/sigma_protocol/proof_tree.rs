@@ -153,10 +153,9 @@ pub(crate) fn rewrite_bu<F>(tree: ProofTree, f: &F) -> Result<ProofTree, ProverE
 where
     F: Fn(&ProofTree) -> Result<Option<ProofTree>, ProverError>,
 {
-    let cast_to_ust = |children: &[ProofTree]| {
+    let cast_to_ust = |children: Vec<ProofTree>| {
         children
-            .iter()
-            .cloned()
+            .into_iter()
             .map(|c| {
                 if let ProofTree::UncheckedTree(ust) = c {
                     Ok(ust)
@@ -223,7 +222,7 @@ where
                         .cloned()
                         .map(|c| rewrite_bu(c.into(), f))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let casted_children = cast_to_ust(&rewritten_children)?;
+                    let casted_children = cast_to_ust(rewritten_children)?;
                     UncheckedConjecture::CandUnchecked {
                         children: casted_children,
                         challenge: challenge.clone(),
@@ -239,7 +238,7 @@ where
                         .cloned()
                         .map(|c| rewrite_bu(c.into(), f))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let casted_children = cast_to_ust(&rewritten_children)?;
+                    let casted_children = cast_to_ust(rewritten_children)?;
                     UncheckedConjecture::CorUnchecked {
                         children: casted_children,
                         challenge: challenge.clone(),
@@ -257,7 +256,7 @@ where
                         .cloned()
                         .map(|c| rewrite_bu(c.into(), f))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let casted_children = cast_to_ust(&rewritten_children)?;
+                    let casted_children = cast_to_ust(rewritten_children)?;
                     UncheckedConjecture::CthresholdUnchecked {
                         children: casted_children,
                         challenge: challenge.clone(),
@@ -278,10 +277,9 @@ pub(crate) fn rewrite_td<F>(tree: ProofTree, f: &F) -> Result<ProofTree, ProverE
 where
     F: Fn(&ProofTree) -> Result<Option<ProofTree>, ProverError>,
 {
-    let cast_to_ust = |children: &[ProofTree]| {
+    let cast_to_ust = |children: Vec<ProofTree>| {
         children
-            .iter()
-            .cloned()
+            .into_iter()
             .map(|c| {
                 if let ProofTree::UncheckedTree(ust) = c {
                     Ok(ust)
@@ -349,7 +347,7 @@ where
                         .cloned()
                         .map(|c| rewrite_td(c.into(), f))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let casted_children = cast_to_ust(&rewritten_children)?;
+                    let casted_children = cast_to_ust(rewritten_children)?;
                     UncheckedConjecture::CandUnchecked {
                         children: casted_children,
                         challenge: challenge.clone(),
@@ -365,7 +363,7 @@ where
                         .cloned()
                         .map(|c| rewrite_td(c.into(), f))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let casted_children = cast_to_ust(&rewritten_children)?;
+                    let casted_children = cast_to_ust(rewritten_children)?;
                     UncheckedConjecture::CorUnchecked {
                         children: casted_children,
                         challenge: challenge.clone(),
@@ -383,7 +381,7 @@ where
                         .cloned()
                         .map(|c| rewrite_td(c.into(), f))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let casted_children = cast_to_ust(&rewritten_children)?;
+                    let casted_children = cast_to_ust(rewritten_children)?;
                     UncheckedConjecture::CthresholdUnchecked {
                         children: casted_children,
                         challenge: challenge.clone(),

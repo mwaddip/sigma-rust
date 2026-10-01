@@ -67,8 +67,8 @@ impl Evaluable for Atleast {
                 SigmaBoolean::TrivialProp(false),
             ))));
         }
-        // Here `1 <= bound <= input.len()`. CTHRESHOLD permits at most 255 children
-        // (`input.try_into()` enforces `CthresholdItems`' bound), so `bound` fits in u8.
+        // Here `1 <= bound <= input.len()`, and the check above holds `input.len()` to 255, so
+        // `bound` fits in u8.
         let bound_u8: u8 = bound.try_into().map_err(|_| {
             EvalError::Misc(format!(
                 "Atleast: bound ({}) too large for input size {}",
