@@ -1607,7 +1607,9 @@ mod empty_conjecture_tests {
     //! with nothing but the root challenge. `COR()` has no real child, so its root is simulated
     //! and the prover gives up (sigmastate: "Tree root should be real").
     use super::*;
+    use crate::sigma_protocol::fiat_shamir::fiat_shamir_hash_fn;
     use crate::sigma_protocol::verifier::verify_signature;
+    use crate::sigma_protocol::SOUNDNESS_BYTES;
     use ergotree_ir::serialization::SigmaSerializable;
 
     const MESSAGE: &[u8] = b"a message";
@@ -1622,6 +1624,24 @@ mod empty_conjecture_tests {
         let bytes = Vec::<u8>::from(proof);
         assert_eq!(bytes.len(), 24);
         assert!(verify_signature(cand, MESSAGE, &bytes).unwrap());
+    }
+
+    #[test]
+    fn cthreshold_without_children_is_proven_by_its_root_challenge() {
+        // The proof is the challenge and `n - k` = 0 polynomial coefficients
+        // (`SigSerializer.scala:242-263`). The node's Fiat-Shamir bytes are `00`, the threshold
+        // type, `k`, and the child count as a Short (`UnprovenTree.scala:268-281`).
+        let cthreshold = SigmaBoolean::sigma_parse_bytes(&[0x98, 0x00, 0x00]).unwrap();
+        let prover = TestProver { secrets: vec![] };
+        let proof = prover
+            .generate_proof(cthreshold.clone(), MESSAGE, &HintsBag::empty())
+            .unwrap();
+        let bytes = Vec::<u8>::from(proof);
+        let root_challenge: [u8; SOUNDNESS_BYTES] =
+            fiat_shamir_hash_fn(&[&[0x00, 0x02, 0x00, 0x00, 0x00][..], MESSAGE].concat()).into();
+        assert_eq!(bytes, root_challenge.to_vec());
+        assert!(verify_signature(cthreshold.clone(), MESSAGE, &bytes).unwrap());
+        assert!(!verify_signature(cthreshold, MESSAGE, &[]).unwrap());
     }
 
     #[test]

@@ -68,7 +68,7 @@ impl Evaluable for Atleast {
             ))));
         }
         // Here `1 <= bound <= input.len()`. CTHRESHOLD permits at most 255 children
-        // (`input.try_into()` enforces the `BoundedVec<_, 1, 255>` bound), so `bound` fits in u8.
+        // (`input.try_into()` enforces `CthresholdItems`' bound), so `bound` fits in u8.
         let bound_u8: u8 = bound.try_into().map_err(|_| {
             EvalError::Misc(format!(
                 "Atleast: bound ({}) too large for input size {}",

@@ -18,7 +18,7 @@ use core::fmt::Formatter;
 use ergo_chain_types::EcPoint;
 
 extern crate derive_more;
-use bounded_vec::BoundedVec;
+use bounded_vec::EmptyBoundedVec;
 use derive_more::From;
 use derive_more::Into;
 use derive_more::TryInto;
@@ -27,8 +27,9 @@ pub mod cand;
 pub mod cor;
 pub mod cthreshold;
 
-/// Sigma conjecture items type with bounds check (1..=255)
-pub type SigmaConjectureItems<T> = BoundedVec<T, 1, 255>;
+/// The children of a CTHRESHOLD: none to 255 of them, as sigmastate's constructor requires
+/// (`SigmaBoolean.scala:223`). CAND and COR hold a plain `Vec`.
+pub type CthresholdItems<T> = EmptyBoundedVec<T, 255>;
 
 /// Construct a new SigmaBoolean value representing public key of discrete logarithm signature protocol.
 #[derive(PartialEq, Eq, Debug, Clone)]
