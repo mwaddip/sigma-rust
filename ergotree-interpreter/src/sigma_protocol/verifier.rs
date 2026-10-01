@@ -114,14 +114,15 @@ pub fn verify_signature(
 fn check_commitments(sp: UncheckedTree, message: &[u8]) -> Result<bool, VerifierError> {
     // Perform Verifier Step 4
     let new_root = compute_commitments(sp);
-    let mut s = fiat_shamir_tree_to_bytes(&new_root.clone().into())?;
+    let root_challenge = new_root.challenge();
+    let mut s = fiat_shamir_tree_to_bytes(&new_root.into())?;
     s.extend_from_slice(message);
     // Verifier Steps 5-6: Convert the tree to a string `s` for input to the Fiat-Shamir hash function,
     // using the same conversion as the prover in 7
     // Accept the proof if the challenge at the root of the tree is equal to the Fiat-Shamir hash of `s`
     // (and, if applicable,  the associated data). Reject otherwise.
     let expected_challenge = fiat_shamir_hash_fn(s.as_slice());
-    Ok(new_root.challenge() == expected_challenge.into())
+    Ok(root_challenge == expected_challenge.into())
 }
 
 /// Verifier Step 4: For every leaf node, compute the commitment a from the challenge e and response $z$,
@@ -155,16 +156,9 @@ pub fn compute_commitments(sp: UncheckedTree) -> UncheckedTree {
                 .into()
             }
         },
-        UncheckedTree::UncheckedConjecture(conj) => conj
-            .clone()
-            .with_children(
-                conj.children_ust()
-                    .iter()
-                    .cloned()
-                    .map(compute_commitments)
-                    .collect(),
-            )
-            .into(),
+        // sigmastate leaves an internal node as it is (`Interpreter.scala:407-409`): its children
+        // are mapped where they are, not copied
+        UncheckedTree::UncheckedConjecture(conj) => conj.map_children(compute_commitments).into(),
     }
 }
 

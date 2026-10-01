@@ -228,6 +228,37 @@ impl UncheckedConjecture {
             },
         }
     }
+    /// The same node over `f` of each child. Unlike [`Self::with_children`] over a copy of
+    /// [`Self::children_ust`], it copies no child.
+    pub(crate) fn map_children(self, f: impl FnMut(UncheckedTree) -> UncheckedTree) -> Self {
+        match self {
+            UncheckedConjecture::CandUnchecked {
+                challenge,
+                children,
+            } => UncheckedConjecture::CandUnchecked {
+                challenge,
+                children: children.into_iter().map(f).collect(),
+            },
+            UncheckedConjecture::CorUnchecked {
+                challenge,
+                children,
+            } => UncheckedConjecture::CorUnchecked {
+                challenge,
+                children: children.into_iter().map(f).collect(),
+            },
+            UncheckedConjecture::CthresholdUnchecked {
+                challenge,
+                children,
+                k,
+                polynomial,
+            } => UncheckedConjecture::CthresholdUnchecked {
+                challenge,
+                children: children.into_iter().map(f).collect(),
+                k,
+                polynomial,
+            },
+        }
+    }
     /// Get Children
     pub fn children_ust(&self) -> &[UncheckedTree] {
         match self {
