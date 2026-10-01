@@ -217,8 +217,13 @@ fn parse_sig_compute_challenges_reader<R: SigmaByteRead>(
                 // Verifier Step 2: If the node is THRESHOLD,
                 // evaluate the polynomial Q(x) at points 1, 2, ..., n to get challenges for child 1, 2, ..., n, respectively.
                 // Read the polynomial -- it has n-k coefficients
-                let n_children = ct.children.len();
-                let n_coeff = n_children - ct.k as usize;
+                // `k <= n` holds for a CTHRESHOLD read off the wire, but its fields are public
+                let n_coeff = ct
+                    .children
+                    .as_slice()
+                    .len()
+                    .checked_sub(ct.k as usize)
+                    .ok_or_else(|| SigParsingError::CthresholdKAboveChildren(exp.clone()))?;
                 let buf_size = n_coeff * SOUNDNESS_BYTES;
                 let mut coeff_bytes = vec![0u8; buf_size];
                 r.read_exact(&mut coeff_bytes)
@@ -283,6 +288,9 @@ pub enum SigParsingError {
     #[error("Cthreshold coeff reading erorr with exp: {0:?}")]
     CthresholdCoeffRead(SigmaBoolean),
 
+    #[error("Cthreshold with k above the number of its children, exp: {0:?}")]
+    CthresholdKAboveChildren(SigmaBoolean),
+
     #[error("Error: {0:?} for top level exp: {1:?}")]
     TopLevelExpWrap(Box<SigParsingError>, SigmaBoolean),
 }
@@ -291,18 +299,25 @@ pub enum SigParsingError {
 #[allow(clippy::unwrap_used)]
 mod test {
     use alloc::boxed::Box;
+    use core::convert::TryInto;
     use core3::io::Cursor;
 
+    use ergo_chain_types::ec_point::generator;
     use ergotree_ir::serialization::{
         constant_store::ConstantStore, sigma_byte_reader::SigmaByteReader,
     };
+    use ergotree_ir::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
+    use ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
     use k256::Scalar;
 
+    use super::parse_sig_compute_challenges;
     use super::read_scalar;
     use super::serialize_sig;
     use super::Challenge;
+    use super::SigmaBoolean;
     use super::UncheckedConjecture;
     use super::UncheckedTree;
+    use super::GROUP_SIZE;
     use super::SOUNDNESS_BYTES;
     use crate::sigma_protocol::fiat_shamir::FiatShamirHash;
 
@@ -331,5 +346,19 @@ mod test {
         }
         .into();
         assert_eq!(serialize_sig(tree).to_bytes(), vec![7u8; SOUNDNESS_BYTES]);
+    }
+
+    #[test]
+    fn a_threshold_with_k_above_its_children_is_refused() {
+        // sigmastate cannot build this one (`SigmaBoolean.scala:223`) and it is not readable
+        // off the wire, but the fields are public. The proof is long enough for a reader that
+        // takes `n - k` for 0: a challenge, then the child's response.
+        let pk = SigmaBoolean::from(ProveDlog::new(generator()));
+        let threshold = SigmaBoolean::from(Cthreshold {
+            k: 3,
+            children: vec![pk].try_into().unwrap(),
+        });
+        let proof = vec![0u8; SOUNDNESS_BYTES + GROUP_SIZE];
+        assert!(parse_sig_compute_challenges(&threshold, proof).is_err());
     }
 }

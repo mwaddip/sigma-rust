@@ -31,8 +31,9 @@ pub fn estimate_crypto_cost(prop: &SigmaBoolean) -> u64 {
                 TO_BYTES_CONJUNCTION + cor.items.iter().map(estimate_crypto_cost).sum::<u64>()
             }
             SigmaConjecture::Cthreshold(ct) => {
-                let n = ct.children.len() as u64;
-                let n_coefs = n - ct.k as u64;
+                let n = ct.children.as_slice().len() as u64;
+                // `k <= n` holds for a CTHRESHOLD read off the wire, but its fields are public
+                let n_coefs = n.saturating_sub(ct.k as u64);
                 let parse_poly = 10 + 10 * n_coefs;
                 let eval_poly = (3 + 3 * n_coefs) * n;
                 parse_poly + eval_poly + ct.children.iter().map(estimate_crypto_cost).sum::<u64>()
@@ -106,7 +107,7 @@ mod tests {
         let pd1 = force_any_val::<ProveDlog>();
         let pd2 = force_any_val::<ProveDlog>();
         let pd3 = force_any_val::<ProveDlog>();
-        let children: SigmaConjectureItems<SigmaBoolean> = vec![
+        let children = vec![
             SigmaBoolean::from(pd1),
             SigmaBoolean::from(pd2),
             SigmaBoolean::from(pd3),
@@ -117,5 +118,16 @@ mod tests {
         let prop = SigmaBoolean::from(ct);
         // n=3, k=2, n_coefs=1, parse_poly=10+10=20, eval_poly=(3+3)*3=18, children=3*3980=11940
         assert_eq!(estimate_crypto_cost(&prop), 20 + 18 + 11940);
+    }
+
+    #[test]
+    fn test_cthreshold_k_above_its_children() {
+        // sigmastate cannot build this one (`SigmaBoolean.scala:223`) and it is not readable
+        // off the wire, but the fields are public. It is costed as a threshold with no
+        // coefficients: 10 to read the polynomial, 3 to evaluate it for the one child.
+        let pd = force_any_val::<ProveDlog>();
+        let children = vec![SigmaBoolean::from(pd)].try_into().unwrap();
+        let ct = Cthreshold { k: 3, children };
+        assert_eq!(estimate_crypto_cost(&SigmaBoolean::from(ct)), 10 + 3 + 3980);
     }
 }

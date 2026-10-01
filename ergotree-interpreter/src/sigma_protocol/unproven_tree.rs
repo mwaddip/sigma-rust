@@ -539,7 +539,14 @@ impl CthresholdUnproven {
     #[allow(clippy::panic)]
     pub(crate) fn with_polynomial(self, q: Gf2_192Poly) -> Result<Self, ProverError> {
         let bytes = q.to_bytes();
-        if bytes.len() == (self.proposition.children.len() - self.k as usize) * SOUNDNESS_BYTES {
+        // `k <= n` holds for a CTHRESHOLD read off the wire, but its fields are public
+        let n_coeff = self
+            .proposition
+            .children
+            .as_slice()
+            .len()
+            .checked_sub(self.k as usize);
+        if n_coeff.map(|n| n * SOUNDNESS_BYTES) == Some(bytes.len()) {
             Ok(Self {
                 polinomial_opt: Some(q),
                 ..self

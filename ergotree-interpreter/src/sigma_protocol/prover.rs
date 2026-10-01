@@ -593,10 +593,17 @@ fn step4_simulated_threshold_conj(
     assert!(ct.simulated);
     if let Some(challenge) = ct.challenge_opt.clone() {
         let unproven_children = cast_to_unp(&ct.children)?;
-        let n = ct.children.len();
+        // `k <= n` holds for a CTHRESHOLD read off the wire, but its fields are public
+        let n_coeff =
+            ct.children
+                .len()
+                .checked_sub(ct.k as usize)
+                .ok_or(ProverError::Unexpected(
+                    "step4_simulated_threshold_conj: k above the number of children",
+                ))?;
         let q = gf2_192poly_from_byte_array(
             challenge,
-            super::crypto_utils::secure_random_bytes(super::SOUNDNESS_BYTES * (n - ct.k as usize)),
+            super::crypto_utils::secure_random_bytes(super::SOUNDNESS_BYTES * n_coeff),
         )?;
         let new_children = unproven_children
             .into_iter()
@@ -1320,6 +1327,8 @@ mod tests {
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::sigma_and::SigmaAnd;
     use ergotree_ir::mir::sigma_or::SigmaOr;
+    use ergotree_ir::sigma_protocol::sigma_boolean::cor::Cor;
+    use ergotree_ir::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
     use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
     use ergotree_ir::types::stype::SType;
     use sigma_test_util::force_any_val;
@@ -1564,5 +1573,29 @@ mod tests {
         assert_eq!(threshold_point(254).unwrap(), 255);
         // a 256th child has no point in GF(2^192)'s byte-wide evaluation
         assert!(threshold_point(255).is_err());
+    }
+
+    #[test]
+    fn a_simulated_threshold_with_k_above_its_children_is_an_error() {
+        // sigmastate cannot build this threshold (`SigmaBoolean.scala:223`) and it is not
+        // readable off the wire, but the fields are public. Under an OR whose other child is
+        // real it is simulated, and its polynomial would have `n - k` coefficients.
+        let secret = DlogProverInput::random();
+        let threshold = Cthreshold {
+            k: 3,
+            children: vec![DlogProverInput::random().public_image().into()]
+                .try_into()
+                .unwrap(),
+        };
+        let or = Cor::normalized(
+            vec![secret.public_image().into(), threshold.into()]
+                .try_into()
+                .unwrap(),
+        );
+        let prover = TestProver {
+            secrets: vec![PrivateInput::DlogProverInput(secret)],
+        };
+        let res = prover.generate_proof(or, &[0u8; 100], &HintsBag::empty());
+        assert!(matches!(res, Err(ProverError::Unexpected(_))));
     }
 }
