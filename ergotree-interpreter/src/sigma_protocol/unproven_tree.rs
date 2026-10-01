@@ -282,12 +282,18 @@ impl ProofTreeConjecture for UnprovenConjecture {
         }
     }
 
-    fn children(&self) -> Vec<ProofTree> {
+    fn threshold_k(&self) -> Option<u8> {
         match self {
-            UnprovenConjecture::CandUnproven(cand) => cand.children.clone(),
-            UnprovenConjecture::CorUnproven(cor) => cor.children.clone(),
-            UnprovenConjecture::CthresholdUnproven(ct) => ct.children.clone(),
+            UnprovenConjecture::CthresholdUnproven(ct) => Some(ct.k),
+            _ => None,
         }
+    }
+
+    fn child_kinds(&self) -> Vec<ProofTreeKind<'_>> {
+        self.children()
+            .iter()
+            .map(ProofTree::as_tree_kind)
+            .collect()
     }
 }
 

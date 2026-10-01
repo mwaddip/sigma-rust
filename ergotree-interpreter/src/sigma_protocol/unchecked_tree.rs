@@ -11,7 +11,6 @@ use gf2_192::gf2_192poly::Gf2_192Poly;
 use super::dht_protocol::FirstDhTupleProverMessage;
 use super::dht_protocol::SecondDhTupleProverMessage;
 use super::proof_tree::ConjectureType;
-use super::proof_tree::ProofTree;
 use super::proof_tree::ProofTreeConjecture;
 use super::proof_tree::ProofTreeKind;
 use super::proof_tree::ProofTreeLeaf;
@@ -339,24 +338,18 @@ impl ProofTreeConjecture for UncheckedConjecture {
         }
     }
 
-    /// Get Children
-    fn children(&self) -> Vec<ProofTree> {
+    fn threshold_k(&self) -> Option<u8> {
         match self {
-            UncheckedConjecture::CandUnchecked {
-                challenge: _,
-                children,
-            } => children.iter().map(|ust| ust.clone().into()).collect(),
-            UncheckedConjecture::CorUnchecked {
-                challenge: _,
-                children,
-            } => children.iter().map(|ust| ust.clone().into()).collect(),
-            UncheckedConjecture::CthresholdUnchecked {
-                challenge: _,
-                children,
-                k: _,
-                polynomial: _,
-            } => children.iter().map(|ust| ust.clone().into()).collect(),
+            UncheckedConjecture::CthresholdUnchecked { k, .. } => Some(*k),
+            _ => None,
         }
+    }
+
+    fn child_kinds(&self) -> Vec<ProofTreeKind<'_>> {
+        self.children_ust()
+            .iter()
+            .map(UncheckedTree::as_tree_kind)
+            .collect()
     }
 }
 

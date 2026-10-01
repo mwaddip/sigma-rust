@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use ergotree_interpreter::sigma_protocol::sig_serializer::parse_sig_compute_challenges;
-use ergotree_interpreter::sigma_protocol::verifier::compute_commitments;
+use ergotree_interpreter::sigma_protocol::verifier::{compute_commitments, verify_signature};
 use ergotree_ir::serialization::SigmaSerializable;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaBoolean;
 
@@ -46,6 +46,13 @@ static ALLOCATOR: Counting = Counting;
 /// The counters are the process's: one measurement at a time
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    // a test that failed while it measured has poisoned nothing worth keeping
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// What a call cost in heap bytes
 #[derive(Debug)]
 struct Heap {
@@ -67,6 +74,7 @@ fn heap_of<T>(f: impl FnOnce() -> T) -> (T, Heap) {
     (res, heap)
 }
 
+const MESSAGE: &[u8] = b"a message";
 const WIDTH: usize = 5000;
 const DEPTH: usize = 60;
 /// What the chain's own nodes may add, with room to spare
@@ -96,11 +104,35 @@ fn commitments_heap(proposition: &[u8]) -> Heap {
 }
 
 #[test]
-#[allow(clippy::unwrap_used)]
 fn computing_commitments_copies_no_subtree() {
-    let _one = ONE_AT_A_TIME.lock().unwrap();
+    let _one = one_at_a_time();
     let alone = commitments_heap(&wide());
     let under_a_chain = commitments_heap(&under_ands(&wide()));
+    assert!(
+        under_a_chain.peak <= alone.peak + CHAIN,
+        "peak: {under_a_chain:?} under a chain, {alone:?} alone"
+    );
+    assert!(
+        under_a_chain.total <= alone.total + CHAIN,
+        "total: {under_a_chain:?} under a chain, {alone:?} alone"
+    );
+}
+
+/// The heap that verifying `proof` costs. The proposition is given, so its own bytes do not
+/// count.
+#[allow(clippy::unwrap_used)]
+fn verification_heap(proposition: &[u8], proof: &[u8]) -> Heap {
+    let proposition = SigmaBoolean::sigma_parse_bytes(proposition).unwrap();
+    let (valid, heap) = heap_of(|| verify_signature(proposition, MESSAGE, proof).unwrap());
+    assert!(!valid);
+    heap
+}
+
+#[test]
+fn verifying_under_a_chain_of_ands_copies_no_subtree() {
+    let _one = one_at_a_time();
+    let alone = verification_heap(&wide(), &zeros(24));
+    let under_a_chain = verification_heap(&under_ands(&wide()), &zeros(24));
     assert!(
         under_a_chain.peak <= alone.peak + CHAIN,
         "peak: {under_a_chain:?} under a chain, {alone:?} alone"

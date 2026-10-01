@@ -136,7 +136,10 @@ pub(crate) enum ConjectureType {
 
 pub(crate) trait ProofTreeConjecture {
     fn conjecture_type(&self) -> ConjectureType;
-    fn children(&self) -> Vec<ProofTree>;
+    /// `k` of a threshold
+    fn threshold_k(&self) -> Option<u8>;
+    /// A view of each child. Nothing is copied.
+    fn child_kinds(&self) -> Vec<ProofTreeKind<'_>>;
 }
 
 pub(crate) enum ProofTreeKind<'a> {
