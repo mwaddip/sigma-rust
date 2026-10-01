@@ -572,15 +572,19 @@ impl Print for Tuple {
 impl Print for SigmaAnd {
     fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
         writeln!(w, "allOf(")?;
-        let items = self.items.try_mapped_ref(|i| -> Result<Expr, PrintError> {
-            w.inc_ident();
-            w.print_indent()?;
-            let item = i.print(w)?;
-            write!(w, ", ")?;
-            writeln!(w)?;
-            w.dec_ident();
-            Ok(item)
-        })?;
+        let items = self
+            .items
+            .iter()
+            .map(|i| -> Result<Expr, PrintError> {
+                w.inc_ident();
+                w.print_indent()?;
+                let item = i.print(w)?;
+                write!(w, ", ")?;
+                writeln!(w)?;
+                w.dec_ident();
+                Ok(item)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         w.print_indent()?;
         write!(w, ")")?;
         Ok(SigmaAnd { items }.into())
@@ -590,15 +594,19 @@ impl Print for SigmaAnd {
 impl Print for SigmaOr {
     fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
         writeln!(w, "anyOf(")?;
-        let items = self.items.try_mapped_ref(|i| -> Result<Expr, PrintError> {
-            w.inc_ident();
-            w.print_indent()?;
-            let item = i.print(w)?;
-            write!(w, ", ")?;
-            writeln!(w)?;
-            w.dec_ident();
-            Ok(item)
-        })?;
+        let items = self
+            .items
+            .iter()
+            .map(|i| -> Result<Expr, PrintError> {
+                w.inc_ident();
+                w.print_indent()?;
+                let item = i.print(w)?;
+                write!(w, ", ")?;
+                writeln!(w)?;
+                w.dec_ident();
+                Ok(item)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         w.print_indent()?;
         write!(w, ")")?;
         Ok(SigmaOr { items }.into())
