@@ -118,6 +118,7 @@ mod bounds_tests {
     //! and builds the node unchecked (`SigmaTransformerSerializer.scala:20-30`), so a node of
     //! 0 to 100000 items parses.
     use crate::ergo_tree::ErgoTree;
+    use crate::serialization::SigmaParsingError;
     use crate::serialization::SigmaSerializable;
     use alloc::vec::Vec;
 
@@ -142,8 +143,12 @@ mod bounds_tests {
 
     #[test]
     fn more_than_100000_items_do_not_parse() {
-        // `safeNewArray` refuses the count before an item is read. This passes before the
-        // change too: the cap is `Vec<T>`'s, and it is the one bound the node keeps.
-        assert!(ErgoTree::sigma_parse_bytes(&tree(&[0xa1, 0x8d, 0x06], 0)).is_err());
+        // `safeNewArray` refuses the count, 100001, before an item is read. This passes before
+        // the change too: the cap is `Vec<T>`'s, and it is the one bound the node keeps. The
+        // error is the cap's: no item follows the count, so any reader fails here.
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&tree(&[0xa1, 0x8d, 0x06], 0)),
+            Err(SigmaParsingError::ArrayLengthExceeded(100001))
+        );
     }
 }
