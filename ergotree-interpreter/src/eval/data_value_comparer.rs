@@ -8,7 +8,7 @@
 use ergotree_ir::chain::context::Context;
 use ergotree_ir::mir::value::{CollKind, NativeColl, Value};
 use ergotree_ir::sigma_protocol::sigma_boolean::{
-    SigmaBoolean, SigmaConjecture, SigmaConjectureItems, SigmaProofOfKnowledgeTree,
+    SigmaBoolean, SigmaConjecture, SigmaProofOfKnowledgeTree,
 };
 use ergotree_ir::types::stype::SType;
 
@@ -217,9 +217,8 @@ fn eq_sigma_bool_with_cost(
         (TrivialProp(a), TrivialProp(b)) => Ok(a == b),
         (Conj(Cand(x)), Conj(Cand(y))) => eq_sigma_bools_with_cost(&x.items, &y.items, ctx),
         (Conj(Cor(x)), Conj(Cor(y))) => eq_sigma_bools_with_cost(&x.items, &y.items, ctx),
-        (Conj(Cthreshold(x)), Conj(Cthreshold(y))) => {
-            Ok(x.k == y.k && eq_sigma_bools_with_cost(&x.children, &y.children, ctx)?)
-        }
+        (Conj(Cthreshold(x)), Conj(Cthreshold(y))) => Ok(x.k == y.k
+            && eq_sigma_bools_with_cost(x.children.as_slice(), y.children.as_slice(), ctx)?),
         // Mismatched node kinds, dispatched on the LEFT per Scala's guard
         // structure: a leaf left (ProveDlog / ProveDhTuple / TrivialProp)
         // falls into that arm's inner `case _ => false`; the conjecture arms
@@ -240,8 +239,8 @@ fn eq_sigma_bool_with_cost(
 /// `equalSigmaBooleans` (DataValueComparer.scala:241): length check (no per-item
 /// charge on mismatch), then per-child `eq_sigma_bool_with_cost`, short-circuiting.
 fn eq_sigma_bools_with_cost(
-    xs: &SigmaConjectureItems<SigmaBoolean>,
-    ys: &SigmaConjectureItems<SigmaBoolean>,
+    xs: &[SigmaBoolean],
+    ys: &[SigmaBoolean],
     ctx: &Context<'_>,
 ) -> Result<bool, EvalError> {
     if xs.len() != ys.len() {
@@ -530,7 +529,7 @@ mod tests {
 
         let dlog = SigmaBoolean::from(force_any_val::<ProveDlog>());
         let cand = SigmaBoolean::SigmaConjecture(SigmaConjecture::Cand(Cand {
-            items: vec![dlog.clone(), dlog.clone()].try_into().unwrap(),
+            items: vec![dlog.clone(), dlog.clone()],
         }));
         let case = |l: SigmaBoolean, r: SigmaBoolean| -> (Result<bool, EvalError>, u64) {
             let ctx = force_any_val::<Context>();

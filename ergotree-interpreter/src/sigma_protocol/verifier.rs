@@ -449,3 +449,64 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod empty_conjecture_tests {
+    //! JVM parity: a conjecture constant is verified as it is. `CAND()`'s proof is its root
+    //! challenge alone, since every child takes that challenge (`SigSerializer.scala:210-217`).
+    //! `COR()` never verifies: its last child is `children(-1)`, which throws (`:228-234`), and
+    //! `verifySignature` returns false for any exception (`Interpreter.scala:462-482`).
+    use super::*;
+    use crate::sigma_protocol::SOUNDNESS_BYTES;
+    use alloc::vec::Vec;
+    use ergotree_ir::serialization::SigmaSerializable;
+
+    const MESSAGE: &[u8] = b"a message";
+
+    /// The challenge that a proof of a tree without leaves carries: the hash of the tree's
+    /// Fiat-Shamir bytes and the message (`Interpreter.scala:388-400`). A conjecture's bytes are
+    /// `00`, its type, `k` for a threshold, and its child count as a Short
+    /// (`UnprovenTree.scala:268-281`).
+    fn root_challenge(tree: &[u8]) -> Vec<u8> {
+        let hash: [u8; SOUNDNESS_BYTES] = fiat_shamir_hash_fn(&[tree, MESSAGE].concat()).into();
+        hash.to_vec()
+    }
+
+    #[test]
+    fn cand_without_children_verifies_with_its_root_challenge() {
+        let cand = SigmaBoolean::sigma_parse_bytes(&[0x96, 0x00]).unwrap();
+        let proof = root_challenge(&[0x00, 0x00, 0x00, 0x00]);
+        assert!(verify_signature(cand.clone(), MESSAGE, &proof).unwrap());
+        assert!(!verify_signature(cand.clone(), MESSAGE, &[]).unwrap());
+        let mut wrong = proof;
+        wrong[0] ^= 1;
+        assert!(!verify_signature(cand, MESSAGE, &wrong).unwrap());
+    }
+
+    #[test]
+    fn cor_without_children_never_verifies() {
+        let cor = SigmaBoolean::sigma_parse_bytes(&[0x97, 0x00]).unwrap();
+        assert!(!verify_signature(cor.clone(), MESSAGE, &[]).unwrap());
+        // the proof that verifies `CAND()`, made for an OR node
+        let forged = root_challenge(&[0x00, 0x01, 0x00, 0x00]);
+        assert!(!matches!(verify_signature(cor, MESSAGE, &forged), Ok(true)));
+    }
+
+    #[test]
+    fn a_child_count_above_32767_is_hashed_as_sigmastate_s_short() {
+        // By source, no SANTA vector: `FiatShamirTree.toBytes` writes a conjecture's child count
+        // as `children.length.toShort` (`UnprovenTree.scala:279-280`), which wraps above 32767.
+        // `CAND(40000 × CAND())` is `96`, the count as a VLQ, and 40000 × `96 00`. In the
+        // Fiat-Shamir bytes 40000 is `9c 40`.
+        const N: usize = 40000;
+        let cand_bytes = [&[0x96, 0xc0, 0xb8, 0x02][..], &[0x96, 0x00].repeat(N)].concat();
+        let cand = SigmaBoolean::sigma_parse_bytes(&cand_bytes).unwrap();
+        let tree = [
+            &[0x00, 0x00, 0x9c, 0x40][..],
+            &[0x00, 0x00, 0x00, 0x00].repeat(N),
+        ]
+        .concat();
+        assert!(verify_signature(cand, MESSAGE, &root_challenge(&tree)).unwrap());
+    }
+}

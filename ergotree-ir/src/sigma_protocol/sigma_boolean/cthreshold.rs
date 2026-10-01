@@ -46,13 +46,13 @@ impl Cthreshold {
         for (i, ch) in children.iter().enumerate() {
             if curr_k == 1 {
                 res.append(&mut children.as_vec()[i..children.len()].to_vec());
-                // should be 2 or more so unwrap is safe here
+                // `res` now holds child `i` and those after it, so the unwrap is safe
                 #[allow(clippy::unwrap_used)]
                 return Cor::normalized(res.try_into().unwrap());
             }
             if curr_k as usize == children_left {
                 res.append(&mut children.as_vec()[i..children.len()].to_vec());
-                // should be 2 or more so unwrap is safe here
+                // `res` now holds child `i` and those after it, so the unwrap is safe
                 #[allow(clippy::unwrap_used)]
                 return Cand::normalized(res.try_into().unwrap());
             }
@@ -70,15 +70,14 @@ impl Cthreshold {
             }
         }
 
-        // should be 2 or more so unwrap is safe here
+        // `res` holds 2 or more of the children here, so each conversion succeeds
         #[allow(clippy::unwrap_used)]
-        let sigmas: SigmaConjectureItems<SigmaBoolean> = res.try_into().unwrap();
         match curr_k as usize {
-            1 => Cor::normalized(sigmas),
-            ch if ch == children_left => Cand::normalized(sigmas),
+            1 => Cor::normalized(res.try_into().unwrap()),
+            ch if ch == children_left => Cand::normalized(res.try_into().unwrap()),
             _ => SigmaBoolean::SigmaConjecture(SigmaConjecture::Cthreshold(Cthreshold {
                 k: curr_k,
-                children: sigmas,
+                children: res.try_into().unwrap(),
             })),
         }
     }

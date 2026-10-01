@@ -186,9 +186,9 @@ impl SigmaBoolean {
             SigmaBoolean::ProofOfKnowledge(SigmaProofOfKnowledgeTree::ProveDhTuple(_)) => 4,
             SigmaBoolean::SigmaConjecture(c) => {
                 let children = match c {
-                    SigmaConjecture::Cand(cand) => &cand.items,
-                    SigmaConjecture::Cor(cor) => &cor.items,
-                    SigmaConjecture::Cthreshold(ct) => &ct.children,
+                    SigmaConjecture::Cand(cand) => cand.items.as_slice(),
+                    SigmaConjecture::Cor(cor) => cor.items.as_slice(),
+                    SigmaConjecture::Cthreshold(ct) => ct.children.as_slice(),
                 };
                 1 + children.iter().map(|ch| ch.size()).sum::<usize>()
             }
@@ -409,14 +409,10 @@ mod arbitrary {
                 .prop_recursive(1, 8, 4, |elem| {
                     prop_oneof![
                         vec(elem.clone(), 2..=4)
-                            .prop_map(|elems| Cand {
-                                items: elems.try_into().unwrap()
-                            })
+                            .prop_map(|items| Cand { items })
                             .prop_map_into(),
                         vec(elem.clone(), 2..=4)
-                            .prop_map(|elems| Cor {
-                                items: elems.try_into().unwrap()
-                            })
+                            .prop_map(|items| Cor { items })
                             .prop_map_into(),
                         vec(elem, 2..=5)
                             .prop_map(|elems| Cthreshold {
@@ -481,9 +477,7 @@ mod tests {
             items: vec![
                 SigmaBoolean::TrivialProp(true),
                 SigmaBoolean::TrivialProp(false),
-            ]
-            .try_into()
-            .unwrap(),
+            ],
         }));
         assert_eq!(cand.size(), 3);
     }

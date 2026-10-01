@@ -1599,3 +1599,38 @@ mod tests {
         assert!(matches!(res, Err(ProverError::Unexpected(_))));
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod empty_conjecture_tests {
+    //! JVM parity: the prover marks `CAND()` real, as it has no simulated child, and proves it
+    //! with nothing but the root challenge. `COR()` has no real child, so its root is simulated
+    //! and the prover gives up (sigmastate: "Tree root should be real").
+    use super::*;
+    use crate::sigma_protocol::verifier::verify_signature;
+    use ergotree_ir::serialization::SigmaSerializable;
+
+    const MESSAGE: &[u8] = b"a message";
+
+    #[test]
+    fn cand_without_children_is_proven_by_its_root_challenge() {
+        let cand = SigmaBoolean::sigma_parse_bytes(&[0x96, 0x00]).unwrap();
+        let prover = TestProver { secrets: vec![] };
+        let proof = prover
+            .generate_proof(cand.clone(), MESSAGE, &HintsBag::empty())
+            .unwrap();
+        let bytes = Vec::<u8>::from(proof);
+        assert_eq!(bytes.len(), 24);
+        assert!(verify_signature(cand, MESSAGE, &bytes).unwrap());
+    }
+
+    #[test]
+    fn cor_without_children_cannot_be_proven() {
+        let cor = SigmaBoolean::sigma_parse_bytes(&[0x97, 0x00]).unwrap();
+        let prover = TestProver { secrets: vec![] };
+        assert!(matches!(
+            prover.generate_proof(cor, MESSAGE, &HintsBag::empty()),
+            Err(ProverError::TreeRootIsNotReal)
+        ));
+    }
+}

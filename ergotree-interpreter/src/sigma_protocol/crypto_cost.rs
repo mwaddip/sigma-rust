@@ -80,10 +80,7 @@ mod tests {
     fn test_cand_two_dlog() {
         let pd1 = force_any_val::<ProveDlog>();
         let pd2 = force_any_val::<ProveDlog>();
-        let items: SigmaConjectureItems<SigmaBoolean> =
-            vec![SigmaBoolean::from(pd1), SigmaBoolean::from(pd2)]
-                .try_into()
-                .unwrap();
+        let items = vec![SigmaBoolean::from(pd1), SigmaBoolean::from(pd2)];
         let cand = Cand { items };
         let prop = SigmaBoolean::from(cand);
         assert_eq!(estimate_crypto_cost(&prop), 15 + 3980 + 3980);
@@ -93,10 +90,7 @@ mod tests {
     fn test_cor_two_dlog() {
         let pd1 = force_any_val::<ProveDlog>();
         let pd2 = force_any_val::<ProveDlog>();
-        let items: SigmaConjectureItems<SigmaBoolean> =
-            vec![SigmaBoolean::from(pd1), SigmaBoolean::from(pd2)]
-                .try_into()
-                .unwrap();
+        let items = vec![SigmaBoolean::from(pd1), SigmaBoolean::from(pd2)];
         let cor = Cor { items };
         let prop = SigmaBoolean::from(cor);
         assert_eq!(estimate_crypto_cost(&prop), 15 + 3980 + 3980);
@@ -129,5 +123,24 @@ mod tests {
         let children = vec![SigmaBoolean::from(pd)].try_into().unwrap();
         let ct = Cthreshold { k: 3, children };
         assert_eq!(estimate_crypto_cost(&SigmaBoolean::from(ct)), 10 + 3 + 3980);
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+mod empty_conjecture_tests {
+    //! JVM parity: sigmastate charges every conjecture node 15 (`ToBytes_ProofTreeConjecture`),
+    //! whatever the number of its children (`Interpreter.scala:570-578`).
+    use super::*;
+    use ergotree_ir::serialization::SigmaSerializable;
+
+    fn cost(sigma_boolean: &[u8]) -> u64 {
+        estimate_crypto_cost(&SigmaBoolean::sigma_parse_bytes(sigma_boolean).unwrap())
+    }
+
+    #[test]
+    fn a_conjecture_without_children_costs_its_node() {
+        assert_eq!(cost(&[0x96, 0x00]), 15); // CAND()
+        assert_eq!(cost(&[0x97, 0x00]), 15); // COR()
     }
 }

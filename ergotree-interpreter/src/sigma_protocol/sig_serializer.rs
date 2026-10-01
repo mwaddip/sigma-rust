@@ -194,7 +194,12 @@ fn parse_sig_compute_challenges_reader<R: SigmaByteRead>(
                 // Read all the children but the last and compute the XOR of all the challenges including e_0
                 let mut children: Vec<UncheckedTree> = Vec::with_capacity(cor.items.len());
 
-                let (last, rest) = cor.items.split_last();
+                // sigmastate takes the last child as `or.children(nChildren - 1)`, which throws
+                // for an OR without children (`SigSerializer.scala:228-234`): it never verifies
+                let (last, rest) = cor
+                    .items
+                    .split_last()
+                    .ok_or(SigParsingError::CorWithoutChildren)?;
                 for it in rest {
                     children.push(parse_sig_compute_challenges_reader(it, r, None)?);
                 }
@@ -284,6 +289,9 @@ pub enum SigParsingError {
 
     #[error("Scalar in ProveDhTumple reading erorr with exp: {0:?}")]
     ScalarReadProveDhTuple(SigmaBoolean),
+
+    #[error("Cor without children: it has no last child to take the remaining challenge")]
+    CorWithoutChildren,
 
     #[error("Cthreshold coeff reading erorr with exp: {0:?}")]
     CthresholdCoeffRead(SigmaBoolean),

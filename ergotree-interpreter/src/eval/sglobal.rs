@@ -896,7 +896,7 @@ mod tests {
                 .unwrap(),
             ))
         };
-        let two_dlogs = || vec![dlog(), dlog()].try_into().unwrap();
+        let two_dlogs = || vec![dlog(), dlog()];
 
         let single = ser_cost(dlog());
         let cand = ser_cost(Cand { items: two_dlogs() }.into());
@@ -904,7 +904,7 @@ mod tests {
         let cthreshold = ser_cost(
             Cthreshold {
                 k: 1,
-                children: two_dlogs(),
+                children: two_dlogs().try_into().unwrap(),
             }
             .into(),
         );
