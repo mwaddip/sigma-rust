@@ -203,9 +203,10 @@ fn parse_sig_compute_challenges_reader<R: SigmaByteRead>(
                 for it in rest {
                     children.push(parse_sig_compute_challenges_reader(it, r, None)?);
                 }
+                // the children are read where they are: a copy of them is a copy of every
+                // subtree parsed so far
                 let xored_challenge = children
-                    .clone()
-                    .into_iter()
+                    .iter()
                     .map(|c| c.challenge())
                     .fold(challenge.clone(), |acc, c| acc.xor(c));
                 let last_child =

@@ -90,6 +90,16 @@ fn under_ands(inner: &[u8]) -> Vec<u8> {
     [&[0x96, 0x01].repeat(DEPTH)[..], inner].concat()
 }
 
+/// `inner` as the first child of 60 nested ORs, each with `CAND()` as its last child
+fn under_ors(inner: &[u8]) -> Vec<u8> {
+    [
+        &[0x97, 0x02].repeat(DEPTH)[..],
+        inner,
+        &[0x96, 0x00].repeat(DEPTH)[..],
+    ]
+    .concat()
+}
+
 /// A proof of all zeros: long enough to be read, and never valid
 fn zeros(len: usize) -> Vec<u8> {
     vec![0u8; len]
@@ -133,6 +143,22 @@ fn verifying_under_a_chain_of_ands_copies_no_subtree() {
     let _one = one_at_a_time();
     let alone = verification_heap(&wide(), &zeros(24));
     let under_a_chain = verification_heap(&under_ands(&wide()), &zeros(24));
+    assert!(
+        under_a_chain.peak <= alone.peak + CHAIN,
+        "peak: {under_a_chain:?} under a chain, {alone:?} alone"
+    );
+    assert!(
+        under_a_chain.total <= alone.total + CHAIN,
+        "total: {under_a_chain:?} under a chain, {alone:?} alone"
+    );
+}
+
+#[test]
+fn verifying_under_a_chain_of_ors_copies_no_subtree() {
+    let _one = one_at_a_time();
+    let alone = verification_heap(&wide(), &zeros(24));
+    // an OR reads a challenge for each child but its last: one a level, after the root's
+    let under_a_chain = verification_heap(&under_ors(&wide()), &zeros(24 * (DEPTH + 1)));
     assert!(
         under_a_chain.peak <= alone.peak + CHAIN,
         "peak: {under_a_chain:?} under a chain, {alone:?} alone"
