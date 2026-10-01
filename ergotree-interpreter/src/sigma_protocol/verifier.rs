@@ -486,6 +486,7 @@ mod empty_conjecture_tests {
     use crate::sigma_protocol::SOUNDNESS_BYTES;
     use alloc::vec::Vec;
     use ergotree_ir::serialization::SigmaSerializable;
+    use ergotree_ir::sigma_protocol::sigma_boolean::cand::Cand;
 
     const MESSAGE: &[u8] = b"a message";
 
@@ -529,6 +530,24 @@ mod empty_conjecture_tests {
         let cand = SigmaBoolean::sigma_parse_bytes(&cand_bytes).unwrap();
         let tree = [
             &[0x00, 0x00, 0x9c, 0x40][..],
+            &[0x00, 0x00, 0x00, 0x00].repeat(N),
+        ]
+        .concat();
+        assert!(verify_signature(cand, MESSAGE, &root_challenge(&tree)).unwrap());
+    }
+
+    #[test]
+    fn a_child_count_above_65535_is_hashed_as_sigmastate_s_short() {
+        // By source as well. No such CAND is read off the wire, where the count is a
+        // `getUShort`, but a `SigmaAnd` node of up to 100000 items reduces to one.
+        // `children.length.toShort` keeps the low 16 bits: 70000 is `11 70`.
+        const N: usize = 70000;
+        let empty = SigmaBoolean::sigma_parse_bytes(&[0x96, 0x00]).unwrap();
+        let cand = SigmaBoolean::from(Cand {
+            items: vec![empty; N],
+        });
+        let tree = [
+            &[0x00, 0x00, 0x11, 0x70][..],
             &[0x00, 0x00, 0x00, 0x00].repeat(N),
         ]
         .concat();
