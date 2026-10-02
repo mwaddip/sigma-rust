@@ -15,6 +15,7 @@ use crate::sigma_protocol::unproven_tree::CandUnproven;
 use crate::sigma_protocol::unproven_tree::CorUnproven;
 use crate::sigma_protocol::unproven_tree::NodePosition;
 use crate::sigma_protocol::unproven_tree::UnprovenDhTuple;
+use crate::sigma_protocol::verifier::check_soft_fork_condition;
 use crate::sigma_protocol::Challenge;
 use crate::sigma_protocol::UnprovenLeaf;
 use alloc::vec::Vec;
@@ -138,6 +139,14 @@ pub trait Prover {
         message: &[u8],
         hints_bag: &HintsBag,
     ) -> Result<ProverResult, ProverError> {
+        // sigmastate's prover runs `checkSoftForkCondition` first and throws for both of its
+        // outcomes (`ProverInterpreter.scala:128-135`)
+        if check_soft_fork_condition(tree, ctx).map_err(ProverError::EvalError)? {
+            return Err(ProverError::Unexpected(
+                "both the ErgoTree version and the activated script version are above the \
+                 maximum supported script version",
+            ));
+        }
         let ctx_ext = ctx.extension.clone();
         let reduction_result = reduce_to_crypto(tree, ctx).map_err(ProverError::EvalError)?;
         self.generate_proof(reduction_result.sigma_prop, message, hints_bag)
@@ -1331,6 +1340,38 @@ mod tests {
     use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
     use ergotree_ir::types::stype::SType;
     use sigma_test_util::force_any_val;
+
+    #[test]
+    fn prove_refuses_a_tree_above_the_activated_version() {
+        // `ProverInterpreter.prove` runs `checkSoftForkCondition` first and throws for both
+        // of its outcomes (sigmastate v6.0.6 `ProverInterpreter.scala:128-135`)
+        use ergotree_ir::serialization::SigmaSerializable;
+        let prover = TestProver { secrets: vec![] };
+        let tree =
+            |version: u8| ErgoTree::sigma_parse_bytes(&[0x08 | version, 0x02, 0x08, 0xd3]).unwrap();
+        let ctx_at = |activated: u8| {
+            let mut ctx = force_any_val::<Context>();
+            ctx.activated_script_version_byte = activated as i8;
+            ctx
+        };
+        let prove = |version: u8, activated: u8| {
+            prover.prove(&tree(version), &ctx_at(activated), &[], &HintsBag::empty())
+        };
+        let is_version_error = |res: Result<ProverResult, ProverError>| {
+            matches!(
+                res,
+                Err(ProverError::EvalError(
+                    EvalError::TreeVersionAboveActivated { .. }
+                ))
+            )
+        };
+        assert!(is_version_error(prove(4, 3)));
+        assert!(matches!(prove(4, 4), Err(ProverError::Unexpected(_))));
+        assert!(prove(3, 3).is_ok());
+        // a context activated at 0, as a block version of 1 gives, proves a v0 tree only
+        assert!(is_version_error(prove(1, 0)));
+        assert!(prove(0, 0).is_ok());
+    }
 
     #[test]
     fn test_prove_true_prop() {

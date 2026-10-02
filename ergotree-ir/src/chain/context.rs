@@ -43,6 +43,15 @@ pub struct Context<'ctx> {
     pub inputs: TxIoVec<&'ctx ErgoBox>,
     /// Pre header of current block
     pub pre_header: PreHeader,
+    /// Activated script version: a signed byte and a context input of its own, as
+    /// sigmastate's `ErgoLikeContext.activatedScriptVersion` is. ergo sets it to the voted
+    /// parameters' block version minus 1 (ergo v6.0.6 `ErgoContext.scala:28`), and a block's
+    /// header need not carry that version between epoch starts: `pre_header.version` is what
+    /// a script reads, and this is what the interpreter's version gates read. It can be
+    /// negative, so a gate reads it through [`Context::activated_script_version`]. Only a
+    /// comparison that has to tell a negative version from 0 reads the byte itself, as the
+    /// spend check does.
+    pub activated_script_version_byte: i8,
     /// State root of the UTXO state before current block application. A standalone
     /// context input as in the JVM (`ErgoLikeContext.lastBlockUtxoRoot`), not derived
     /// from `headers`: with non-empty headers the two agree by construction, and with
@@ -75,9 +84,12 @@ impl<'ctx> Context<'ctx> {
             ..self
         }
     }
-    /// Activated script version corresponds to block version - 1
+    /// The activated script version as a tree version, for the version gates: the
+    /// `activated_script_version_byte` field, with a negative value read as 0. sigmastate's
+    /// gates compare signed bytes (`VersionContext.scala:20-33`), so a negative activated
+    /// version is below every one of them.
     pub fn activated_script_version(&self) -> ErgoTreeVersion {
-        ErgoTreeVersion::from(self.pre_header.version.saturating_sub(1))
+        ErgoTreeVersion::from(self.activated_script_version_byte.max(0) as u8)
     }
     /// Version of ergotree being evaluated under context
     pub fn tree_version(&self) -> ErgoTreeVersion {
@@ -193,6 +205,9 @@ pub mod arbitrary {
                         pre_header,
                         headers,
                     )| {
+                        // the generated pre-header's block version minus 1, as a byte
+                        let activated_script_version_byte =
+                            (pre_header.version as i8).wrapping_sub(1);
                         // Leak variables. Since this is only used for testing this is acceptable and avoids introducing a new type (ContextOwned)
                         Self {
                             height,
@@ -212,6 +227,7 @@ pub mod arbitrary {
                                 .try_into()
                                 .unwrap(),
                             pre_header,
+                            activated_script_version_byte,
                             extension: Box::leak(extensions[0].clone().into()),
                             last_block_utxo_root: AvlTreeData {
                                 digest: headers[0].state_root.0.to_vec(),
@@ -238,4 +254,50 @@ pub mod arbitrary {
 }
 
 #[cfg(test)]
-mod tests {}
+#[cfg(feature = "arbitrary")]
+mod tests {
+    use super::*;
+    use sigma_test_util::force_any_val;
+
+    #[test]
+    fn a_negative_activated_version_is_below_every_gate() {
+        // sigmastate's gates compare signed bytes (`VersionContext.scala:20-33`): -57 is the
+        // activated version at block version 200, -1 at block version 0
+        let mut ctx = force_any_val::<Context>();
+        for (activated, gate) in [
+            (-128i8, 0u8),
+            (-57, 0),
+            (-1, 0),
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (127, 127),
+        ] {
+            ctx.activated_script_version_byte = activated;
+            assert_eq!(
+                ctx.activated_script_version(),
+                ErgoTreeVersion::from(gate),
+                "{activated}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pre_header_s_version_does_not_move_the_activated_version() {
+        // ergo takes the activated version from the voted parameters and the pre-header from
+        // the block's header (ergo v6.0.6 `ErgoContext.scala:28`, `ErgoStateContext.scala:89`),
+        // and the two need not agree between epoch starts
+        let mut ctx = force_any_val::<Context>();
+        ctx.activated_script_version_byte = 3;
+        for version in [0u8, 1, 3, 5, 200] {
+            ctx.pre_header.version = version;
+            assert_eq!(
+                ctx.activated_script_version(),
+                ErgoTreeVersion::V3,
+                "{version}"
+            );
+        }
+    }
+}

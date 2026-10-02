@@ -63,6 +63,7 @@ impl Evaluable for SubstConstants {
                 b.as_vec_u8(),
                 &positions,
                 &new_constants,
+                ctx.activated_script_version(),
                 ctx.tree_version(),
             )
             .map_err(to_misc_err)?;
@@ -106,7 +107,9 @@ mod tests {
     };
     use proptest::prelude::*;
 
+    use crate::eval::test_util::try_eval_out_with_version;
     use crate::eval::test_util::try_eval_out_wo_ctx;
+    use sigma_test_util::force_any_val;
 
     use super::*;
     proptest! {
@@ -120,6 +123,45 @@ mod tests {
         fn eval_3_substitutions(original in any::<(i32, i32, i32)>(), new in any::<(i32, i32, i32)>()) {
             test_3_substitutions(original, new);
         }
+    }
+
+    #[test]
+    fn a_template_s_constants_are_read_under_the_activated_version() {
+        // `SubstConstants` substitutes inside the spend's `VersionContext` (sigmastate v6.0.6
+        // `Interpreter.scala:366`), and `substituteConstants` reads every constant of the
+        // template (`ErgoTreeSerializer.scala:320-326`). The template is the tree of SANTA's
+        // `Box.tree_version_above_activated` #9: its constant 0 is a Box with a v4 tree.
+        // #10's has a v3 one. SANTA `tree-version-above-activated-eval` #6 and #7 are the
+        // spends (replayed in ergo-lib's `tx_context`).
+        let template = |header: u8| {
+            let hex = format!(
+                "1b310263c0843d{header:02x}0208d3010000\
+                 0000000000000000000000000000000000000000000000000000000000000000\
+                 0008d37301"
+            );
+            base16::decode(hex.as_bytes()).unwrap()
+        };
+        let subst = |header: u8, activated: u8| {
+            let node = Expr::SubstConstants(
+                SubstConstants {
+                    script_bytes: Expr::Const(Constant::from(template(header))).into(),
+                    positions: Expr::Const(Constant::from(Vec::<i32>::new())).into(),
+                    new_values: Expr::Const(Constant::from(Vec::<i32>::new())).into(),
+                }
+                .into(),
+            );
+            let ctx = force_any_val::<Context>();
+            try_eval_out_with_version::<Vec<u8>>(&node, &ctx, 3, activated)
+        };
+        // the evaluator reports a substitution's failure as a `Misc` error, wrapped with the
+        // node's span
+        let refused = format!("{:?}", subst(0x0c, 3).unwrap_err());
+        assert!(
+            refused.contains("TreeVersionAboveActivated(4, 3)"),
+            "{refused}"
+        );
+        assert_eq!(subst(0x0b, 3).unwrap(), template(0x0b));
+        assert_eq!(subst(0x0c, 1).unwrap(), template(0x0c));
     }
 
     fn test_single_substitution<T: Clone + LiftIntoSType + StoreWrapped + Into<Constant>>(

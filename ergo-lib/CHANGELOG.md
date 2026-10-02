@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 <!-- next-header -->
 ## [Unreleased] - ReleaseDate
 
+### Added
+- Blockchain parameters can be built in the WASM binding (`new Parameters(..)`, `Parameters.from_json`) and in the Swift binding (`Parameters(blockVersion: ..)`, `Parameters(withJson:)`), as the C and Python bindings already could.
+
 ### Changed
 - Serialization I/O traits now use the exact-pinned `core3` 0.1.2 successor instead of `core2`; downstream implementations using those traits may need to update their I/O imports and error types.
 - The WASM `UnsignedBigInt` constructor accepts only nonnegative safe integers as JavaScript Numbers. Use BigInt for larger values.
+- The block version of an `ErgoStateContext`'s parameters activates scripts, not the pre-header's version: the activated script version is the parameters' block version minus 1, for signing, reduction and validation, and `TransactionContext::validate` reads the creation-height and negative-height rules from it as well. `Parameters::default()` has block version 1, under which only a version 0 tree is signed, so a wallet has to pass the chain's parameters.
+- `Context` has a new required field, `activated_script_version_byte`, the activated script version as a signed byte. Code that builds a `Context` has to set it, and setting `pre_header.version` no longer changes the activated version.
 
 ### Fixed
 - Correct unsigned 256-bit division in the C API and return errors for zero-modulus subtraction and inversion.

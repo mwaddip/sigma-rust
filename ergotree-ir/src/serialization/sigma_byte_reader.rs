@@ -18,6 +18,11 @@ pub const MAX_TREE_DEPTH: usize = 110;
 /// which `safeNewArray` checks before it allocates)
 pub const MAX_ARRAY_LENGTH: usize = 100_000;
 
+/// Activated script version of a reader that was given none: sigmastate's default
+/// `VersionContext` is (1, 1) (`VersionContext.scala:58-61`), under which a tree of any version
+/// parses
+pub const DEFAULT_ACTIVATED_VERSION: ErgoTreeVersion = ErgoTreeVersion::V1;
+
 /// Implementation of SigmaByteRead
 pub struct SigmaByteReader<R> {
     inner: R,
@@ -26,6 +31,7 @@ pub struct SigmaByteReader<R> {
     val_def_type_store: ValDefTypeStore,
     was_deserialize: bool,
     version: ErgoTreeVersion,
+    activated_version: ErgoTreeVersion,
     position_limit: u64,
     level: usize,
 }
@@ -40,6 +46,7 @@ impl<R: Read> SigmaByteReader<R> {
             val_def_type_store: ValDefTypeStore::new(),
             was_deserialize: false,
             version: ErgoTreeVersion::V0,
+            activated_version: DEFAULT_ACTIVATED_VERSION,
             position_limit: u64::MAX,
             level: 0,
         }
@@ -58,6 +65,7 @@ impl<R: Read> SigmaByteReader<R> {
             val_def_type_store: ValDefTypeStore::new(),
             was_deserialize: false,
             version: ErgoTreeVersion::MAX_SCRIPT_VERSION,
+            activated_version: DEFAULT_ACTIVATED_VERSION,
             position_limit: u64::MAX,
             level: 0,
         }
@@ -111,6 +119,26 @@ pub trait SigmaByteRead: ReadSigmaVlqExt {
     /// Maximum ErgoTree version that deserializer can handle.
     fn tree_version(&self) -> ErgoTreeVersion;
 
+    /// Call `f` with the reader's activated script version set to `activated` and its ErgoTree
+    /// version to `tree` inside f's scope, as sigmastate's `VersionContext.withVersions` does
+    /// for a thread (`VersionContext.scala:99-100`). The activated version is a block's version
+    /// minus 1. A node sets it where ergo does: for a block's transactions from block version
+    /// 4 and for a peer's transaction, and not for a box read from the UTXO set or for an
+    /// earlier block's transactions (ergo v6.0.6 `BlockTransactions.scala:184-202`).
+    /// [`Self::with_tree_version`] leaves the activated version as it is.
+    fn with_versions<T>(
+        &mut self,
+        activated: ErgoTreeVersion,
+        tree: ErgoTreeVersion,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T;
+
+    /// Activated script version the reader parses under (sigmastate's
+    /// `VersionContext.activatedVersion`): [`DEFAULT_ACTIVATED_VERSION`] unless
+    /// [`Self::with_versions`] set one. From 2, a tree whose version is above it does not
+    /// parse.
+    fn activated_version(&self) -> ErgoTreeVersion;
+
     /// Current nesting level of value deserialization (sigmastate `CoreByteReader.level`)
     fn level(&self) -> usize;
 
@@ -122,7 +150,7 @@ pub trait SigmaByteRead: ReadSigmaVlqExt {
     /// level 0, empty constant and `ValDef` type stores, the deserialize flag clear
     /// (sigmastate `SigmaByteReader`/`CoreByteReader` construction). The previous state
     /// comes back after `f`, whatever `f` returned. Position, position limit, tree
-    /// version and placeholder substitution are left as they are.
+    /// version, activated version and placeholder substitution are left as they are.
     fn with_fresh_parse_state<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T;
 }
 
@@ -201,6 +229,23 @@ impl<R: ReadSigmaVlqExt> SigmaByteRead for SigmaByteReader<R> {
         self.version
     }
 
+    fn with_versions<T>(
+        &mut self,
+        activated: ErgoTreeVersion,
+        tree: ErgoTreeVersion,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let tmp = self.activated_version;
+        self.activated_version = activated;
+        let res = self.with_tree_version(tree, f);
+        self.activated_version = tmp;
+        res
+    }
+
+    fn activated_version(&self) -> ErgoTreeVersion {
+        self.activated_version
+    }
+
     fn level(&self) -> usize {
         self.level
     }
@@ -271,5 +316,41 @@ mod level_tests {
         assert_eq!(r.val_def_type_store().get(&ValId(1)), Some(&SType::SInt));
         assert!(r.val_def_type_store().get(&ValId(2)).is_none());
         assert!(r.was_deserialize());
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    //! JVM parity: a reader's versions are sigmastate's `VersionContext` (`VersionContext.scala`),
+    //! which is (1, 1) for a thread that set none (`:58-61`).
+    use super::*;
+
+    #[test]
+    fn a_reader_starts_at_sigmastate_s_default_activated_version() {
+        // `VersionContext.scala:58-61`: (1, 1)
+        let r = from_bytes([0u8; 0]);
+        assert_eq!(r.activated_version(), ErgoTreeVersion::V1);
+        assert_eq!(r.activated_version(), DEFAULT_ACTIVATED_VERSION);
+    }
+
+    #[test]
+    fn with_versions_sets_both_versions_and_puts_them_back() {
+        let mut r = from_bytes([0u8; 0]);
+        let before = (r.activated_version(), r.tree_version());
+        r.with_versions(ErgoTreeVersion::V3, ErgoTreeVersion::V2, |r| {
+            assert_eq!(r.activated_version(), ErgoTreeVersion::V3);
+            assert_eq!(r.tree_version(), ErgoTreeVersion::V2);
+            // a tree's own version replaces the tree version only
+            r.with_tree_version(ErgoTreeVersion::V0, |r| {
+                assert_eq!(r.activated_version(), ErgoTreeVersion::V3);
+                assert_eq!(r.tree_version(), ErgoTreeVersion::V0);
+            });
+            // a nested object starts with fresh stores, under the same versions
+            r.with_fresh_parse_state(|r| {
+                assert_eq!(r.activated_version(), ErgoTreeVersion::V3);
+                assert_eq!(r.tree_version(), ErgoTreeVersion::V2);
+            });
+        });
+        assert_eq!((r.activated_version(), r.tree_version()), before);
     }
 }

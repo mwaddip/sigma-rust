@@ -472,10 +472,16 @@ impl Expr {
                         // per-tree-byte presence charge, this lands in the
                         // reported cost pre-V6 too.
                         ctx.add_jit_cost(vec.len() as u64 * 20)?;
+                        // sigmastate decodes inside the spend's `VersionContext`
+                        // (`Interpreter.scala:366`): a tree in the script is compared with
+                        // the context's activated version
                         (
                             tpe,
-                            sigma_byte_reader::from_bytes(&vec)
-                                .with_tree_version(ctx.tree_version(), Expr::sigma_parse)?,
+                            sigma_byte_reader::from_bytes(&vec).with_versions(
+                                ctx.activated_script_version(),
+                                ctx.tree_version(),
+                                Expr::sigma_parse,
+                            )?,
                         )
                     }
                     Expr::DeserializeRegister(DeserializeRegister { reg, tpe, default }) => {
@@ -490,8 +496,11 @@ impl Expr {
                                 // an absent register falling back to `default`
                                 // charges nothing.
                                 ctx.add_jit_cost(bytes.len() as u64 * 20)?;
-                                Ok(sigma_byte_reader::from_bytes(&bytes)
-                                    .with_tree_version(ctx.tree_version(), Expr::sigma_parse)?)
+                                Ok(sigma_byte_reader::from_bytes(&bytes).with_versions(
+                                    ctx.activated_script_version(),
+                                    ctx.tree_version(),
+                                    Expr::sigma_parse,
+                                )?)
                             })
                             .transpose()?
                             .or(default.as_deref().cloned());
@@ -989,3 +998,95 @@ pub(crate) mod arbitrary {
 
 #[cfg(test)]
 mod tests {}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod substitute_deserialize_tests {
+    //! JVM parity: sigmastate reduces a tree under
+    //! `withVersions(context.activatedScriptVersion, ergoTree.version)` (v6.0.6
+    //! `Interpreter.scala:366`), so a tree deserialized while a script is decoded is compared
+    //! with the context's activated version (`ErgoTreeSerializer.scala:150-154`). Its
+    //! `SerializerException` is no class cast, so the substitution does not swallow it and the
+    //! spend fails. SANTA `tree-version-above-activated-eval` #0 to #5 are the spends (replayed
+    //! in ergo-lib's `tx_context`).
+    use super::*;
+    use crate::chain::context_extension::ContextExtension;
+    use crate::chain::ergo_box::ErgoBox;
+    use crate::chain::ergo_box::NonMandatoryRegisterId;
+    use sigma_test_util::force_any_val;
+
+    /// A Box constant as an expression: type code 99, then SANTA's box
+    /// (`Box.tree_version_above_activated` #0) with the tree `header 02 08 d3`
+    fn box_constant(header: u8) -> Vec<u8> {
+        let hex = format!(
+            "63c0843d{header:02x}0208d3010000\
+             1d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400"
+        );
+        base16::decode(hex.as_bytes()).unwrap()
+    }
+
+    /// (the box's tree header, the activated version, the tree version the JVM refuses)
+    const CASES: [(u8, u8, Option<u8>); 4] = [
+        (0x0c, 3, Some(4)),
+        (0x0b, 3, None),
+        (0x0b, 2, Some(3)),
+        (0x0c, 1, None),
+    ];
+
+    fn check(res: Result<Expr, SubstDeserializeError>, activated: u8, refused: Option<u8>) {
+        match refused {
+            Some(version) => assert_eq!(
+                res,
+                Err(SubstDeserializeError::ExprParsingError(
+                    SigmaParsingError::TreeVersionAboveActivated(version, activated)
+                ))
+            ),
+            None => assert!(matches!(res, Ok(Expr::Const(_))), "{res:?}"),
+        }
+    }
+
+    #[test]
+    fn a_script_decoded_from_a_context_variable_is_read_under_the_activated_version() {
+        let expr = Expr::from(DeserializeContext {
+            tpe: SType::SBox,
+            id: 1,
+        });
+        for (header, activated, refused) in CASES {
+            let extension = ContextExtension {
+                values: [(1u8, box_constant(header).into())].into_iter().collect(),
+            };
+            let mut ctx = force_any_val::<Context>().with_extension(&extension);
+            ctx.activated_script_version_byte = activated as i8;
+            check(
+                expr.clone().substitute_deserialize(&ctx),
+                activated,
+                refused,
+            );
+        }
+    }
+
+    #[test]
+    fn a_script_decoded_from_a_register_is_read_under_the_activated_version() {
+        let expr = Expr::from(DeserializeRegister {
+            reg: NonMandatoryRegisterId::R4.into(),
+            tpe: SType::SBox,
+            default: None,
+        });
+        for (header, activated, refused) in CASES {
+            let script: Constant = box_constant(header).into();
+            let self_box = force_any_val::<ErgoBox>()
+                .with_additional_registers(vec![script].try_into().unwrap());
+            let mut ctx = Context {
+                self_box: &self_box,
+                ..force_any_val::<Context>()
+            };
+            ctx.activated_script_version_byte = activated as i8;
+            check(
+                expr.clone().substitute_deserialize(&ctx),
+                activated,
+                refused,
+            );
+        }
+    }
+}

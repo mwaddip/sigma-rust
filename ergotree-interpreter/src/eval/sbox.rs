@@ -420,7 +420,7 @@ mod tests {
             let root = tree.root_expr().unwrap();
             let constants = tree.constants().unwrap();
             let mut ctx = force_any_val::<Context>();
-            ctx.pre_header.version = 3; // activated 2 (+1 block-version convention)
+            ctx.activated_script_version_byte = 2;
             ctx.tree_version.set(ErgoTreeVersion::V0); // ergoTree 0
             let eval_ctx = ctx.with_constants(constants);
             let before = eval_ctx.jit_cost_value();

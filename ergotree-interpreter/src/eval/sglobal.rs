@@ -189,11 +189,13 @@ pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     let n = bytes.len() as u32;
     ctx.add_per_item_jit_cost(100, 32, 32, n)?;
     let mut reader = sigma_byte_reader::from_bytes(&bytes);
-    Ok(Value::from(
-        reader.with_tree_version(ctx.tree_version(), |reader| {
-            DataSerializer::sigma_parse(output_type, reader)
-        })?,
-    ))
+    // sigmastate reads inside the spend's `VersionContext` (`Interpreter.scala:366`): a box's
+    // tree is compared with the context's activated version
+    Ok(Value::from(reader.with_versions(
+        ctx.activated_script_version(),
+        ctx.tree_version(),
+        |reader| DataSerializer::sigma_parse(output_type, reader),
+    )?))
 };
 
 pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -1150,6 +1152,48 @@ mod tests {
             eval_out_wo_ctx::<Vec<u8>>(&get_encoded.into()),
             serialize(ec_point)
         );
+    }
+
+    #[test]
+    fn deserialize_to_reads_a_box_s_tree_under_the_activated_version() {
+        // `deserializeTo` reads the box with `ErgoBox.sigmaSerializer` (sigmastate v6.0.6
+        // `CSigmaDslBuilder.scala:277-282`, `DataSerializer.scala:33-38`), whose tree goes
+        // through `deserializeErgoTree` (`ErgoBoxCandidate.scala:194`) inside the spend's
+        // `VersionContext` (`Interpreter.scala:366`). SANTA's box
+        // (`Box.tree_version_above_activated` #0, #4) with a v4 tree, then a v3 one. SANTA
+        // `tree-version-above-activated-eval` #9 and #10 are the spends (replayed in ergo-lib's
+        // `tx_context`).
+        let box_bytes = |header: u8| {
+            let hex = format!(
+                "c0843d{header:02x}0208d3010000\
+                 1d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400"
+            );
+            base16::decode(hex.as_bytes()).unwrap()
+        };
+        let deserialize_box = |header: u8, activated: u8| {
+            let type_args = [(STypeVar::t(), SType::SBox)].into_iter().collect();
+            let node = MethodCall::with_type_args(
+                Expr::Global,
+                DESERIALIZE_METHOD.clone().with_concrete_types(&type_args),
+                vec![Constant::from(box_bytes(header)).into()],
+                type_args,
+            )
+            .unwrap();
+            let ctx = force_any_val::<Context>();
+            try_eval_out_with_version::<Value>(&node.into(), &ctx, 3, activated)
+        };
+        // an evaluation error comes wrapped with its node's span
+        let refused = deserialize_box(0x0c, 3).unwrap_err();
+        let expected = crate::eval::EvalError::SigmaParsingError(
+            ergotree_ir::serialization::SigmaParsingError::TreeVersionAboveActivated(4, 3),
+        );
+        assert!(
+            matches!(&refused, crate::eval::EvalError::Spanned(e) if *e.error == expected),
+            "{refused:?}"
+        );
+        assert!(deserialize_box(0x0b, 3).is_ok());
+        // activated 1 is sigmastate's default context: nothing is compared
+        assert!(deserialize_box(0x0c, 1).is_ok());
     }
 
     #[test]
