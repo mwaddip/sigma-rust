@@ -291,10 +291,8 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
     // From activated 2 the JVM's `VersionContext` refuses a tree version above the activated
     // one (`Interpreter.scala:207`, `VersionContext.scala:17-21`). `verify` and `prove` refuse
     // such a tree before they reduce it (`check_soft_fork_condition`); a reduction on its
-    // own, as `ReducingInterpreter.reduce` makes, fails here. The JVM compares signed bytes,
-    // and this unsigned comparison agrees with it at every block version: a negative
-    // activated version passes there as below 2, and here as above every tree version (or
-    // as 0, at block version 0).
+    // own, as `ReducingInterpreter.reduce` makes, fails here. The JVM compares signed bytes:
+    // a negative activated version is below 2 there, and reads as 0 here.
     let activated_version = ctx.activated_script_version();
     if activated_version >= ErgoTreeVersion::V2 && tree_version > activated_version {
         return Err(EvalError::TreeVersionAboveActivated {
@@ -760,7 +758,7 @@ pub mod test_util {
         try_eval_out(&expr, ctx)
     }
 
-    // Evaluate with activated version (set block version to version + 1)
+    // Evaluate with activated version
     pub fn try_eval_out_with_version<'ctx, T: TryExtractFrom<Value<'static>> + 'static>(
         expr: &Expr,
         ctx: &'ctx Context<'ctx>,
@@ -768,7 +766,7 @@ pub mod test_util {
         activated_version: u8,
     ) -> Result<T, EvalError> {
         let mut ctx = ctx.clone();
-        ctx.pre_header.version = activated_version + 1;
+        ctx.activated_script_version_byte = activated_version as i8;
         ctx.tree_version.set(tree_version.into());
         // roundtrip expr to test methodcall versioning
         from_bytes(&expr.sigma_serialize_bytes()?)
@@ -1171,7 +1169,7 @@ mod context_conversion_tests {
             values: vars.into_iter().collect(),
         };
         let mut ctx = force_any_val::<Context>().with_extension(&ext);
-        ctx.pre_header.version = 4;
+        ctx.activated_script_version_byte = 3;
         reduce_to_crypto(tree, &ctx)
     }
 
@@ -1209,7 +1207,7 @@ mod context_conversion_tests {
             values: [true_prop_bytes()].into_iter().collect(),
         };
         let mut ctx = force_any_val::<Context>().with_extension(&ext);
-        ctx.pre_header.version = 4;
+        ctx.activated_script_version_byte = 3;
         ctx.jit_cost.set(0);
         reduce_to_crypto(&tree, &ctx).unwrap();
         let tree_len = tree.sigma_serialize_bytes().unwrap().len() as u64;
@@ -1238,7 +1236,7 @@ mod version_context_tests {
     fn reduce(version: u8, block_version: u8) -> Result<ReductionResult, EvalError> {
         let tree = ErgoTree::sigma_parse_bytes(&[0x08 | version, 0x02, 0x08, 0xd3]).unwrap();
         let mut ctx = force_any_val::<Context>();
-        ctx.pre_header.version = block_version;
+        ctx.activated_script_version_byte = (block_version as i8).wrapping_sub(1);
         reduce_to_crypto(&tree, &ctx)
     }
 

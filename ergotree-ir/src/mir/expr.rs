@@ -1057,7 +1057,7 @@ mod substitute_deserialize_tests {
                 values: [(1u8, box_constant(header).into())].into_iter().collect(),
             };
             let mut ctx = force_any_val::<Context>().with_extension(&extension);
-            ctx.pre_header.version = activated + 1;
+            ctx.activated_script_version_byte = activated as i8;
             check(
                 expr.clone().substitute_deserialize(&ctx),
                 activated,
@@ -1081,7 +1081,7 @@ mod substitute_deserialize_tests {
                 self_box: &self_box,
                 ..force_any_val::<Context>()
             };
-            ctx.pre_header.version = activated + 1;
+            ctx.activated_script_version_byte = activated as i8;
             check(
                 expr.clone().substitute_deserialize(&ctx),
                 activated,

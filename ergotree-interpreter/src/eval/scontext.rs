@@ -158,22 +158,18 @@ mod tests {
 
     fn make_ctx_inputs_includes_self_box(
         tree_version: ErgoTreeVersion,
-        pre_header_version: u8,
+        activated_script_version_byte: i8,
     ) -> Context<'static> {
         let ctx = force_any_val::<Context>();
         let self_box = &*Box::leak(Box::new(force_any_val::<ErgoBox>()));
         let inputs = vec![&*Box::leak(Box::new(force_any_val::<ErgoBox>())), self_box]
             .try_into()
             .unwrap();
-        let pre_header = PreHeader {
-            version: pre_header_version,
-            ..ctx.pre_header.clone()
-        };
         Context {
             height: 0u32,
             self_box,
             inputs,
-            pre_header,
+            activated_script_version_byte,
             tree_version: Cell::new(tree_version),
             ..ctx
         }
@@ -185,8 +181,8 @@ mod tests {
             PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
                 .unwrap()
                 .into();
-        // V2 tree in v5+ block (pre_header.version=3 → activated=V2): real index.
-        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V2, 3);
+        // V2 tree in v5+ block (activated 2): real index.
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V2, 2);
         assert_eq!(eval_out::<i32>(&expr, &context), 1);
     }
 
@@ -196,8 +192,8 @@ mod tests {
             PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
                 .unwrap()
                 .into();
-        // V0 tree in pre-v5 block (pre_header.version=1 → activated=V0): -1.
-        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V0, 1);
+        // V0 tree in pre-v5 block (activated 0): -1.
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V0, 0);
         assert_eq!(eval_out::<i32>(&expr, &context), -1);
     }
 
@@ -207,8 +203,8 @@ mod tests {
             PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
                 .unwrap()
                 .into();
-        // V1 tree in pre-v5 block (pre_header.version=1 → activated=V0): -1.
-        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V1, 1);
+        // V1 tree in pre-v5 block (activated 0): -1.
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V1, 0);
         assert_eq!(eval_out::<i32>(&expr, &context), -1);
     }
 
@@ -218,9 +214,9 @@ mod tests {
             PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
                 .unwrap()
                 .into();
-        // V0 tree in v5+ block (pre_header.version=3 → activated=V2): real index.
+        // V0 tree in v5+ block (activated 2): real index.
         // JVM bug #603 was a global impl bug fixed in v5.x for ALL scripts.
-        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V0, 3);
+        let context = make_ctx_inputs_includes_self_box(ErgoTreeVersion::V0, 2);
         assert_eq!(eval_out::<i32>(&expr, &context), 1);
     }
 

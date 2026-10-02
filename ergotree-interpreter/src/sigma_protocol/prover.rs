@@ -1351,7 +1351,7 @@ mod tests {
             |version: u8| ErgoTree::sigma_parse_bytes(&[0x08 | version, 0x02, 0x08, 0xd3]).unwrap();
         let ctx_at = |activated: u8| {
             let mut ctx = force_any_val::<Context>();
-            ctx.pre_header.version = activated + 1;
+            ctx.activated_script_version_byte = activated as i8;
             ctx
         };
         let prove = |version: u8, activated: u8| {
@@ -1368,8 +1368,7 @@ mod tests {
         assert!(is_version_error(prove(4, 3)));
         assert!(matches!(prove(4, 4), Err(ProverError::Unexpected(_))));
         assert!(prove(3, 3).is_ok());
-        // a context of block version 1, which a wallet's placeholder pre-header often has,
-        // proves a v0 tree only
+        // a context activated at 0, as a block version of 1 gives, proves a v0 tree only
         assert!(is_version_error(prove(1, 0)));
         assert!(prove(0, 0).is_ok());
     }

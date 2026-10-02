@@ -119,10 +119,11 @@ pub fn check_soft_fork_condition(tree: &ErgoTree, ctx: &Context) -> Result<bool,
         .header()
         .map(|header| header.version())
         .unwrap_or(ErgoTreeVersion::V0);
-    // sigmastate compares signed bytes, and the activated version is the block version minus 1
-    // as a byte (ergo `ErgoContext`): negative for a block version of 0 or above 128, and then
-    // every tree is above it. `Context::activated_script_version` is unsigned and stops at 0.
-    let activated_version = (ctx.pre_header.version as i8).wrapping_sub(1);
+    // sigmastate compares signed bytes, and the activated version is one: ergo's is the block
+    // version minus 1 as a byte (ergo v6.0.6 `ErgoContext.scala:28`), negative for a block
+    // version of 0 or above 128, and then every tree is above it. So this reads the context's
+    // field: the `activated_script_version()` method reads a negative version as 0.
+    let activated_version = ctx.activated_script_version_byte;
     let max_supported = u8::from(ErgoTreeVersion::MAX_SCRIPT_VERSION) as i8;
     let version = u8::from(tree_version) as i8;
     if activated_version > max_supported {
@@ -547,9 +548,11 @@ mod soft_fork_condition_tests {
     const TRUE: u8 = 0xd3;
     const FALSE: u8 = 0xd2;
 
+    /// A context as ergo builds it at `block_version`: activated at the block version minus 1,
+    /// as a byte (`ErgoContext.scala:28`)
     fn ctx_at_block_version(block_version: u8) -> Context<'static> {
         let mut ctx = force_any_val::<Context>();
-        ctx.pre_header.version = block_version;
+        ctx.activated_script_version_byte = (block_version as i8).wrapping_sub(1);
         ctx
     }
 
@@ -620,6 +623,33 @@ mod soft_fork_condition_tests {
                     "tree {version} at block version {block_version}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_pre_header_s_version_does_not_decide_the_condition() {
+        // SANTA `block-version-source` #0 to #3, at the interpreter: the voted parameters'
+        // block version is 4, so ergo's context is activated at 3, under a header of version
+        // 3, 5, 0 and 200
+        let ctx = |header_version: u8| {
+            let mut ctx = ctx_at(3);
+            ctx.pre_header.version = header_version;
+            ctx
+        };
+        assert_eq!(
+            check_soft_fork_condition(&tree(3, TRUE), &ctx(3)),
+            Ok(false)
+        );
+        assert_eq!(
+            check_soft_fork_condition(&tree(4, FALSE), &ctx(5)),
+            refused(4, 3)
+        );
+        for header_version in [0, 200] {
+            assert_eq!(
+                check_soft_fork_condition(&tree(0, TRUE), &ctx(header_version)),
+                Ok(false),
+                "{header_version}"
+            );
         }
     }
 

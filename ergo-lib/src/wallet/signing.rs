@@ -112,6 +112,7 @@ pub fn make_context<'ctx, T: ErgoTransaction>(
         data_inputs: data_inputs_ir,
         inputs: inputs_ir,
         pre_header: state_ctx.pre_header.clone(),
+        activated_script_version_byte: (state_ctx.pre_header.version as i8).wrapping_sub(1),
         extension,
         // The JVM requires `headers(0).stateRoot.digest == lastBlockUtxoRoot.digest`
         // (`ErgoLikeContext.scala:85`), so deriving the root from the newest header
