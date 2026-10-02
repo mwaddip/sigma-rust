@@ -87,6 +87,19 @@ pub enum EvalError {
         /// Currently activated script version on network
         activated_version: ErgoTreeVersion,
     },
+    /// A spend of a tree whose version is above the activated script version: sigmastate's
+    /// `checkSoftForkCondition` throws an `InterpreterException` (`Interpreter.scala:325-327`)
+    #[error(
+        "ErgoTree version {} is higher than activated {activated_version}",
+        u8::from(*.tree_version)
+    )]
+    TreeVersionAboveActivated {
+        /// The spent box's tree version
+        tree_version: ErgoTreeVersion,
+        /// Currently activated script version on network, as sigmastate holds it: a signed
+        /// byte, negative for a block version of 0 or above 128
+        activated_version: i8,
+    },
     /// Deserialize substitution error, see [`ergotree_ir::mir::expr::Expr::substitute_deserialize`]
     #[error("DeserializeRegister/DeserializeContext error: {0}")]
     SubstDeserializeError(#[from] SubstDeserializeError),

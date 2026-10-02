@@ -17,7 +17,7 @@ use ergotree_interpreter::eval::reduce_to_crypto;
 use ergotree_interpreter::eval::ReductionDiagnosticInfo;
 use ergotree_interpreter::sigma_protocol::crypto_cost::estimate_crypto_cost;
 use ergotree_interpreter::sigma_protocol::verifier::{
-    verify_signature, VerificationResult, VerifierError,
+    check_soft_fork_condition, verify_signature, VerificationResult, VerifierError,
 };
 use ergotree_ir::chain::context::{CostLimitExceeded, TxIoVec};
 use ergotree_ir::chain::ergo_box::{BoxTokens, ErgoBox};
@@ -269,6 +269,17 @@ impl TransactionContext<Transaction> {
                     continue;
                 }
                 StorageRentVerdict::NotApplicable => {}
+            }
+
+            // `Interpreter.verify` runs `checkSoftForkCondition` before the reduction
+            // (sigmastate v6.0.6 `Interpreter.scala:362`), after the rent path. A tree above
+            // the activated version fails the input. Under an activated version above the
+            // supported one, a tree this interpreter cannot read is accepted unverified at
+            // the input's init cost (`:317`), which is 0 here.
+            if check_soft_fork_condition(&input_box.ergo_tree, &context)
+                .map_err(|e| TxValidationError::VerifierError(input_idx, e.into()))?
+            {
+                continue;
             }
 
             // The JVM verifies each input with a FRESH interpreter whose
@@ -1150,6 +1161,148 @@ mod test {
                         "#{i}: {refused}"
                     );
                 }
+            }
+        }
+    }
+
+    /// SANTA `tree-version-above-activated`, transaction tier, at block version 4: the
+    /// transaction, the spent box and the data input of each entry. Every tree is a
+    /// `SigmaProp(true)` constant.
+    /// - #0 to #3: the spent box's tree is v4, v5, v6, v7. Invalid.
+    /// - #4: a v3 tree. Valid, 12105.
+    /// - #5: a data input with a v7 tree, whose script never runs. Valid, 12205.
+    /// - #6: a rent collection of a v4-tree box. Valid, 12150: the rent path decides before
+    ///   the script's (`ErgoInterpreter.scala:72-84`).
+    /// - #7: the same without the rent variable, so on the script path. Invalid.
+    const SANTA_V6: [SantaSpend; 8] = [
+        ("01784afe6f780d54138e463fc99b46e6621ec688ea37e5a3d1b20f4d1b31dc18d600000000018094ebdc030008d3010000", "8094ebdc030c0208d30100003e8998e6e86bec4c436c777124ce66c2b58acf8737fed2aee42bac9952d395b400", None),
+        ("01dc235e8e8143949d677f8749d9fa02743e868546d29dc54a6532e2323e52026d00000000018094ebdc030008d3010000", "8094ebdc030d0208d301000055bb18f53293651f4629c0de7168e40047a10cb1dfac2ffd3c86423ecc6285bd00", None),
+        ("014a3b556dedbec7b92714a19c9f7bd499fe58943855c1f983ef2d589894db1de400000000018094ebdc030008d3010000", "8094ebdc030e0208d3010000e5e394c16a2b6c3a7940b5e3b89c611cdd348847cdbe12d541db1272833f4dc500", None),
+        ("015e3d9cc254a848b9d83a06edf81db9219ace2c717dba56cb53d9e828c9c6dd8900000000018094ebdc030008d3010000", "8094ebdc030f0208d30100002aa1611cf3d12efd48c79b33877e4cff7dae5c3f6bbe3c425fea87e74fdbd5b600", None),
+        ("01a9e4530eae5492e695036db56dd341a636c9a8244931702121fc6918032524a600000000018094ebdc030008d3010000", "8094ebdc030b0208d3010000c6d756e123a76296267b5585443f6bf4bb0b718b223b63f6346de52d6104e6fe00", None),
+        ("017777a23fa9c0f38f98d0911bb95cdcf483b7cf50f12e9f2a9a2e5bb17101c4f0000001c8fbf459d5cf7d1b58155f4452b6c5d4a5fd627d6a5a871b9928353445dc5b6e00018094ebdc030008d3010000", "8094ebdc030008d30100004acfca69b32cd322acc6624793c8f37846b80b635c463046d457add775f2f59d00", Some("8094ebdc030f0208d30100001ab90bf71dd55341c606992b1a3e1d5b3ffb240cd04cd3746e6b312f6c9d52a100")),
+        ("019953b1f1da5bc9d6ca7f6b5df1b9ef3e8136617964ea09b7d8e339250917bd8f00017f0300000001c0f79c1a0008d3c094400000", "c0f79c1a0c0208d30000003cc4e4379fd74e048d4174d7e65266dd7d3168d527101ea6d6a09f8a022ed39b00", None),
+        ("019953b1f1da5bc9d6ca7f6b5df1b9ef3e8136617964ea09b7d8e339250917bd8f0000000001c0f79c1a0008d3c094400000", "c0f79c1a0c0208d30000003cc4e4379fd74e048d4174d7e65266dd7d3168d527101ea6d6a09f8a022ed39b00", None),
+    ];
+
+    /// The same at block version 3.
+    /// - #0: the spent box's tree is v3. Invalid.
+    /// - #1: a v2 tree. Valid, 12105.
+    /// - #2, #3: an output with a v3 tree, then a v4 one, in a transaction read with no
+    ///   context. Valid, 12105.
+    const SANTA_V5: [SantaSpend; 4] = [
+        ("0132590c975512fc1213e0c598c0ca1e1b05c46d9c2eddb68b97446471cb7e667b00000000018094ebdc030008d3010000", "8094ebdc030b0208d3010000d42d221684077e351b4d9cf1e0596d1f39182290affb16d810f018be897aebde00", None),
+        ("0139e31dd67812dcc0f951ced53e9e87ba77727354dad4f4b25bde2c4dd4edf0ba00000000018094ebdc030008d3010000", "8094ebdc030a0208d30100008a93b72b483e955d0dc80f99fb9608f73e80caaa59c849b5601a87e22857427f00", None),
+        ("01ff8e9a38a98d717b6e3f448ff0fbb64f7934b72016f9af0da0d31260e36d165900000000018094ebdc030b0208d3010000", "8094ebdc030008d301000029cf8401e98f0023f3010fb9d453455324fe2e43289139c8529d13a4aae2d3be00", None),
+        ("018b133ddd496c74a4e746156596cd7b76fb2a9c87af7b6eb973fcbddec5a945a200000000018094ebdc030c0208d3010000", "8094ebdc030008d3010000108491b1a8b4c63a8faa89282c9d43de54da62baa2541a644047754b7c22757a00", None),
+    ];
+
+    /// SANTA `tree-version-block-version-edges`, transaction tier: the block version, then
+    /// the spend. Every tree is a `SigmaProp` constant, `true` unless said.
+    /// - #0, #1: block version 2. A v2 tree is invalid, as the spend check has no floor at
+    ///   activated 2. A v1 tree is valid.
+    /// - #2 to #6: block version 5, above what this interpreter supports. A v4 and a v5 tree
+    ///   are accepted unverified, at 12100, and a v3 tree is verified, at 12105. A v4
+    ///   `SigmaProp(false)` is accepted all the same, as it is not reduced. A v3 one reduces
+    ///   to false.
+    /// - #7: block version 0. The activated version is -1, and a v0 tree is invalid.
+    /// - #8, #9: block version 128, so activated 127. A v0 tree is verified, a v4 tree
+    ///   accepted unverified.
+    /// - #10: block version 200, so activated -57. A v0 tree is invalid.
+    const SANTA_EDGES: [(u8, SantaSpend); 11] = [
+        (2, ("0114ae3c8859c951b7382273a6b0608b4bed5bcbb9808c62b2216a8ac3b0a65b9400000000018094ebdc030008d3010000", "8094ebdc030a0208d30100001867d290daf93e26943cd142e8909f934da1ae5a3d13702b18e7a098963c560d00", None)),
+        (2, ("01935d1f5768727d08a52a592b21cc516f7867b4ed29f9f9bb6ab9c53fc3b7e27400000000018094ebdc030008d3010000", "8094ebdc03090208d3010000b1912f3813cffa1c46b8d0dc01bbc2e77f081f8c6a95466f53a297f8d41d301900", None)),
+        (5, ("01716ba868ff0c1b3b2789af540271f36b44307b38f9b2f91856cf118995ac92c100000000018094ebdc030008d3010000", "8094ebdc030c0208d30100000e1a1f383e5ea73af4eeeb1e91afecc8f82d885ef515348a859c3f4ac7ed11d700", None)),
+        (5, ("01ddcb0cc788fbfa7c957546cae341d509a9f2c82f1c2793003f635d5b96001b1200000000018094ebdc030008d3010000", "8094ebdc030d0208d30100003a9bb8b913706593e307088cfd2af43e52c14ac5a90d123e1ee3b610d762f51700", None)),
+        (5, ("012a9cdc8ddedde678c7e9e8c3cf99da18b47cd7e588936c7ed70930c2ee91a0ee00000000018094ebdc030008d3010000", "8094ebdc030b0208d3010000cf0662f0cbebd14c1e623ef4dfd34a5c8f9093751f2796f85a3b4b0eee51a96300", None)),
+        (5, ("01be0a41624e7557944d04741e817a7c53f4596f8940a982d7cf8198e3b361f90c00000000018094ebdc030008d3010000", "8094ebdc030c0208d2010000cefc0b1e08278658b4bf41642b483e6593809dd9859d655a79ab443474b28def00", None)),
+        (5, ("01054d4d6b54021426e829eb8eba73c6474fd1a7c1189910e2311ae6b738a2793000000000018094ebdc030008d3010000", "8094ebdc030b0208d20100000436bd11fdcfd21948d2321e0b47b4743b07379ccafb8c4fe19cc11b68392b2000", None)),
+        (0, ("015d6ecc694d898a5984479adb3e5794e5d973945ba599a6d34cb0158845f21db600000000018094ebdc030008d3010000", "8094ebdc030008d3010000ff892b7d68e99b9a61ee01ecb8ab4ed5ee34ffd7d669f6dbd499b7f8d8b55a2e00", None)),
+        (128, ("017484138af2a1747e0e10d316b65bcbf68e4fae3a000abc38f94e3f82e40331be00000000018094ebdc030008d3010000", "8094ebdc030008d30100004af7b6af4808f1bbbb728689c843b0e701b8137e1657ac01a14db44a728d446e00", None)),
+        (128, ("016fc86bed1e3cbcc1ed10d0c6ced31d6bf3d5802a4791bfba79176e6a3e4f14f900000000018094ebdc030008d3010000", "8094ebdc030c0208d30100002bf691793ced6f5f33af8ada7e362cd1acdf9434ec0eed632593249a59c64efc00", None)),
+        (200, ("018c9ac6aa44428cf555a2d6c46663bbc4b07d1b0d9d0f8143c0db72785607254c00000000018094ebdc030008d3010000", "8094ebdc030008d3010000e2d4be7ffad7105eba3e5cbd7e2cc3ef69183c8538ab3bbdbd6fab85b66bb5b100", None)),
+    ];
+
+    fn is_version_error(res: &Result<u64, TxValidationError>) -> bool {
+        use ergotree_interpreter::eval::EvalError;
+        use ergotree_interpreter::sigma_protocol::verifier::VerifierError;
+        matches!(
+            res,
+            Err(TxValidationError::VerifierError(
+                0,
+                VerifierError::EvalError(EvalError::TreeVersionAboveActivated { .. })
+            ))
+        )
+    }
+
+    #[test]
+    fn a_spend_of_a_tree_above_the_activated_version_is_invalid() {
+        // sigmastate's `checkSoftForkCondition` throws (`Interpreter.scala:325-327`)
+        for (block_version, spend) in [
+            (4, SANTA_V6[0]),
+            (4, SANTA_V6[1]),
+            (4, SANTA_V6[2]),
+            (4, SANTA_V6[3]),
+            (4, SANTA_V6[7]),
+            (3, SANTA_V5[0]),
+        ] {
+            let res = santa_spend(block_version, spend);
+            assert!(is_version_error(&res), "{spend:?}: {res:?}");
+        }
+    }
+
+    #[test]
+    fn the_version_check_reaches_no_spend_the_jvm_accepts() {
+        // with the JVM's costs
+        for (block_version, spend, cost) in [
+            (4, SANTA_V6[4], 12105),
+            (4, SANTA_V6[5], 12205),
+            (4, SANTA_V6[6], 12150),
+            (3, SANTA_V5[1], 12105),
+            (3, SANTA_V5[2], 12105),
+            (3, SANTA_V5[3], 12105),
+        ] {
+            let res = santa_spend(block_version, spend);
+            assert_eq!(res.ok(), Some(cost), "{spend:?}");
+        }
+    }
+
+    #[test]
+    fn the_spend_check_at_the_edges_of_the_block_version() {
+        // sigmastate's `checkSoftForkCondition` (`Interpreter.scala:298-331`), whose versions
+        // are signed bytes, with the JVM's verdicts and costs
+        enum Jvm {
+            Valid(u64),
+            /// "ErgoTree version N is higher than activated M"
+            Version,
+            /// the proposition reduces to false
+            False,
+        }
+        for (i, jvm) in [
+            Jvm::Version,
+            Jvm::Valid(12105),
+            Jvm::Valid(12100),
+            Jvm::Valid(12100),
+            Jvm::Valid(12105),
+            Jvm::Valid(12100),
+            Jvm::False,
+            Jvm::Version,
+            Jvm::Valid(12105),
+            Jvm::Valid(12100),
+            Jvm::Version,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (block_version, spend) = SANTA_EDGES[i];
+            let res = santa_spend(block_version, spend);
+            match jvm {
+                Jvm::Valid(cost) => assert_eq!(res.as_ref().ok(), Some(&cost), "#{i}: {res:?}"),
+                Jvm::Version => assert!(is_version_error(&res), "#{i}: {res:?}"),
+                Jvm::False => assert!(
+                    matches!(res, Err(TxValidationError::ReducedToFalse(0, _))),
+                    "#{i}: {res:?}"
+                ),
             }
         }
     }
