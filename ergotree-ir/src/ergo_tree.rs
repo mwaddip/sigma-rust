@@ -211,6 +211,19 @@ impl ErgoTree {
             } else {
                 None
             };
+            // sigmastate enters `VersionContext.withVersions(activated, treeVersion)` here,
+            // after the size-bit rule and the size slot and before the constants
+            // (`ErgoTreeSerializer.scala:150-154`). From activated 2 the context refuses a
+            // tree version above the activated one (`VersionContext.scala:17-21`), and the
+            // failure is rethrown as a `SerializerException` (`:191-193`): no size-flagged
+            // tree degrades on it, this one or one around it.
+            let activated = r.activated_version();
+            if activated >= ErgoTreeVersion::V2 && header.version() > activated {
+                return Err(SigmaParsingError::TreeVersionAboveActivated(
+                    header.version().into(),
+                    activated.into(),
+                ));
+            }
             let body_pos = r.position()?;
             match (
                 ErgoTree::sigma_parse_body(r, header, check_root_tpe),
@@ -2391,6 +2404,223 @@ mod upcast_write_back_tests {
                 base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
                 written_back,
                 "{hex}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod activated_version_tests {
+    //! JVM parity: `deserializeErgoTree` enters `VersionContext.withVersions(activated,
+    //! treeVersion)` after the header, the size-bit rule and the size slot, and before the
+    //! constants (sigmastate v6.0.6 `ErgoTreeSerializer.scala:141-154`). The context requires
+    //! `activated < 2 || treeVersion <= activated` (`VersionContext.scala:17-21`), and its
+    //! `IllegalArgumentException` is rethrown as a `SerializerException` (`:191-193`), on
+    //! which no size-flagged tree degrades. A reader that was given no activated version has
+    //! sigmastate's default, 1, and checks nothing. SANTA
+    //! `{Box,Transaction}.tree_version_above_activated`.
+    use super::*;
+    use crate::chain::ergo_box::ErgoBox;
+    use crate::serialization::sigma_byte_reader::from_bytes;
+
+    /// A size-flagged tree of `header`'s version: `SigmaProp(true)`
+    fn tree(header: u8) -> Vec<u8> {
+        vec![header, 0x02, 0x08, 0xd3]
+    }
+
+    fn tree_at(activated: u8, bytes: &[u8]) -> Result<ErgoTree, SigmaParsingError> {
+        let activated = ErgoTreeVersion::from(activated);
+        from_bytes(bytes).with_versions(activated, activated, ErgoTree::sigma_parse)
+    }
+
+    fn box_at(activated: u8, hex: &str) -> Result<ErgoBox, SigmaParsingError> {
+        let bytes = base16::decode(hex.as_bytes()).unwrap();
+        let activated = ErgoTreeVersion::from(activated);
+        from_bytes(&bytes).with_versions(activated, activated, ErgoBox::sigma_parse)
+    }
+
+    fn version_error(tree: u8, activated: u8) -> SigmaParsingError {
+        SigmaParsingError::TreeVersionAboveActivated(tree, activated)
+    }
+
+    #[test]
+    fn from_activated_2_a_tree_above_the_activated_version_does_not_parse() {
+        for activated in 0..=7u8 {
+            for version in 0..=7u8 {
+                let parsed = tree_at(activated, &tree(0x08 | version));
+                if activated >= 2 && version > activated {
+                    assert_eq!(
+                        parsed,
+                        Err(version_error(version, activated)),
+                        "tree {version} at {activated}"
+                    );
+                } else {
+                    assert!(
+                        matches!(parsed, Ok(ErgoTree::Parsed(_))),
+                        "tree {version} at {activated}: {parsed:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_reader_that_was_given_no_activated_version_checks_nothing() {
+        for version in 0..=7u8 {
+            let bytes = tree(0x08 | version);
+            assert!(
+                matches!(ErgoTree::sigma_parse_bytes(&bytes), Ok(ErgoTree::Parsed(_))),
+                "{version}"
+            );
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse(&mut from_bytes(&bytes)),
+                    Ok(ErgoTree::Parsed(_))
+                ),
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_version_is_compared_before_the_constants_are_read() {
+        // SANTA #5 and #6: a segregated tree that declares 8 constants, the first of type
+        // code 211. At version 4 the version rejects it first; at version 3 the type code
+        // fails softly and the tree degrades, as the v4 one does without a context.
+        assert_eq!(tree_at(3, &tree(0x1c)), Err(version_error(4, 3)));
+        assert!(matches!(
+            tree_at(3, &tree(0x1b)),
+            Ok(ErgoTree::Unparsed { .. })
+        ));
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&tree(0x1c)),
+            Ok(ErgoTree::Unparsed { .. })
+        ));
+    }
+
+    #[test]
+    fn the_size_bit_rule_comes_before_the_version() {
+        // SANTA #7: version 4 without the size bit. Rule 1012 is soft, so a size-flagged tree
+        // around this one degrades (#11, below), where the version's error would reject it.
+        let err = tree_at(3, &[0x04, 0x08, 0xd3]).unwrap_err();
+        assert!(!matches!(
+            err,
+            SigmaParsingError::TreeVersionAboveActivated(..)
+        ));
+        assert!(!err.escapes_sized_tree_degrade(), "{err:?}");
+    }
+
+    #[test]
+    fn bits_5_to_7_of_the_header_do_not_hide_the_version() {
+        // SANTA #8: `ec` is version 4 with the size bit and bits 5, 6 and 7
+        assert_eq!(tree_at(3, &tree(0xec)), Err(version_error(4, 3)));
+        assert!(ErgoTree::sigma_parse_bytes(&tree(0xec)).is_ok());
+    }
+
+    #[test]
+    fn the_version_error_does_not_degrade_a_tree_around_it() {
+        assert!(version_error(4, 3).escapes_sized_tree_degrade());
+    }
+
+    #[test]
+    fn mainnet_block_545684_s_output_parses_only_without_a_context() {
+        // Transaction 1, output 0 of that block (block version 2): the header `cd` claims
+        // version 5. A node reads a block below version 4 with no context, and the tree
+        // degrades on its root, a Byte constant. Under (2, 2) or (3, 3) the JVM rejects it.
+        let bytes = [0xcd, 0x07, 0x02, 0x1a, 0x8e, 0x6f, 0x59, 0xfd, 0x4a];
+        match ErgoTree::sigma_parse_bytes(&bytes) {
+            Ok(ErgoTree::Unparsed { tree_bytes, .. }) => assert_eq!(tree_bytes, bytes),
+            other => panic!("must degrade: {other:?}"),
+        }
+        assert_eq!(tree_at(2, &bytes), Err(version_error(5, 2)));
+        assert_eq!(tree_at(3, &bytes), Err(version_error(5, 3)));
+    }
+
+    /// What the JVM does with a SANTA box
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Jvm {
+        Parses,
+        /// rejects on the tree's version
+        Version(u8),
+        /// rejects on rule 1012
+        SizeBit,
+    }
+
+    /// SANTA `Box.tree_version_above_activated`, wire v6: under activated 3
+    const BOXES_AT_3: [(&str, Jvm); 14] = [
+        ("c0843d0c0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(4)),
+        ("c0843d0d0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(5)),
+        ("c0843d0e0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(6)),
+        ("c0843d0f0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(7)),
+        ("c0843d0b0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Parses),
+        ("c0843d1c0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(4)),
+        ("c0843d1b0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Parses),
+        ("c0843d0408d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::SizeBit),
+        ("c0843dec0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(4)),
+        // #9, #10, #11: a size-flagged v3 tree whose constant 0 is a Box with a tree of its own
+        ("c0843d1b310263c0843d0c0208d301000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(4)),
+        ("c0843d1b310263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Parses),
+        ("c0843d1b300263c0843d0408d301000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Parses),
+        // #12, #13: a Box in R4
+        ("c0843d0008d301000163c0843d0c0208d30100000000000000000000000000000000000000000000000000000000000000000000001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(4)),
+        ("c0843d0008d301000163c0843d0b0208d30100000000000000000000000000000000000000000000000000000000000000000000001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Parses),
+    ];
+
+    /// SANTA `Box.tree_version_above_activated`, wire v5: under activated 2
+    const BOXES_AT_2: [(&str, Jvm); 6] = [
+        ("c0843d0b0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(3)),
+        ("c0843d0a0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Parses),
+        ("c0843d0c0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(4)),
+        ("c0843d1b0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(3)),
+        ("c0843d1a310263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Version(3)),
+        ("c0843d1a310263c0843d0a0208d301000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400", Jvm::Parses),
+    ];
+
+    fn check_boxes(activated: u8, boxes: &[(&str, Jvm)]) {
+        for (i, (hex, jvm)) in boxes.iter().enumerate() {
+            let parsed = box_at(activated, hex);
+            match jvm {
+                Jvm::Parses => {
+                    // round-trip identity
+                    let written = parsed.unwrap().sigma_serialize_bytes().unwrap();
+                    assert_eq!(base16::encode_lower(&written), *hex, "#{i}");
+                }
+                Jvm::Version(version) => {
+                    assert_eq!(
+                        parsed.err(),
+                        Some(version_error(*version, activated)),
+                        "#{i}"
+                    )
+                }
+                Jvm::SizeBit => {
+                    let err = parsed.unwrap_err();
+                    assert!(!err.escapes_sized_tree_degrade(), "#{i}: {err:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn santa_s_boxes_under_activated_3() {
+        check_boxes(3, &BOXES_AT_3);
+    }
+
+    #[test]
+    fn santa_s_boxes_under_activated_2() {
+        check_boxes(2, &BOXES_AT_2);
+    }
+
+    #[test]
+    fn santa_s_boxes_without_a_context() {
+        // what a node reads from the UTXO set: every one of them, but the tree without its
+        // size bit
+        for (i, (hex, jvm)) in BOXES_AT_3.iter().chain(BOXES_AT_2.iter()).enumerate() {
+            let bytes = base16::decode(hex.as_bytes()).unwrap();
+            assert_eq!(
+                ErgoBox::sigma_parse_bytes(&bytes).is_ok(),
+                *jvm != Jvm::SizeBit,
+                "#{i}"
             );
         }
     }

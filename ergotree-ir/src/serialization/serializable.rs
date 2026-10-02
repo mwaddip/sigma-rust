@@ -112,6 +112,12 @@ pub enum SigmaParsingError {
     /// sigmastate's `require` throws an `IllegalArgumentException`
     #[error("CTHRESHOLD needs 0 <= k <= n <= 255, got k = {0}, n = {1}")]
     CthresholdOutOfBounds(u16, usize),
+    /// A tree whose version is above the activated script version, from activated 2:
+    /// sigmastate's `VersionContext` refuses the pair (`VersionContext.scala:17-21`), and
+    /// `deserializeErgoTree` rethrows it as a `SerializerException`
+    /// (`ErgoTreeSerializer.scala:191-193`)
+    #[error("Tree version ({0}) is above activated script version ({1})")]
+    TreeVersionAboveActivated(u8, u8),
     /// A bitwise operation with a non-numeric operand: sigmastate's `BitOp` requires
     /// numeric operands and throws an `IllegalArgumentException`
     #[error("bitwise operation on non-numeric operands: {0}")]
@@ -269,7 +275,10 @@ impl SigmaParsingError {
     /// opcode, a bad BigInt size and a `getUIntExact` value above `Int.MaxValue`, and a Box
     /// constant's register that holds no value, or a seventh register. So does an `Append` or
     /// `Slice` whose input is not a collection (`transformers.scala:62`, `:89`), and a concrete
-    /// collection's item of another type than the declared one (an `AssertionError`).
+    /// collection's item of another type than the declared one (an `AssertionError`). So does
+    /// a tree whose version is above the activated script version: the `VersionContext`'s
+    /// `IllegalArgumentException` is rethrown as a `SerializerException`
+    /// (`ErgoTreeSerializer.scala:191-193`).
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         if self.is_position_limit_exceeded() {
             return false;
@@ -294,6 +303,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::CollectionItemTypeMismatch(_)
                 | SigmaParsingError::ArrayLengthExceeded(_)
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
+                | SigmaParsingError::TreeVersionAboveActivated(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)
                 | SigmaParsingError::UnsizedTreeValidationError(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)

@@ -742,6 +742,80 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_tree_above_the_activated_version_fails_the_transaction_s_parse() {
+        // SANTA `Transaction.tree_version_above_activated`, wire v6. A block of version 4 is
+        // read under activated 3 (ergo v6.0.6 `BlockTransactions.scala:184-202`), and the
+        // check reaches every tree in the transaction: an output's (#0, #4), a Box's in an
+        // output's R4 (#12, #13) and a Box's in an input's context extension (#14, #15).
+        // Each pair is the same transaction with a v4 tree, then with a v3 one.
+        let v3 = ErgoTreeVersion::V3;
+        for (i, hex) in [
+            "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0c0208d3010000",
+            "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0b0208d3010000",
+            "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d301000163c0843d0c0208d3010000000000000000000000000000000000000000000000000000000000000000000000",
+            "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d301000163c0843d0b0208d3010000000000000000000000000000000000000000000000000000000000000000000000",
+            "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010063c0843d0c0208d3010000000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d3010000",
+            "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010063c0843d0b0208d3010000000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d3010000",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = base16::decode(hex).unwrap();
+            let parsed = from_bytes(&bytes).with_versions(v3, v3, Transaction::sigma_parse);
+            if i % 2 == 0 {
+                assert_eq!(
+                    parsed.err(),
+                    Some(SigmaParsingError::TreeVersionAboveActivated(4, 3)),
+                    "{i}"
+                );
+            } else {
+                assert!(parsed.is_ok(), "{i}");
+            }
+            // a block below version 4 is read with no context: any tree version parses
+            assert!(Transaction::sigma_parse_bytes(&bytes).is_ok(), "{i}");
+        }
+    }
+
+    #[test]
+    fn transactions_read_one_after_another_are_each_under_the_activated_version() {
+        // A block section: its transactions follow one another on one reader, each read
+        // under the block's versions (ergo v6.0.6 `BlockTransactions.scala:184-202`). The
+        // third one's output has a v4 tree, the first two's a v3 one.
+        let v3 = ErgoTreeVersion::V3;
+        let with_tree = |header: &str| {
+            let hex = format!(
+                "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100\
+                 00000001c0843d{header}0208d3010000"
+            );
+            base16::decode(hex.as_bytes()).unwrap()
+        };
+        let section = [with_tree("0b"), with_tree("0b"), with_tree("0c")].concat();
+        let version_error = Some(SigmaParsingError::TreeVersionAboveActivated(4, 3));
+
+        // each under its own scope
+        let mut r = from_bytes(&section);
+        assert!(r.with_versions(v3, v3, Transaction::sigma_parse).is_ok());
+        assert!(r.with_versions(v3, v3, Transaction::sigma_parse).is_ok());
+        assert_eq!(
+            r.with_versions(v3, v3, Transaction::sigma_parse).err(),
+            version_error
+        );
+
+        // all under one scope
+        let mut r = from_bytes(&section);
+        let read: Vec<_> = r.with_versions(v3, v3, |r| {
+            (0..3).map(|_| Transaction::sigma_parse(r).err()).collect()
+        });
+        assert_eq!(read, [None, None, version_error]);
+
+        // the scope ends with its closure: the third one, read after it, is under no context
+        let mut r = from_bytes(&section);
+        assert!(r.with_versions(v3, v3, Transaction::sigma_parse).is_ok());
+        assert!(r.with_versions(v3, v3, Transaction::sigma_parse).is_ok());
+        assert!(Transaction::sigma_parse(&mut r).is_ok());
+    }
+
     /// `tx` read at `version`
     fn parse_at(tx: &[u8], version: ErgoTreeVersion) -> Result<Transaction, SigmaParsingError> {
         let mut r = from_bytes(tx);
