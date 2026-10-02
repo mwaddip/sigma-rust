@@ -1032,6 +1032,128 @@ mod test {
         ));
     }
 
+    /// The state SANTA's `tree-version-above-activated` spends are validated in (transaction
+    /// tier): its parameters and height at `block_version`. The headers are arbitrary: no
+    /// script here reads one.
+    fn santa_state_context(block_version: u8) -> ErgoStateContext {
+        use crate::chain::parameters::Parameter;
+        let mut state_context: ErgoStateContext = force_any_val();
+        state_context.pre_header.version = block_version;
+        state_context.pre_header.height = 1051200;
+        for (parameter, value) in [
+            (Parameter::MaxBlockCost, 1000000),
+            (Parameter::StorageFeeFactor, 1250000),
+            (Parameter::MinValuePerByte, 360),
+            (Parameter::InputCost, 2000),
+            (Parameter::DataInputCost, 100),
+            (Parameter::OutputCost, 100),
+            (Parameter::TokenAccessCost, 100),
+            (Parameter::BlockVersion, block_version as i32),
+        ] {
+            state_context
+                .parameters
+                .parameters_table
+                .insert(parameter, value);
+        }
+        state_context
+    }
+
+    /// One of SANTA's spends: its transaction, the spent box and a data input
+    type SantaSpend = (&'static str, &'static str, Option<&'static str>);
+
+    /// One of SANTA's spends at `block_version`, read as a node reads it: a block's
+    /// transactions under (blockVersion - 1) from block version 4 and with no context before
+    /// (ergo v6.0.6 `BlockTransactions.scala:184-202`, where the block version is a signed
+    /// byte), a box from the UTXO set with none
+    fn santa_spend(
+        block_version: u8,
+        (tx, input, data_input): SantaSpend,
+    ) -> Result<u64, TxValidationError> {
+        use ergotree_ir::ergo_tree::ErgoTreeVersion;
+        use ergotree_ir::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
+        use ergotree_ir::serialization::SigmaSerializable;
+        let tx_bytes = base16::decode(tx).unwrap();
+        let tx = if block_version as i8 >= 4 {
+            let activated = ErgoTreeVersion::from(block_version - 1);
+            from_bytes(&tx_bytes)
+                .with_versions(activated, activated, Transaction::sigma_parse)
+                .unwrap()
+        } else {
+            Transaction::sigma_parse_bytes(&tx_bytes).unwrap()
+        };
+        let parse_box =
+            |hex: &str| ErgoBox::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap();
+        let data_boxes = data_input.map(parse_box).into_iter().collect();
+        TransactionContext::new(tx, vec![parse_box(input)], data_boxes)
+            .unwrap()
+            .validate(&santa_state_context(block_version))
+    }
+
+    /// SANTA `tree-version-above-activated-eval`, transaction tier, at block version 4: spends
+    /// whose script deserializes a Box while it runs. The Box's tree is v4 in each entry that
+    /// is refused, and v3 in its twin.
+    /// - #0, #1: `DeserializeContext(1, SigmaProp)`, whose script holds the Box as a constant.
+    /// - #2, #3: the same script through `DeserializeRegister(R4, SigmaProp)`.
+    /// - #4, #5: a `DeserializeContext` in a branch that is never taken, decoded all the same.
+    /// - #6, #7: `SubstConstants` over a template whose constant 0 is the Box.
+    /// - #8: a template whose own header is v4, with no Box. Its version is not compared.
+    /// - #9, #10: `Global.deserializeTo[Box]`, in a v3 tree.
+    const SANTA_EVAL: [SantaSpend; 11] = [
+        ("01dd4eb3e616b9d69842d694abe46d57ff5798504fa4a5a749eec09a3c34c1aee40001010e33d191c1638094ebdc030c0208d3010000355c6041d6c39f3fdcf9c7b76d16aa0ac2588677ead70aa29692362f66eed2680005000000018094ebdc030008d3010000", "8094ebdc0300d40801010000bd687baa88d495611420610f616d2540816da1102f3c0cf9c01502049dcf796900", None),
+        ("01f9f3b4b7b291a01ccce09312cdd25f40154a350a350d18655bd0ed0cec4731bb0001010e33d191c1638094ebdc030b0208d3010000355c6041d6c39f3fdcf9c7b76d16aa0ac2588677ead70aa29692362f66eed2680005000000018094ebdc030008d3010000", "8094ebdc0300d4080101000074e88b04fd35f5b1f5d290aff828d6ea83dcfbed4e67e8ae81a9cda6f557b5ec00", None),
+        ("01b29e99974e34a1abeb19b65d7e8999c780d0e9c3c42940af8e4c22523ae1d98f00000000018094ebdc030008d3010000", "8094ebdc0300d50408000100010e33d191c1638094ebdc030c0208d3010000355c6041d6c39f3fdcf9c7b76d16aa0ac2588677ead70aa29692362f66eed26800050039c4e831ad242c5dd92703d7a0c27646e1bcd476ca8abe39313572c036e01b1900", None),
+        ("01bfef4aba3978f2199992caf8ce60fa7580ef3cf27b098fa4a2b3448aebadd0df00000000018094ebdc030008d3010000", "8094ebdc0300d50408000100010e33d191c1638094ebdc030b0208d3010000355c6041d6c39f3fdcf9c7b76d16aa0ac2588677ead70aa29692362f66eed268000500ebfd10d5cd99b813fadc622466046d36c89a9e9d469725e188404aee931ca40100", None),
+        ("011bde0832c5b9a3469bab9adafb4d3f84c8b99547e73a8db69daf91f886abcd1f0001010e3291c1638094ebdc030c0208d3010000355c6041d6c39f3fdcf9c7b76d16aa0ac2588677ead70aa29692362f66eed2680005000000018094ebdc030008d3010000", "8094ebdc0300d1950100d40101010101000042c56bcbeb3f93cb65fc790aa446771f8f1065edced8737888de5165020ff0c900", None),
+        ("01e5c7aa85cf01feca523538a7e31499a5ddb4ec5fa1972e9f693cc7b5ecf7dbff0001010e3291c1638094ebdc030b0208d3010000355c6041d6c39f3fdcf9c7b76d16aa0ac2588677ead70aa29692362f66eed2680005000000018094ebdc030008d3010000", "8094ebdc0300d1950100d40101010101000066d0bc484e3c6815f8601cfc29272a10a8ac37aea5d7b7f05d4c23df41a90eb600", None),
+        ("01e903fbd58487fe2d394e9aef7e3f3dec09bcbcdfd78ac740c3af9f0f04d234c20001010e391002638094ebdc030c0208d3010000355c6041d6c39f3fdcf9c7b76d16aa0ac2588677ead70aa29692362f66eed268000500d191c1730073010000018094ebdc030008d3010000", "8094ebdc0310010400d191b174e4e3010e830004830004730001000064818d45390b3a202031a3dbb61c1c699d9083968061b151fe62cea897cfa3a400", None),
+        ("0125cb9efe258240d231a3db50bc86a34963857de772062f43f67245ca71cd37f80001010e391002638094ebdc030b0208d3010000355c6041d6c39f3fdcf9c7b76d16aa0ac2588677ead70aa29692362f66eed268000500d191c1730073010000018094ebdc030008d3010000", "8094ebdc0310010400d191b174e4e3010e8300048300047300010000e2e73c11a787ff44d6da11ed089dae4eb5900d072cf91c3fb9e0c8f3685241ac00", None),
+        ("0126464b0c9eae536e779a2aa440d6ba4dc5d57504648eb73d677db1ed354d14960001010e071c050108d373000000018094ebdc030008d3010000", "8094ebdc0310010400d191b174e4e3010e8300048300047300010000802028f0b897b557086d4e5baefe3a24dcdbcf4a1713b9d69cc17429f32f2e4c00", None),
+        ("01dd18174bab5d9d291c55e599690cab3c51e63d7336db4233974525ab798d55dd0001010e2d8094ebdc030c0208d3010000355c6041d6c39f3fdcf9c7b76d16aa0ac2588677ead70aa29692362f66eed268000000018094ebdc030008d3010000", "8094ebdc031b12010500d191c1dc6a04dd01e4e3010e637300010000b1edcd88cc0bb55c8fbdd87b922a26bd07645cafab8aefbf482f2d08d666d76f00", None),
+        ("014d99d96b6f2194ccdf7a6f9ab744b888d4dffd623b402a2acc77efcdab5327340001010e2d8094ebdc030b0208d3010000355c6041d6c39f3fdcf9c7b76d16aa0ac2588677ead70aa29692362f66eed268000000018094ebdc030008d3010000", "8094ebdc031b12010500d191c1dc6a04dd01e4e3010e637300010000290728210a800aa2c9aa362f061e7bed6466839c36509a980859f812b7bd6a5800", None),
+    ];
+    #[test]
+    fn a_tree_deserialized_during_a_spend_is_read_under_the_activated_version() {
+        // sigmastate reduces inside `withVersions(activated, ergoTree.version)`
+        // (`Interpreter.scala:366`), so `deserializeErgoTree` compares a tree that is
+        // deserialized while the script runs with the activated version
+        // (`ErgoTreeSerializer.scala:150-154`), and the spend is invalid. The spends the JVM
+        // accepts are at its costs.
+        for (i, cost) in [
+            None,
+            Some(12215),
+            None,
+            Some(12217),
+            None,
+            Some(12223),
+            None,
+            Some(12141),
+            Some(12131),
+            None,
+            Some(12124),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let res = santa_spend(4, SANTA_EVAL[i]);
+            match cost {
+                Some(cost) => assert_eq!(res.as_ref().ok(), Some(&cost), "#{i}: {res:?}"),
+                None => {
+                    // the parser's error, as the variant or, where the evaluator reports it
+                    // with the script's source, as its message
+                    let refused = format!("{res:?}");
+                    assert!(
+                        res.is_err()
+                            && (refused.contains("TreeVersionAboveActivated(4, 3)")
+                                || refused.contains(
+                                    "Tree version (4) is above activated script version (3)"
+                                )),
+                        "#{i}: {refused}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_monotonic_box_creation() {
         let true_tree = ErgoTree::new(

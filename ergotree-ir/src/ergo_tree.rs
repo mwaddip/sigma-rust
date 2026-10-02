@@ -499,8 +499,9 @@ impl ErgoTree {
     /// the resulting bytes and the number of constants in the tree;
     /// `positions.len()` must equal `new_values.len()`.
     ///
-    /// `tree_version` is the *evaluation's* ErgoTree version (not the
-    /// template header's). The tree-size slot is re-emitted only when it is
+    /// `activated_version` and `tree_version` are the *evaluation's* versions (not the
+    /// template header's): sigmastate substitutes inside the `VersionContext` of the spend
+    /// (`Interpreter.scala:366`). The tree-size slot is re-emitted only when the tree version is
     /// `>= V3` — the V6 soft-fork `isV3OrLaterErgoTreeVersion` gate in
     /// `ErgoTreeSerializer.scala`; for `<= V2` the slot is dropped even
     /// though the header's `has_size` bit stays set, a JVM quirk we mirror
@@ -509,6 +510,7 @@ impl ErgoTree {
         script_bytes: Vec<u8>,
         positions: &[usize],
         new_values: &[Constant],
+        activated_version: ErgoTreeVersion,
         tree_version: ErgoTreeVersion,
     ) -> Result<(Vec<u8>, usize), ErgoTreeError> {
         use core3::io::Write;
@@ -518,14 +520,16 @@ impl ErgoTree {
             let mut r =
                 SigmaByteReader::new(Cursor::new(script_bytes.as_slice()), ConstantStore::empty());
             let header = ErgoTreeHeader::sigma_parse(&mut r)?;
-            let (constants, body_start) = r.with_tree_version(
-                // Parse the template's constants under the OUTER evaluation's tree
-                // version, not the template header's own version. The JVM's
+            let (constants, body_start) = r.with_versions(
+                // Parse the template's constants under the OUTER evaluation's versions,
+                // not the template header's own version. The JVM's
                 // `ErgoTreeSerializer.substituteConstants` reuses the outer
                 // `VersionContext` (no inner re-entry), so a v3-only constant
                 // (e.g. an Option) is accepted iff the OUTER tree is v3 — over- or
-                // under-accepting otherwise. The template's own header version
-                // governs only the re-emitted header byte (written verbatim below).
+                // under-accepting otherwise — and a Box constant's tree is compared with
+                // the activated version. The template's own header version governs only
+                // the re-emitted header byte (written verbatim below).
+                activated_version,
                 tree_version,
                 |r| -> Result<(Vec<Constant>, usize), SigmaParsingError> {
                     if header.has_size() {
@@ -751,6 +755,7 @@ mod tests {
     use crate::mir::bool_to_sigma::BoolToSigmaProp;
     use crate::mir::constant::Literal;
     use crate::mir::deserialize_context::DeserializeContext;
+    use crate::serialization::sigma_byte_reader::DEFAULT_ACTIVATED_VERSION;
     use crate::sigma_protocol::sigma_boolean::SigmaProp;
     use proptest::prelude::*;
 
@@ -978,6 +983,7 @@ mod tests {
                 bytes,
                 &[pos],
                 core::slice::from_ref(&dummy),
+                DEFAULT_ACTIVATED_VERSION,
                 ErgoTreeVersion::V3,
             )
             .unwrap()
@@ -1023,10 +1029,22 @@ mod tests {
         assert!(bytes[1] < 0x80, "test assumes a single-byte size VLQ");
 
         // No substitution: the only inter-version difference is the size slot.
-        let (out_v3, _) =
-            ErgoTree::substitute_constants(bytes.clone(), &[], &[], ErgoTreeVersion::V3).unwrap();
-        let (out_v2, _) =
-            ErgoTree::substitute_constants(bytes.clone(), &[], &[], ErgoTreeVersion::V2).unwrap();
+        let (out_v3, _) = ErgoTree::substitute_constants(
+            bytes.clone(),
+            &[],
+            &[],
+            DEFAULT_ACTIVATED_VERSION,
+            ErgoTreeVersion::V3,
+        )
+        .unwrap();
+        let (out_v2, _) = ErgoTree::substitute_constants(
+            bytes.clone(),
+            &[],
+            &[],
+            DEFAULT_ACTIVATED_VERSION,
+            ErgoTreeVersion::V2,
+        )
+        .unwrap();
 
         // v>=3: size slot kept => byte-identical round-trip.
         assert_eq!(out_v3, bytes, "v3 must re-emit the size slot");
@@ -1059,14 +1077,28 @@ mod tests {
         // Outer v3: the Option type/data parse under v3 → accepted (mirrors the JVM
         // outer-v3 vector evaluating to the substituted Coll[Byte]).
         assert!(
-            ErgoTree::substitute_constants(bytes.clone(), &[], &[], ErgoTreeVersion::V3).is_ok(),
+            ErgoTree::substitute_constants(
+                bytes.clone(),
+                &[],
+                &[],
+                DEFAULT_ACTIVATED_VERSION,
+                ErgoTreeVersion::V3
+            )
+            .is_ok(),
             "outer v3 must parse the v3-only Option template constant"
         );
         // Outer v2: the v3-only Option DATA is not serializable at v2 → rejected,
         // even though the template header claims v3 (mirrors the JVM outer-v2 vector
         // erroring). Pre-fix this wrongly used the template header (v3) and accepted.
         assert!(
-            ErgoTree::substitute_constants(bytes, &[], &[], ErgoTreeVersion::V2).is_err(),
+            ErgoTree::substitute_constants(
+                bytes,
+                &[],
+                &[],
+                DEFAULT_ACTIVATED_VERSION,
+                ErgoTreeVersion::V2
+            )
+            .is_err(),
             "outer v2 must reject the v3-only Option template constant"
         );
     }
@@ -1803,6 +1835,7 @@ mod header_bits_tests {
     //! of the tree's bytes, and so of every box and transaction id over them.
     use super::*;
     use crate::mir::constant::Literal;
+    use crate::serialization::sigma_byte_reader::DEFAULT_ACTIVATED_VERSION;
     use crate::sigma_protocol::sigma_boolean::SigmaProp;
 
     #[test]
@@ -1834,6 +1867,7 @@ mod header_bits_tests {
             vec![0x38, 0x05, 0x01, 0x08, 0xd3, 0x73, 0x00],
             &[0],
             &[new_value],
+            DEFAULT_ACTIVATED_VERSION,
             ErgoTreeVersion::V3,
         )
         .unwrap();
@@ -1848,6 +1882,7 @@ mod constants_count_tests {
     //! wraps negative means no constants, and `safeNewArray` refuses a count above
     //! `MaxArrayLength` before reading a constant (`ErgoTreeSerializer.scala:250-261`).
     use super::*;
+    use crate::serialization::sigma_byte_reader::DEFAULT_ACTIVATED_VERSION;
 
     #[test]
     fn a_count_that_wraps_negative_means_no_constants() {
@@ -1906,6 +1941,7 @@ mod constants_count_tests {
             vec![0x18, 0x07, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x08, 0xd3],
             &[],
             &[],
+            DEFAULT_ACTIVATED_VERSION,
             ErgoTreeVersion::V3,
         )
         .unwrap();
@@ -2423,6 +2459,7 @@ mod activated_version_tests {
     use super::*;
     use crate::chain::ergo_box::ErgoBox;
     use crate::serialization::sigma_byte_reader::from_bytes;
+    use crate::serialization::sigma_byte_reader::DEFAULT_ACTIVATED_VERSION;
 
     /// A size-flagged tree of `header`'s version: `SigmaProp(true)`
     fn tree(header: u8) -> Vec<u8> {
@@ -2609,6 +2646,54 @@ mod activated_version_tests {
     #[test]
     fn santa_s_boxes_under_activated_2() {
         check_boxes(2, &BOXES_AT_2);
+    }
+
+    /// The tree of SANTA's box `i`: what is between the box's value and its last 36 bytes
+    fn tree_of(i: usize) -> Vec<u8> {
+        let bytes = base16::decode(BOXES_AT_3[i].0.as_bytes()).unwrap();
+        bytes[3..bytes.len() - 36].to_vec()
+    }
+
+    #[test]
+    fn substitute_constants_reads_the_template_s_constants_under_the_activated_version() {
+        // `substituteConstants` reads every constant of the template
+        // (`ErgoTreeSerializer.scala:320-326`, `:269`, `:245`) inside the spend's
+        // `VersionContext` (`Interpreter.scala:366`), so a Box constant's tree is compared
+        // with the activated version. #9's tree has such a Box, with a v4 tree; #10's has a
+        // v3 one. SANTA `tree-version-above-activated-eval` #6 and #7 are the spends
+        // (replayed in ergo-lib's `tx_context`).
+        let v3 = ErgoTreeVersion::V3;
+        assert_eq!(
+            ErgoTree::substitute_constants(tree_of(9), &[], &[], v3, v3),
+            Err(ErgoTreeError::SigmaParsingError(version_error(4, 3)))
+        );
+        assert_eq!(
+            ErgoTree::substitute_constants(tree_of(10), &[], &[], v3, v3)
+                .unwrap()
+                .0,
+            tree_of(10)
+        );
+        assert_eq!(
+            ErgoTree::substitute_constants(tree_of(9), &[], &[], DEFAULT_ACTIVATED_VERSION, v3)
+                .unwrap()
+                .0,
+            tree_of(9)
+        );
+    }
+
+    #[test]
+    fn substitute_constants_does_not_compare_the_template_s_own_version() {
+        // `substituteConstants` reads the template's header with `deserializeHeaderAndSize`
+        // and never enters `deserializeErgoTree`: a v4 template with one `SigmaProp(true)`
+        // constant comes back as it is (SANTA `tree-version-above-activated-eval` #8)
+        let template = vec![0x1c, 0x05, 0x01, 0x08, 0xd3, 0x73, 0x00];
+        let v3 = ErgoTreeVersion::V3;
+        assert_eq!(
+            ErgoTree::substitute_constants(template.clone(), &[], &[], v3, v3)
+                .unwrap()
+                .0,
+            template
+        );
     }
 
     #[test]
