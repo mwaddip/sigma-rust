@@ -5,6 +5,8 @@ use wasm_bindgen::prelude::*;
 extern crate derive_more;
 use derive_more::{From, Into};
 
+use crate::error_conversion::to_js;
+
 /// Blockchain parameters
 #[wasm_bindgen]
 #[derive(PartialEq, Debug, Clone, Eq, From, Into)]
@@ -12,9 +14,43 @@ pub struct Parameters(pub(crate) parameters::Parameters);
 
 #[wasm_bindgen]
 impl Parameters {
-    /// Return default blockchain parameters that were set at genesis
+    /// Return default blockchain parameters that were set at genesis, with block version 1.
+    /// The parameters' block version activates scripts, for signing too: under the default
+    /// only a version 0 tree is signed. A wallet passes the chain's parameters, see the
+    /// constructor and `from_json`
     pub fn default_parameters() -> Parameters {
         parameters::Parameters::default().into()
+    }
+    /// Create new parameters from provided blockchain parameters
+    #[wasm_bindgen(constructor)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        block_version: i32,
+        storage_fee_factor: i32,
+        min_value_per_byte: i32,
+        max_block_size: i32,
+        max_block_cost: i32,
+        token_access_cost: i32,
+        input_cost: i32,
+        data_input_cost: i32,
+        output_cost: i32,
+    ) -> Parameters {
+        parameters::Parameters::new(
+            block_version,
+            storage_fee_factor,
+            min_value_per_byte,
+            max_block_size,
+            max_block_cost,
+            token_access_cost,
+            input_cost,
+            data_input_cost,
+            output_cost,
+        )
+        .into()
+    }
+    /// Parse parameters from JSON. Supports Ergo Node API/Explorer API
+    pub fn from_json(json: &str) -> Result<Parameters, JsValue> {
+        serde_json::from_str(json).map(Self).map_err(to_js)
     }
     /// Get current block version
     pub fn block_version(&self) -> i32 {
