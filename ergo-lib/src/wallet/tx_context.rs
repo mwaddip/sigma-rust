@@ -1308,6 +1308,49 @@ mod test {
     }
 
     #[test]
+    fn a_tree_above_the_activated_version_is_not_reduced_for_signing() {
+        // `ReducingInterpreter.reduce` goes to `fullReduction` without `checkSoftForkCondition`
+        // (sigmastate v6.0.6 `ReducingInterpreter.scala:33-45`), and the reduction's
+        // `VersionContext` refuses the tree (`Interpreter.scala:207`,
+        // `VersionContext.scala:17-21`). SANTA measured `fullReduction` on the JVM; this path
+        // follows from it and has no vector. SANTA v6 #0's spend, a v4 tree at block version
+        // 4, then #4's, a v3 tree.
+        use crate::chain::transaction::reduced::reduce_tx;
+        use crate::wallet::signing::TxSigningError;
+        use ergotree_interpreter::eval::EvalError;
+        use ergotree_interpreter::sigma_protocol::prover::ProverError;
+        use ergotree_ir::serialization::SigmaSerializable;
+        let reduce = |(tx, input, _): SantaSpend| {
+            let tx = Transaction::sigma_parse_bytes(&base16::decode(tx).unwrap()).unwrap();
+            let unsigned = UnsignedTransaction::new(
+                tx.inputs.mapped(|input| {
+                    UnsignedInput::new(input.box_id, input.spending_proof.extension)
+                }),
+                tx.data_inputs,
+                tx.output_candidates,
+            )
+            .unwrap();
+            let input = ErgoBox::sigma_parse_bytes(&base16::decode(input).unwrap()).unwrap();
+            reduce_tx(
+                TransactionContext::new(unsigned, vec![input], vec![]).unwrap(),
+                &santa_state_context(4),
+            )
+        };
+        let refused = reduce(SANTA_V6[0]);
+        assert!(
+            matches!(
+                refused,
+                Err(TxSigningError::ProverError(
+                    ProverError::EvalError(EvalError::TreeVersionAboveActivated { .. }),
+                    0
+                ))
+            ),
+            "{refused:?}"
+        );
+        assert!(reduce(SANTA_V6[4]).is_ok());
+    }
+
+    #[test]
     fn test_monotonic_box_creation() {
         let true_tree = ErgoTree::new(
             ErgoTreeHeader::v0(true),

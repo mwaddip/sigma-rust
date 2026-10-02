@@ -87,8 +87,10 @@ pub enum EvalError {
         /// Currently activated script version on network
         activated_version: ErgoTreeVersion,
     },
-    /// A spend of a tree whose version is above the activated script version: sigmastate's
-    /// `checkSoftForkCondition` throws an `InterpreterException` (`Interpreter.scala:325-327`)
+    /// A tree whose version is above the activated script version. sigmastate refuses it at
+    /// the start of a spend, where `checkSoftForkCondition` throws an `InterpreterException`
+    /// (`Interpreter.scala:325-327`), and from activated 2 in any reduction, whose
+    /// `VersionContext` refuses the pair (`:207`, `VersionContext.scala:17-21`)
     #[error(
         "ErgoTree version {} is higher than activated {activated_version}",
         u8::from(*.tree_version)
