@@ -26,7 +26,15 @@ pub struct ErgoStateContext {
 impl ErgoStateContext {
     /// Create an ErgoStateContext instance
     /// # Parameters
-    /// For signing, [Parameters::default()] is sufficient. For consensus-critical applications that validate transactions it is important that parameters represent the latest state of the blockchain
+    /// The parameters' block version activates scripts, for signing as for validation: the
+    /// activated script version is that block version minus 1, whatever the pre-header's
+    /// version. [Parameters::default()] is the table set at genesis, with block version 1.
+    /// Under it only a version 0 tree is proved, the interpreter's version gates read as
+    /// before the 5.0 protocol (`CONTEXT.selfBoxIndex` is -1, for one), in a reduction that is
+    /// signed elsewhere too, and validation applies neither the rule on an output's creation
+    /// height nor the one on a negative height. So pass the chain's block version at least,
+    /// and its whole table to validate. The table has to hold a `BlockVersion` entry: signing
+    /// and validation read it, and panic without one.
     pub fn new(
         pre_header: PreHeader,
         headers: Headers,
@@ -37,6 +45,14 @@ impl ErgoStateContext {
             headers,
             parameters,
         }
+    }
+
+    /// The block version this state judges by: the voted parameters', as a signed byte (ergo
+    /// v6.0.6 `ErgoStateContext.scala:114`, `Parameters.scala:80`). A block's header need not
+    /// carry it between epoch starts (`exBlockVersion` is checked when an epoch starts,
+    /// `:241`, `:265`), so the pre-header's version is what a script reads and nothing more.
+    pub(crate) fn block_version(&self) -> i8 {
+        self.parameters.block_version() as i8
     }
 }
 

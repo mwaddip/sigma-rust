@@ -149,6 +149,10 @@ fn compute_tx_init_cost(
 impl TransactionContext<Transaction> {
     /// Verify transaction using blockchain parameters.
     /// Returns the total accumulated script evaluation cost (in block cost units).
+    ///
+    /// # Panics
+    /// If the state context's parameters table lacks an entry this reads, the block version
+    /// among them: `Parameters`' accessors index the table.
     // This is based on validateStateful() in Ergo: https://github.com/ergoplatform/ergo/blob/48239ef98ced06617dc21a0eee5670235e362933/ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala#L357
     pub fn validate(&self, state_context: &ErgoStateContext) -> Result<u64, TxValidationError> {
         // Check that input sum does not overflow. The reference implementation
@@ -174,8 +178,10 @@ impl TransactionContext<Transaction> {
             ));
         }
 
-        // Monotonic Box creation happens after v3
-        let max_creation_height = if state_context.pre_header.version <= 2 {
+        // Monotonic Box creation happens after v3: ergo's `blockVersion <= HardeningVersion`
+        // (`ErgoTransaction.scala:379-384`), on the voted parameters' block version, a signed
+        // byte
+        let max_creation_height = if state_context.block_version() <= 2 {
             0
         } else {
             #[allow(clippy::unwrap_used)] // Unwrap is valid here since inputs can not be empty
@@ -348,7 +354,8 @@ fn verify_output(
     // context (`ErgoTransaction.scala:171-175`, `BoxUtils.scala:41`)
     let box_size = output.bytes()?.len() as u64;
     let script_size = output.script_bytes()?.len();
-    let block_version = state_context.pre_header.version;
+    // the voted parameters' (`ErgoTransaction.scala:168`)
+    let block_version = state_context.block_version();
     // Check that output is not dust
     let minimum_value = box_size * state_context.parameters.min_value_per_byte() as u64;
     if *output.value.as_u64() < minimum_value {
@@ -1043,13 +1050,13 @@ mod test {
         ));
     }
 
-    /// The state SANTA's `tree-version-above-activated` spends are validated in (transaction
-    /// tier): its parameters and height at `block_version`. The headers are arbitrary: no
-    /// script here reads one.
-    fn santa_state_context(block_version: u8) -> ErgoStateContext {
+    /// The state SANTA's spends are validated in (transaction tier): its parameters and
+    /// height, at the voted parameters' `block_version` and under a header of
+    /// `header_version`. The headers are arbitrary: no script here reads one.
+    fn santa_state_context(block_version: u8, header_version: u8) -> ErgoStateContext {
         use crate::chain::parameters::Parameter;
         let mut state_context: ErgoStateContext = force_any_val();
-        state_context.pre_header.version = block_version;
+        state_context.pre_header.version = header_version;
         state_context.pre_header.height = 1051200;
         for (parameter, value) in [
             (Parameter::MaxBlockCost, 1000000),
@@ -1072,12 +1079,20 @@ mod test {
     /// One of SANTA's spends: its transaction, the spent box and a data input
     type SantaSpend = (&'static str, &'static str, Option<&'static str>);
 
-    /// One of SANTA's spends at `block_version`, read as a node reads it: a block's
-    /// transactions under (blockVersion - 1) from block version 4 and with no context before
-    /// (ergo v6.0.6 `BlockTransactions.scala:184-202`, where the block version is a signed
-    /// byte), a box from the UTXO set with none
-    fn santa_spend(
+    /// One of SANTA's spends at `block_version`, the voted parameters' and the header's alike
+    fn santa_spend(block_version: u8, spend: SantaSpend) -> Result<u64, TxValidationError> {
+        santa_spend_under(block_version, block_version, spend)
+    }
+
+    /// One of SANTA's spends under the voted parameters' `block_version` and a header of
+    /// `header_version`, read as a node reads it: a block's transactions under
+    /// (blockVersion - 1) from block version 4 and with no context before (ergo v6.0.6
+    /// `BlockTransactions.scala:184-202`, where the block version is a signed byte), a box
+    /// from the UTXO set with none. SANTA's oracle reads the transaction at the parameters'
+    /// block version, and no entry's bytes tell that from the header's.
+    fn santa_spend_under(
         block_version: u8,
+        header_version: u8,
         (tx, input, data_input): SantaSpend,
     ) -> Result<u64, TxValidationError> {
         use ergotree_ir::ergo_tree::ErgoTreeVersion;
@@ -1097,7 +1112,7 @@ mod test {
         let data_boxes = data_input.map(parse_box).into_iter().collect();
         TransactionContext::new(tx, vec![parse_box(input)], data_boxes)
             .unwrap()
-            .validate(&santa_state_context(block_version))
+            .validate(&santa_state_context(block_version, header_version))
     }
 
     /// SANTA `tree-version-above-activated-eval`, transaction tier, at block version 4: spends
@@ -1333,7 +1348,7 @@ mod test {
             let input = ErgoBox::sigma_parse_bytes(&base16::decode(input).unwrap()).unwrap();
             reduce_tx(
                 TransactionContext::new(unsigned, vec![input], vec![]).unwrap(),
-                &santa_state_context(4),
+                &santa_state_context(4, 4),
             )
         };
         let refused = reduce(SANTA_V6[0]);
@@ -1348,6 +1363,166 @@ mod test {
             "{refused:?}"
         );
         assert!(reduce(SANTA_V6[4]).is_ok());
+    }
+
+    /// SANTA `block-version-source`, transaction tier: the voted parameters' block version,
+    /// the header's, then the spend. ergo judges a spend by the first (ergo v6.0.6
+    /// `ErgoContext.scala:28`, `ErgoStateContext.scala:114`), and a header need not carry it
+    /// between epoch starts (`exBlockVersion`, `:241`, is checked when an epoch starts, `:265`).
+    /// - #0: parameters 4, header 3, a v3 tree. Valid, 12105: activated 3.
+    /// - #1: parameters 4, header 5, a v4 `SigmaProp(false)`. Invalid, "ErgoTree version 4 is
+    ///   higher than activated 3": a header's 5 would accept it unverified.
+    /// - #2, #3: parameters 4, header 0 and 200, a v0 tree. Valid, 12105.
+    /// - #4: parameters 5, header 4, a v4 `SigmaProp(false)`. Valid, 12100, unverified.
+    /// - #5: parameters 4, header 2, an output created at height 1 from an input created at
+    ///   5. Invalid: the height rule applies from the parameters' block version 3
+    ///   (`ErgoTransaction.scala:379-384`).
+    /// - #6: the same under parameters 2 and header 4. Valid, 12105: no rule yet.
+    /// - #7: parameters 4, header 3, the script `CONTEXT.preHeader.version == 3` in a v3
+    ///   tree. Valid, 12105: a script reads the header's version.
+    const SANTA_SOURCE: [(u8, u8, SantaSpend); 8] = [
+        (4, 3, ("015e57107169ac1479ad83df2334022c0b921045c5ab0b3ec3e1e3a2d27eaceedb00000000018094ebdc030008d3010000", "8094ebdc030b0208d30100003f1f83114b9dce1440c32c8344e7689dc3b836d44b4e629c05f1f4e5333d2a7c00", None)),
+        (4, 5, ("011f22af797ddf093be3049bcef4cc1b2d0f0cbec9d9a90f1b65aebb333e0c3b8200000000018094ebdc030008d3010000", "8094ebdc030c0208d2010000e2e387d431a1ed10ff41ea69480b18c7c61b81db5b6ed574120a15601e2f414a00", None)),
+        (4, 0, ("01547dc7f867a6fe075e2f12ce3c2a6e6e7262d158c47c43fd496101e8570ceaae00000000018094ebdc030008d3010000", "8094ebdc030008d30100003218942a814426ba0c410f8c03ca876a7d0a6e5d6c1fbf51232fad829868aab700", None)),
+        (4, 200, ("01fe3015ea2b143da7a0fd9d4e965d4d7deddb5d420bdfe123f91d1cbaa25e581f00000000018094ebdc030008d3010000", "8094ebdc030008d3010000e189786b7c73a00010af9ad86a9707f7d808cd6d2af83fad6b3a01c51ff57aaa00", None)),
+        (5, 4, ("01f51ae3abf35910cfb0d7502abf1d20020071af7421577b06278830223959dc3400000000018094ebdc030008d3010000", "8094ebdc030c0208d2010000f544fff9a8c2552f2f76a73387eeadedf8636e38364242143c695ad910993b5f00", None)),
+        (4, 2, ("015fd4f96ddd63670779630e302668cf0ac8e3a71821f429434a2545d782006eac00000000018094ebdc030008d3010000", "8094ebdc030008d305000000b7e8d6d1274d3da9c8aca87e2e750f430841ece33a238add6a92dfe5e3d2f200", None)),
+        (2, 4, ("01b5227455ea515458f7eb2aad3299d5968d7ec99585b720c9fb9032e53a50facf00000000018094ebdc030008d3010000", "8094ebdc030008d3050000764a6cae679f77fb0028a93c86715376299e72284bb6f139f866c8cc2df7710300", None)),
+        (4, 3, ("012526597f1ed7c35904bbe920a2d73bc0ce65913dfc37e4b817ea98abb1a1699b00000000018094ebdc030008d3010000", "8094ebdc031b0e010203d193db6901db6503fe730001000045932ee9d7d84fc823bed895a239b45a73ab6e8f09b90d3de1a63e691af4194700", None)),
+    ];
+
+    #[test]
+    fn a_spend_is_judged_by_the_voted_parameters_block_version() {
+        enum Jvm {
+            Valid(u64),
+            /// "ErgoTree version 4 is higher than activated 3"
+            Version,
+            /// "Creation height of any output should be not less than ..."
+            Height,
+        }
+        for (i, jvm) in [
+            Jvm::Valid(12105),
+            Jvm::Version,
+            Jvm::Valid(12105),
+            Jvm::Valid(12105),
+            Jvm::Valid(12100),
+            Jvm::Height,
+            Jvm::Valid(12105),
+            Jvm::Valid(12105),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (block_version, header_version, spend) = SANTA_SOURCE[i];
+            let res = santa_spend_under(block_version, header_version, spend);
+            match jvm {
+                Jvm::Valid(cost) => assert_eq!(res.as_ref().ok(), Some(&cost), "#{i}: {res:?}"),
+                Jvm::Version => assert!(
+                    is_version_error(&res) && format!("{res:?}").contains("activated_version: 3"),
+                    "#{i}: {res:?}"
+                ),
+                Jvm::Height => assert!(
+                    matches!(res, Err(TxValidationError::MonotonicHeightError(1, 5))),
+                    "#{i}: {res:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn the_height_rule_compares_the_block_version_as_a_signed_byte() {
+        // ergo's `blockVersion <= Header.HardeningVersion` is on `Byte`s
+        // (`ErgoTransaction.scala:384`, `Header.scala:136`), so from block version 128 the
+        // rule does not apply. By source, no vector: SANTA #5's transaction, whose output is
+        // created below its input. Under the parameters' block version 128, so activated 127,
+        // it is valid, at the cost of SANTA's spend at that block version (`SANTA_EDGES` #8).
+        // Under 200 it fails on the tree's version, as every script spend does there, and not
+        // on its height.
+        let (_, _, spend) = SANTA_SOURCE[5];
+        let res = santa_spend_under(128, 4, spend);
+        assert_eq!(res.as_ref().ok(), Some(&12105), "{res:?}");
+        let res = santa_spend_under(200, 4, spend);
+        assert!(is_version_error(&res), "{res:?}");
+    }
+
+    #[test]
+    fn a_negative_creation_height_is_refused_unless_the_parameters_block_version_is_1() {
+        // ergo's `(blockVersion == 1) || out.creationHeight >= 0` is on
+        // `stateContext.blockVersion`, the voted parameters', a `Byte`
+        // (`ErgoTransaction.scala:168-173`): the rule holds at every block version but 1, at
+        // 0 and from 128 too. By source, no vector: an output created above `Int.MaxValue`
+        // does not parse (sigmastate `ErgoBoxCandidate.scala:195`), so it exists in memory
+        // only.
+        use super::verify_output;
+        let output = ErgoBox::new(
+            BoxValue::SAFE_USER_MIN,
+            ErgoTree::new(ErgoTreeHeader::v0(false), &Expr::Const(true.into())).unwrap(),
+            None,
+            NonMandatoryRegisters::empty(),
+            1 << 31,
+            force_any_val::<TxId>(),
+            0,
+        )
+        .unwrap();
+        let refused = |block_version: u8, header_version: u8| {
+            matches!(
+                verify_output(
+                    &santa_state_context(block_version, header_version),
+                    &output,
+                    0
+                ),
+                Err(TxValidationError::NegativeHeight)
+            )
+        };
+        for block_version in [0u8, 2, 4, 128, 200, 255] {
+            assert!(refused(block_version, 1), "{block_version}");
+        }
+        // under the parameters' block version 1 this rule exempts it, whatever the header's
+        assert!(!refused(1, 2));
+    }
+
+    #[test]
+    fn signing_is_activated_by_the_parameters_block_version_too() {
+        // ergo's wallet and the SDK's provers take the activated version from the parameters
+        // as well (ergo `ErgoProvingInterpreter.scala:76`; sigmastate
+        // `AppkitProvingInterpreter.scala:198`, `ReducingInterpreter.scala:146`). By source, no
+        // vector: SANTA #0's spend, a v3 tree, is signed under the parameters' block version
+        // 4, and refused under 1, which `Parameters::default()` has, whatever the header's.
+        use crate::wallet::signing::{sign_transaction, TxSigningError};
+        use ergotree_interpreter::eval::EvalError;
+        use ergotree_interpreter::sigma_protocol::prover::{ProverError, TestProver};
+        use ergotree_ir::serialization::SigmaSerializable;
+        let sign = |block_version: u8, header_version: u8| {
+            let (_, _, (tx, input, _)) = SANTA_SOURCE[0];
+            let tx = Transaction::sigma_parse_bytes(&base16::decode(tx).unwrap()).unwrap();
+            let unsigned = UnsignedTransaction::new(
+                tx.inputs.mapped(|input| {
+                    UnsignedInput::new(input.box_id, input.spending_proof.extension)
+                }),
+                tx.data_inputs,
+                tx.output_candidates,
+            )
+            .unwrap();
+            let input = ErgoBox::sigma_parse_bytes(&base16::decode(input).unwrap()).unwrap();
+            sign_transaction(
+                &TestProver { secrets: vec![] },
+                TransactionContext::new(unsigned, vec![input], vec![]).unwrap(),
+                &santa_state_context(block_version, header_version),
+                None,
+            )
+        };
+        assert!(sign(4, 3).is_ok());
+        let refused = sign(1, 4);
+        assert!(
+            matches!(
+                refused,
+                Err(TxSigningError::ProverError(
+                    ProverError::EvalError(EvalError::TreeVersionAboveActivated { .. }),
+                    0
+                ))
+            ),
+            "{refused:?}"
+        );
     }
 
     #[test]
@@ -1370,7 +1545,10 @@ mod test {
                 .unwrap();
             let mut state_context: ErgoStateContext = force_any_val();
             state_context.pre_header.height = height;
-            state_context.pre_header.version = version;
+            state_context
+                .parameters
+                .parameters_table
+                .insert(crate::chain::parameters::Parameter::BlockVersion, version);
             state_context
         };
         let box_gen = gen_boxes(

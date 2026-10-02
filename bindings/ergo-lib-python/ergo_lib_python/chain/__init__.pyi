@@ -598,7 +598,7 @@ class Parameters:
     """Parameters of blockchaian that can be adjusted by voting"""
     @classmethod
     def default(cls):
-        """Return default parameters that were set at genesis. This is sufficient to use for non consensus-critical applications such as wallets"""
+        """Return default parameters that were set at genesis, with block version 1. The parameters' block version activates scripts, for signing too: under the default only a version 0 tree is signed. A wallet passes the chain's parameters, see `from_json`"""
         ...
     @classmethod
     def from_json(cls, json: str | dict) -> Self:

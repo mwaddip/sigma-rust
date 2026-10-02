@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use ergo_chain_types::{Header, PreHeader};
 use ergo_lib::chain::ergo_state_context::{ErgoStateContext, Headers};
-use ergo_lib::chain::parameters::Parameters;
+use ergo_lib::chain::parameters::{Parameter, Parameters};
 use ergo_lib::chain::transaction::Transaction;
 use ergo_lib::wallet::signing::make_context;
 use ergo_lib::wallet::tx_context::TransactionContext;
@@ -78,6 +78,18 @@ fn count_tokens(boxes: &[ErgoBox]) -> (usize, usize) {
         }
     }
     (total, distinct.len())
+}
+
+/// The state a mainnet block's transactions are judged in. Scripts are activated by the voted
+/// parameters' block version, not by the header's (ergo v6.0.6 `ErgoContext.scala:28`,
+/// `ErgoStateContext.scala:114`); on mainnet the two are equal, so the header's is set there.
+/// The other parameters stay at their defaults.
+fn state_context_at(current_header: Header, headers_10: Headers) -> ErgoStateContext {
+    let mut parameters = Parameters::default();
+    parameters
+        .parameters_table
+        .insert(Parameter::BlockVersion, current_header.version as i32);
+    ErgoStateContext::new(PreHeader::from(current_header), headers_10, parameters)
 }
 
 /// Build the 10-header window for a given block height from a map of
@@ -257,8 +269,7 @@ fn run_parity_check_paths(tx_path: &Path, cost_path: &Path, hdr_path: &Path) -> 
                 continue;
             }
         };
-        let pre_header = PreHeader::from(current_header);
-        let state_ctx = ErgoStateContext::new(pre_header, headers_10, Parameters::default());
+        let state_ctx = state_context_at(current_header, headers_10);
 
         let tx_ctx =
             match TransactionContext::new(tx.clone(), input_boxes.clone(), data_boxes.clone()) {
@@ -730,8 +741,7 @@ fn run_validate_parity_check_paths(
             .collect::<Vec<_>>()
             .try_into()
             .unwrap();
-        let pre_header = PreHeader::from(current_header);
-        let state_ctx = ErgoStateContext::new(pre_header, headers_10, Parameters::default());
+        let state_ctx = state_context_at(current_header, headers_10);
 
         let resolved_spending: Vec<ErgoBox> = input_boxes.into_iter().flatten().collect();
         let resolved_data: Vec<ErgoBox> = data_boxes.into_iter().flatten().collect();

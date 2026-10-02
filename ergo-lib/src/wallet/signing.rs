@@ -44,6 +44,11 @@ pub enum TxSigningError {
 }
 
 /// `self_index` - index of the SELF box in the tx_ctx.spending_tx.inputs
+///
+/// # Panics
+/// If the state context's parameters table has no `BlockVersion` entry: the context's activated
+/// script version is read from it. Signing, reduction and validation all build their context
+/// here.
 pub fn make_context<'ctx, T: ErgoTransaction>(
     state_ctx: &'ctx ErgoStateContext,
     tx_ctx: &'ctx TransactionContext<T>,
@@ -112,7 +117,9 @@ pub fn make_context<'ctx, T: ErgoTransaction>(
         data_inputs: data_inputs_ir,
         inputs: inputs_ir,
         pre_header: state_ctx.pre_header.clone(),
-        activated_script_version_byte: (state_ctx.pre_header.version as i8).wrapping_sub(1),
+        // the voted parameters' block version minus 1, as a byte (ergo v6.0.6
+        // `ErgoContext.scala:28`; its wallet's too, `ErgoProvingInterpreter.scala:76`)
+        activated_script_version_byte: state_ctx.block_version().wrapping_sub(1),
         extension,
         // The JVM requires `headers(0).stateRoot.digest == lastBlockUtxoRoot.digest`
         // (`ErgoLikeContext.scala:85`), so deriving the root from the newest header
