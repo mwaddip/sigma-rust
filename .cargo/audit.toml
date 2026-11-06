@@ -1,6 +1,15 @@
 [advisories]
 ignore = [
-"RUSTSEC-2024-0436"  # un-maintained, not a good idea to replace with a dependency authored by someone else
+"RUSTSEC-2024-0436",  # un-maintained, not a good idea to replace with a dependency authored by someone else
+# crypto-bigint 0.5.5 timing variability, reached through k256 0.13 -> ecdsa 0.16 ->
+# elliptic-curve 0.13. The patch (crypto-bigint 0.7.6) only arrives with k256 0.14, i.e.
+# the next RustCrypto generation: ecdsa 0.17, signature 3, sha2/digest 0.11, generic-array
+# -> hybrid-array. The reference JVM stack provides no constant-time guarantees either, so
+# this is not an exposure the Rust implementation is held to on its own.
+"RUSTSEC-2026-0387",
+# pin-utils un-maintained, reached through hyper 1.x <- reqwest <- ergo-rest. Nothing to act
+# on until hyper drops it.
+"RUSTSEC-2026-0441",
 ]
 
 [output]
