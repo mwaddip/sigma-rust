@@ -200,6 +200,10 @@ pub enum SigmaParsingError {
     /// `NoSuchElementException`
     #[error("no register with id {0}")]
     RegisterIdOutOfRange(i8),
+    /// From tree version 3, a `MethodCall` with no arguments: sigmastate asserts there are
+    /// some after reading them (v6.0.7 `MethodCallSerializer.scala:52-55`), an `AssertionError`
+    #[error("a MethodCall with no arguments in a tree of version 3 or later")]
+    MethodCallWithoutArguments,
     /// Collection data whose element type is zero-width: `SUnit`, or a collection or tuple
     /// built only from it. Its elements take no bytes, so its declared length escapes the
     /// position limit. Rule 1020 `CheckZeroWidthCollection` (sigmastate 6.0.7
@@ -350,6 +354,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::IndexUpcastFailed(_)
                 | SigmaParsingError::BlockItemNotValDef(_)
                 | SigmaParsingError::RegisterIdOutOfRange(_)
+                | SigmaParsingError::MethodCallWithoutArguments
                 | SigmaParsingError::UnsizedTreeValidationError(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)
