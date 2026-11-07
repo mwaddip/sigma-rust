@@ -106,7 +106,13 @@ static BITWISE_INVERSE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
 
 static BITWISE_OR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
-    let rhs = args[0].clone();
+    // Checked rather than indexed: the argument count is the parser's to decide, and
+    // sigmastate parses a zero-argument MethodCall below ErgoTree v3 (writing it back as a
+    // PropertyCall). Indexing aborted the process on one.
+    let rhs = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::NotFound("bitwiseOr: missing right argument".to_string()))?;
     Ok(match _mc.obj_type {
         STypeCompanion::SByte => {
             (obj.try_extract_into::<i8>()? | rhs.try_extract_into::<i8>()?).into()
@@ -136,7 +142,13 @@ static BITWISE_OR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 
 static BITWISE_AND_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
-    let rhs = args[0].clone();
+    // Checked rather than indexed: the argument count is the parser's to decide, and
+    // sigmastate parses a zero-argument MethodCall below ErgoTree v3 (writing it back as a
+    // PropertyCall). Indexing aborted the process on one.
+    let rhs = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::NotFound("bitwiseAnd: missing right argument".to_string()))?;
     Ok(match _mc.obj_type {
         STypeCompanion::SByte => {
             (obj.try_extract_into::<i8>()? & rhs.try_extract_into::<i8>()?).into()
@@ -643,6 +655,37 @@ mod test {
         .into();
         let res: T = eval_out_wo_ctx(&inverse_mc);
         assert_eq!(res, !v);
+    }
+
+    /// A zero-argument `MethodCall` for a binary numeric method. `MethodCall`'s fields are all
+    /// public, so a struct literal bypasses the arity check `MethodCall::new` applies — which is
+    /// what the parser does once it stops checking, as sigmastate's does. sigmastate parses such
+    /// a call below ErgoTree v3 and writes it back as a `PropertyCall`.
+    fn no_arg_call(method_id: ergotree_ir::types::smethod::MethodId) -> Expr {
+        let method = snumeric::sbyte::METHODS
+            .iter()
+            .find(|m| m.method_id() == method_id)
+            .unwrap()
+            .clone();
+        MethodCall {
+            obj: Box::new(Expr::Const(Constant::from(1i8))),
+            method,
+            args: alloc::vec::Vec::new(),
+            explicit_type_args: Default::default(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn bitwise_or_with_no_argument_errors() {
+        let mc = no_arg_call(BITWISE_OR_METHOD_ID);
+        assert!(try_eval_out_wo_ctx::<i8>(&mc).is_err());
+    }
+
+    #[test]
+    fn bitwise_and_with_no_argument_errors() {
+        let mc = no_arg_call(BITWISE_AND_METHOD_ID);
+        assert!(try_eval_out_wo_ctx::<i8>(&mc).is_err());
     }
 
     fn bitwise_or<T: Numeric>(v: T, rhs: T, methods: &[SMethod]) -> T {
