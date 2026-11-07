@@ -70,10 +70,16 @@ impl SigmaSerializable for ForAll {
         self.condition.sigma_serialize(w)
     }
 
+    /// sigmastate builds `ForAll` with no check of its input or condition (v6.0.7
+    /// `transformers.scala:182`)
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
         let condition = Expr::sigma_parse(r)?;
-        Ok(ForAll::new(input, condition)?)
+        Ok(ForAll {
+            elem_tpe: super::coll_exists::parsed_elem_tpe(&input),
+            input: input.into(),
+            condition: condition.into(),
+        })
     }
 }
 
@@ -132,5 +138,21 @@ mod tests {
             let expr: Expr = v.into();
             prop_assert_eq![sigma_serialize_roundtrip(&expr), expr];
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod parse_tests {
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::SigmaSerializable;
+
+    #[test]
+    fn for_all_over_a_non_collection_parses() {
+        // sigmaProp(ForAll(Int 1, (x: Int) => true)), the twin of SANTA's Exists #0
+        let bytes = base16::decode(b"00d1af0402d90101040101").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)));
+        assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
     }
 }
