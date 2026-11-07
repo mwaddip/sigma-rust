@@ -190,6 +190,16 @@ pub enum SigmaParsingError {
     /// `syntax.scala:168-177`), an `AssertionError`
     #[error("ByIndex index cannot be upcast to Int: {0}")]
     IndexUpcastFailed(String),
+    /// A block item that is not a `ValDef`: sigmastate casts each item to `BlockItem` as it
+    /// reads it (v6.0.7 `BlockValueSerializer.scala:39`), a `ClassCastException`
+    #[error("a block item that is not a ValDef: {0}")]
+    BlockItemNotValDef(String),
+    /// A register id outside R0 to R9 in `ExtractRegisterAs` or `DeserializeRegister`:
+    /// sigmastate's `findRegisterByIndex(id).get` right after the id byte (v6.0.7
+    /// `ExtractRegisterAsSerializer.scala:28`, `DeserializeRegisterSerializer.scala:28`), a
+    /// `NoSuchElementException`
+    #[error("no register with id {0}")]
+    RegisterIdOutOfRange(i8),
     /// Collection data whose element type is zero-width: `SUnit`, or a collection or tuple
     /// built only from it. Its elements take no bytes, so its declared length escapes the
     /// position limit. Rule 1020 `CheckZeroWidthCollection` (sigmastate 6.0.7
@@ -338,6 +348,8 @@ impl SigmaParsingError {
                 | SigmaParsingError::NumericOperandExpected(_)
                 | SigmaParsingError::ConstraintFailed(_)
                 | SigmaParsingError::IndexUpcastFailed(_)
+                | SigmaParsingError::BlockItemNotValDef(_)
+                | SigmaParsingError::RegisterIdOutOfRange(_)
                 | SigmaParsingError::UnsizedTreeValidationError(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)

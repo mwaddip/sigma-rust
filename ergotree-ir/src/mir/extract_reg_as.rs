@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 
 use alloc::sync::Arc;
 
+use crate::chain::ergo_box::RegisterId;
 use crate::serialization::op_code::OpCode;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
@@ -70,6 +71,11 @@ impl SigmaSerializable for ExtractRegisterAs {
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
         let register_id = r.get_i8()?;
+        // `findRegisterByIndex(id).get` right after the id byte, before the type (v6.0.7
+        // `ExtractRegisterAsSerializer.scala:25-31`)
+        if RegisterId::try_from(register_id).is_err() {
+            return Err(SigmaParsingError::RegisterIdOutOfRange(register_id));
+        }
         let elem_tpe = SType::sigma_parse(r)?;
         Ok(ExtractRegisterAs::new(
             input,
@@ -99,5 +105,35 @@ mod tests {
         .unwrap()
         .into();
         assert_eq![sigma_serialize_roundtrip(&e), e];
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod register_id_tests {
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+
+    fn tree(hex: &str) -> Result<ErgoTree, SigmaParsingError> {
+        ErgoTree::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap())
+    }
+
+    #[test]
+    fn a_register_id_outside_r0_to_r9_rejects() {
+        // SANTA `tree_parse_acceptance` #38, #39: SELF.R10[Int].isDefined and the id byte
+        // 0x80 (-128); #40: SELF.R9[Int].isDefined parses. The size-flagged form rejects too.
+        assert!(matches!(
+            tree("00d1e6c6a70a04"),
+            Err(SigmaParsingError::RegisterIdOutOfRange(10))
+        ));
+        assert!(matches!(
+            tree("00d1e6c6a78004"),
+            Err(SigmaParsingError::RegisterIdOutOfRange(-128))
+        ));
+        assert!(matches!(
+            tree("0805d1e6c6a70a04"),
+            Err(SigmaParsingError::RegisterIdOutOfRange(10))
+        ));
+        assert!(matches!(tree("00d1e6c6a70904"), Ok(ErgoTree::Parsed(_))));
     }
 }
