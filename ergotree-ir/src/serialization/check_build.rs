@@ -373,6 +373,52 @@ mod tests {
     }
 
     #[test]
+    fn a_call_whose_types_do_not_unify_keeps_its_method() {
+        // SANTA `tree_parse_acceptance` #4: sigmaProp(SBox.value on Int 1 == Long 1).
+        // `specializeFor` keeps the method, typed Long, so the EQ is well-typed and parses.
+        assert!(roundtrips("00d193db630104020502"));
+        // #53: v3 sigmaProp(a type-9 property on Int 1 > true): the call builds, and the
+        // comparison's operands are not both numeric
+        assert!(matches!(
+            tree("0b09d191db090104020101"),
+            Err(SigmaParsingError::ConstraintFailed(_))
+        ));
+        // #48: v0 sigmaProp(1.toBytes > 0), size-flagged: below v3 no numeric method is
+        // found by id (rule 1016), which degrades the tree before GT is built
+        assert!(matches!(
+            tree("0809d191db040604020400"),
+            Ok(ErgoTree::Unparsed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_call_of_the_wrong_arity_specializes_from_the_arguments_it_has() {
+        // v3 sigmaProp(Coll(1).updated(0) == Coll(1)), the same call as updated(0, 5, 6), and
+        // as a PropertyCall. `unifyTypeLists` zips the method's domain with the object's and
+        // the arguments' types, so `updated`'s T binds to Int from the object and the EQ is
+        // well-typed (v6.0.7 `sigma/ast/package.scala:17-33`)
+        for hex in [
+            "0b0ed193dc0c14100102010400100102",
+            "0b12d193dc0c14100102030400040a040c100102",
+            "0b0bd193db0c14100102100102",
+        ] {
+            assert!(roundtrips(hex), "{hex}: {:?}", tree(hex));
+        }
+    }
+
+    #[test]
+    fn below_tree_version_3_a_method_call_with_no_arguments_is_written_as_a_property_call() {
+        // SANTA `tree_parse_acceptance` #44: v0 sigmaProp(CONTEXT method 11 ().isDefined)
+        // parses and comes back as the PropertyCall `db 65 0b fe`, one byte shorter
+        let bytes = base16::decode(b"00d1e6dc650bfe00").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert_eq!(
+            base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
+            "00d1e6db650bfe"
+        );
+    }
+
+    #[test]
     fn a_failed_build_decides_before_a_later_soft_failure() {
         // SANTA #46's order: sigmaProp(if (Upcast(x, Long) == 0L) <0xfd> else ...). The
         // Upcast is built right after its target type, before opcode 0xfd (rule 1002) is

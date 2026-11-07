@@ -42,8 +42,7 @@ impl SigmaSerializable for MethodCall {
         if r.tree_version() >= ErgoTreeVersion::V3 && args.is_empty() {
             return Err(SigmaParsingError::MethodCallWithoutArguments);
         }
-        let arg_types = args.iter().map(|arg| arg.tpe()).collect();
-        let method = SMethod::from_ids(type_id, method_id)?.specialize_for(obj.tpe(), arg_types)?;
+        let method = SMethod::from_ids(type_id, method_id)?;
         if r.tree_version() < method.method_raw.min_version {
             return Err(SigmaParsingError::UnknownMethodId(
                 method_id,
@@ -58,12 +57,22 @@ impl SigmaSerializable for MethodCall {
             .zip(core::iter::from_fn(|| Some(SType::sigma_parse(r))))
             .map(|(tpe, res)| -> Result<(STypeVar, SType), SigmaParsingError> { Ok((tpe, res?)) })
             .collect::<Result<HashMap<STypeVar, SType>, _>>()?;
-        Ok(MethodCall::with_type_args(
-            obj,
+        // `getSpecializedMethodFor`: the explicit types, then `specializeFor` over the
+        // arguments' types and the object's, which returns the method as it is when they do
+        // not unify (v6.0.7 `MethodCallSerializer.scala:77-97`, `SMethod.scala:185-191`).
+        // sigmastate builds the call with no arity or type check of its own.
+        let method = method.with_concrete_types(&explicit_type_args);
+        let arg_types = args.iter().map(|arg| arg.tpe()).collect();
+        let method = method
+            .clone()
+            .specialize_for(obj.tpe(), arg_types)
+            .unwrap_or(method);
+        Ok(MethodCall {
+            obj: obj.into(),
             method,
             args,
             explicit_type_args,
-        )?)
+        })
     }
 }
 

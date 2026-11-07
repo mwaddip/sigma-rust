@@ -141,7 +141,24 @@ impl Expr {
                 OpCode::PROPERTY_CALL => {
                     Ok(Expr::PropertyCall(PropertyCall::sigma_parse(r)?.into()))
                 }
-                OpCode::METHOD_CALL => Ok(Expr::MethodCall(MethodCall::sigma_parse(r)?.into())),
+                OpCode::METHOD_CALL => {
+                    let mc = MethodCall::sigma_parse(r)?;
+                    // A MethodCall with no arguments, which parses below tree version 3, has
+                    // PropertyCall as its companion and is written as one (v6.0.7
+                    // `values.scala:1351`). Only a method of version 3 has explicit type
+                    // arguments, so there are none to lose.
+                    if mc.args.is_empty() {
+                        Ok(Expr::PropertyCall(
+                            PropertyCall {
+                                obj: mc.obj,
+                                method: mc.method,
+                            }
+                            .into(),
+                        ))
+                    } else {
+                        Ok(Expr::MethodCall(mc.into()))
+                    }
+                }
                 OpCode::CONTEXT => Ok(Expr::Context),
                 OptionGet::OP_CODE => Ok(OptionGet::sigma_parse(r)?.into()),
                 OptionIsDefined::OP_CODE => Ok(OptionIsDefined::sigma_parse(r)?.into()),
