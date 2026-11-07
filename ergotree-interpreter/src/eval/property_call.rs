@@ -15,6 +15,8 @@ impl Evaluable for PropertyCall {
     ) -> Result<Value<'ctx>, EvalError> {
         ectx.add_jit_cost(4)?; // PropertyCall = Fixed(4)
         let ov = self.obj.eval(env, ectx)?;
+        // a PropertyCall is sigmastate's MethodCall with no arguments (`values.scala:1351`)
+        super::method_call::check_arity(&self.method, 0)?;
         smethod_eval_fn(&self.method)?(&self.method, env, ectx, ov, vec![])
     }
 }

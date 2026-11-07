@@ -118,8 +118,13 @@ pub(crate) static GET_VAR_FROM_INPUT_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, arg
     else {
         unreachable!()
     };
-    let input_idx = args[0].clone().try_extract_into::<i16>()? as usize;
-    let var_id = args[1].clone().try_extract_into::<i8>()? as u8;
+    let arg = |i: usize| {
+        args.get(i)
+            .cloned()
+            .ok_or_else(|| EvalError::NotFound(format!("getVarFromInput: missing argument {i}")))
+    };
+    let input_idx = arg(0)?.try_extract_into::<i16>()? as usize;
+    let var_id = arg(1)?.try_extract_into::<i8>()? as u8;
     // `CContext.getVarFromInput` (v6.0.6 `CContext.scala:76-82`): the variable's type decides
     // first, `stypeToRType(v.tpe) == tT`, and its data is read only then; a variable of another
     // type is `None` whatever its data
