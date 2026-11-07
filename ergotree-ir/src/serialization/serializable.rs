@@ -180,6 +180,16 @@ pub enum SigmaParsingError {
     /// `IllegalArgumentException`
     #[error("a numeric operand expected: {0}")]
     NumericOperandExpected(String),
+    /// A relation whose operands fail the deserializing builder's `check2`: a comparison of a
+    /// non-numeric operand, or two operands of different types after the builder's upcast
+    /// (v6.0.7 `SigmaBuilder.scala:286-313`, `:686-704`), a `ConstraintFailed`
+    #[error("constraint failed: {0}")]
+    ConstraintFailed(String),
+    /// Below tree version 3, a `ByIndex` index `upcastTo(SInt)` refuses: a non-numeric index,
+    /// or one wider than `Int` (v6.0.7 `ByIndexSerializer.scala:27-36`,
+    /// `syntax.scala:168-177`), an `AssertionError`
+    #[error("ByIndex index cannot be upcast to Int: {0}")]
+    IndexUpcastFailed(String),
     /// Collection data whose element type is zero-width: `SUnit`, or a collection or tuple
     /// built only from it. Its elements take no bytes, so its declared length escapes the
     /// position limit. Rule 1020 `CheckZeroWidthCollection` (sigmastate 6.0.7
@@ -326,6 +336,8 @@ impl SigmaParsingError {
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)
                 | SigmaParsingError::NumericCastTargetNotNumeric(_)
                 | SigmaParsingError::NumericOperandExpected(_)
+                | SigmaParsingError::ConstraintFailed(_)
+                | SigmaParsingError::IndexUpcastFailed(_)
                 | SigmaParsingError::UnsizedTreeValidationError(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)

@@ -1,7 +1,10 @@
 use alloc::boxed::Box;
+use alloc::format;
 
 use alloc::sync::Arc;
 
+use crate::ergo_tree::ErgoTreeVersion;
+use crate::mir::upcast::Upcast;
 use crate::serialization::op_code::OpCode;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
@@ -107,8 +110,32 @@ impl SigmaSerializable for ByIndex {
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
         let index = Expr::sigma_parse(r)?;
+        // Below tree version 3 sigmastate upcasts the index to Int right after reading it,
+        // before the default (v6.0.7 `ByIndexSerializer.scala:27-36`): `upcastTo(SInt)`
+        // asserts a numeric index no wider than Int and wraps a Byte or Short one in an
+        // `Upcast` (`syntax.scala:168-177`). From version 3 the index is taken as it is.
+        let index = if r.tree_version() < ErgoTreeVersion::V3 {
+            upcast_index_to_int(index)?
+        } else {
+            index
+        };
         let default = Option::<Box<Expr>>::sigma_parse(r)?;
         Ok(Self::new(input, index, default)?)
+    }
+}
+
+/// `upcastTo(SInt)` of a `ByIndex` index read below tree version 3
+fn upcast_index_to_int(index: Expr) -> Result<Expr, SigmaParsingError> {
+    match index.tpe() {
+        SType::SInt => Ok(index),
+        SType::SByte | SType::SShort => Ok(Upcast {
+            input: Box::new(index),
+            tpe: SType::SInt,
+        }
+        .into()),
+        tpe => Err(SigmaParsingError::IndexUpcastFailed(format!(
+            "an index of type {tpe:?}"
+        ))),
     }
 }
 
@@ -169,5 +196,37 @@ mod tests {
             let expr: Expr = v.into();
             prop_assert_eq![sigma_serialize_roundtrip(&expr), expr];
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod index_upcast_tests {
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+
+    fn tree(hex: &str) -> Result<ErgoTree, SigmaParsingError> {
+        ErgoTree::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap())
+    }
+
+    #[test]
+    fn below_tree_version_3_a_byte_index_is_upcast_to_int() {
+        // v0 sigmaProp(Coll[Int](1)(Byte 0) == 1): the index is wrapped in an Upcast to Int,
+        // which the serializer writes back as the constant
+        let hex = "00d193b21001020200000402";
+        assert_eq!(
+            tree(hex).unwrap().sigma_serialize_bytes().unwrap(),
+            base16::decode(hex.as_bytes()).unwrap()
+        );
+    }
+
+    #[test]
+    fn below_tree_version_3_an_index_wider_than_int_rejects() {
+        // SANTA `tree_parse_acceptance` #33: v0 ByIndex(Coll[Boolean](true), Long 0), an
+        // AssertionError in `upcastTo`
+        assert!(matches!(
+            tree("00d1b20d0101050000"),
+            Err(SigmaParsingError::IndexUpcastFailed(_))
+        ));
     }
 }

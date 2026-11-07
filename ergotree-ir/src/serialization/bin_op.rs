@@ -70,16 +70,7 @@ pub fn bin_op_sigma_parse<R: SigmaByteRead>(
     }
     let left = Expr::sigma_parse(r)?;
     let right = Expr::sigma_parse(r)?;
-    // `BitOp` requires numeric operands (`trees.scala:913`)
-    if matches!(op_kind, BinOpKind::Bit(_))
-        && !(left.tpe().is_numeric() && right.tpe().is_numeric())
-    {
-        return Err(SigmaParsingError::BitOpOperandsNotNumeric(format!(
-            "left: {:?}, right: {:?}",
-            left.tpe(),
-            right.tpe()
-        )));
-    }
+    // the deserializing builder and the constructor check it in `check_build`
     Ok(BinOp {
         kind: op_kind,
         left: Box::new(left),
@@ -133,12 +124,13 @@ mod tests {
     fn ser_roundtrip_eq() {
         test_ser_roundtrip(
             RelationOp::Eq.into(),
+            // operands of one type: the deserializing builder's `check2(SameType)`
             force_any_val_with::<Expr>(ArbExprParams {
-                tpe: SType::SAny,
+                tpe: SType::SInt,
                 depth: 1,
             }),
             force_any_val_with::<Expr>(ArbExprParams {
-                tpe: SType::SAny,
+                tpe: SType::SInt,
                 depth: 1,
             }),
         )
@@ -148,12 +140,13 @@ mod tests {
     fn ser_roundtrip_neq() {
         test_ser_roundtrip(
             RelationOp::NEq.into(),
+            // operands of one type: the deserializing builder's `check2(SameType)`
             force_any_val_with::<Expr>(ArbExprParams {
-                tpe: SType::SAny,
+                tpe: SType::SLong,
                 depth: 1,
             }),
             force_any_val_with::<Expr>(ArbExprParams {
-                tpe: SType::SAny,
+                tpe: SType::SLong,
                 depth: 1,
             }),
         )

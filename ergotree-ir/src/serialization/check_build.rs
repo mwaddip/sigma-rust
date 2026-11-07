@@ -11,18 +11,133 @@
 //! of a node's bytes stay in that node's parse arm, at the JVM's read position.
 
 use crate::ergo_tree::ErgoTreeVersion;
+use crate::mir::bin_op::{BinOp, BinOpKind, RelationOp};
 use crate::mir::expr::Expr;
+use crate::mir::upcast::Upcast;
 use crate::serialization::SigmaParsingError;
+use crate::types::stype::SType;
+use alloc::boxed::Box;
 use alloc::format;
 
 /// The checks sigmastate makes when it builds `expr`, which the parser has just read from a
-/// tree of version `tree_version`, in the JVM's order. Returns the node as the JVM builds it.
+/// tree of version `tree_version`, in the JVM's order: the builder's, then the constructor's.
+/// Returns the node as the JVM builds it, which below tree version 3 may wrap an operand in
+/// an `Upcast`.
 pub(crate) fn check_build(
     expr: Expr,
-    _tree_version: ErgoTreeVersion,
+    tree_version: ErgoTreeVersion,
 ) -> Result<Expr, SigmaParsingError> {
+    let expr = apply_builder(expr, tree_version)?;
     check_constructor(&expr)?;
     Ok(expr)
+}
+
+/// `DeserializationSigmaBuilder`'s checks (v6.0.7 `SigmaBuilder.scala:286-340`, `:674-704`,
+/// `:750-764`). Only the relations and the arithmetic operations go through one; every other
+/// `mk*` is a plain constructor call.
+fn apply_builder(expr: Expr, tree_version: ErgoTreeVersion) -> Result<Expr, SigmaParsingError> {
+    let Expr::BinOp(spanned) = expr else {
+        return Ok(expr);
+    };
+    let op = spanned.expr;
+    let op = match op.kind {
+        // `equalityOp`: `applyUpcast`, then `check2(SameType)` (`:298-301`, `:686-693`)
+        BinOpKind::Relation(RelationOp::Eq | RelationOp::NEq) => {
+            let op = apply_upcast(op, tree_version);
+            check2_same_type(&op)?;
+            op
+        }
+        // `comparisonOp`: `check2(OnlyNumeric)` on the operands as read, `applyUpcast`, then
+        // `check2(SameType)` (`:304-313`, `:696-704`)
+        BinOpKind::Relation(_) => {
+            check2_only_numeric(&op)?;
+            let op = apply_upcast(op, tree_version);
+            check2_same_type(&op)?;
+            op
+        }
+        // `arithOp`: `applyUpcast` only (`:316-340`, `:707-712`)
+        BinOpKind::Arith(_) => apply_upcast(op, tree_version),
+        BinOpKind::Logical(_) | BinOpKind::Bit(_) => op,
+    };
+    Ok(op.into())
+}
+
+/// `applyUpcast` (`:674-683`): two numeric operands of different types are each upcast to the
+/// wider (`upcastTo`, `syntax.scala:168-177`), which wraps the narrower in an `Upcast` node and
+/// so rewrites the tree. A no-op from tree version 3 (`:757-763`).
+fn apply_upcast(op: BinOp, tree_version: ErgoTreeVersion) -> BinOp {
+    if tree_version >= ErgoTreeVersion::V3 {
+        return op;
+    }
+    let (lt, rt) = (op.left.tpe(), op.right.tpe());
+    match (numeric_type_index(&lt), numeric_type_index(&rt)) {
+        (Some(li), Some(ri)) if li != ri => {
+            let tmax = if li > ri { lt } else { rt };
+            let upcast = |e: Box<Expr>| -> Box<Expr> {
+                if e.tpe() == tmax {
+                    e
+                } else {
+                    Box::new(
+                        Upcast {
+                            input: e,
+                            tpe: tmax.clone(),
+                        }
+                        .into(),
+                    )
+                }
+            };
+            BinOp {
+                kind: op.kind,
+                left: upcast(op.left),
+                right: upcast(op.right),
+            }
+        }
+        _ => op,
+    }
+}
+
+/// `check2(SameType)`: `left.tpe == right.tpe`, else `ConstraintFailed` (`:286-295`,
+/// `:786-788`)
+fn check2_same_type(op: &BinOp) -> Result<(), SigmaParsingError> {
+    let (lt, rt) = (op.left.tpe(), op.right.tpe());
+    if lt != rt {
+        return Err(SigmaParsingError::ConstraintFailed(format!(
+            "{:?} needs operands of one type, got {lt:?} and {rt:?}",
+            op.kind
+        )));
+    }
+    Ok(())
+}
+
+/// `check2(OnlyNumeric)`: both operands numeric (NoType is not), else `ConstraintFailed`
+/// (`:775-784`)
+fn check2_only_numeric(op: &BinOp) -> Result<(), SigmaParsingError> {
+    let (lt, rt) = (op.left.tpe(), op.right.tpe());
+    if !(lt.is_numeric() && rt.is_numeric()) {
+        return Err(SigmaParsingError::ConstraintFailed(format!(
+            "{:?} needs numeric operands, got {lt:?} and {rt:?}",
+            op.kind
+        )));
+    }
+    Ok(())
+}
+
+/// `SNumericType.numericTypeIndex`, the order `max` upcasts by (`SType.scala:412-556`)
+fn numeric_type_index(tpe: &SType) -> Option<u8> {
+    Some(match tpe {
+        SType::SByte => 0,
+        SType::SShort => 1,
+        SType::SInt => 2,
+        SType::SLong => 3,
+        SType::SBigInt => 4,
+        SType::SUnsignedBigInt => 5,
+        _ => return None,
+    })
+}
+
+/// `isNumTypeOrNoType` (`ast/package.scala:135`): a numeric type, or NoType
+fn is_num_type_or_no_type(tpe: &SType) -> bool {
+    tpe.is_numeric() || *tpe == SType::SNoType
 }
 
 /// The constructor's `require`s and eager casts (trees.scala, transformers.scala)
@@ -34,6 +149,17 @@ fn check_constructor(expr: &Expr) -> Result<(), SigmaParsingError> {
         // an `IllegalArgumentException` (`trees.scala:398`, `:431`). NoType is not numeric.
         Expr::Upcast(cast) => require_numeric_cast("Upcast", &cast.input, &cast.tpe),
         Expr::Downcast(cast) => require_numeric_cast("Downcast", &cast.input, &cast.tpe),
+        // `BitOp` requires both operands numeric or NoType (`trees.scala:913`), an
+        // `IllegalArgumentException`
+        Expr::BinOp(op) if matches!(op.expr.kind, BinOpKind::Bit(_)) => {
+            let (lt, rt) = (op.expr.left.tpe(), op.expr.right.tpe());
+            if !(is_num_type_or_no_type(&lt) && is_num_type_or_no_type(&rt)) {
+                return Err(SigmaParsingError::BitOpOperandsNotNumeric(format!(
+                    "left: {lt:?}, right: {rt:?}"
+                )));
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -106,6 +232,77 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn roundtrips(hex: &str) -> bool {
+        let bytes = base16::decode(hex.as_bytes()).unwrap();
+        match ErgoTree::sigma_parse_bytes(&bytes) {
+            Ok(t @ ErgoTree::Parsed(_)) => t.sigma_serialize_bytes().unwrap() == bytes,
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn a_relation_needs_operands_of_one_type_from_tree_version_3() {
+        // SANTA #11: v3 EQ(Int 1, Long 1), size-flagged: ConstraintFailed, no degrade.
+        // #12, #13: the same EQ at v0 parses (the Int is upcast), and v3 EQ(Int 1, Int 1).
+        assert!(matches!(
+            tree("0b06d19304020502"),
+            Err(SigmaParsingError::ConstraintFailed(_))
+        ));
+        assert!(roundtrips("00d19304020502"));
+        assert!(roundtrips("0b06d19304020402"));
+    }
+
+    #[test]
+    fn a_comparison_needs_numeric_operands() {
+        // SANTA #14, #15: GT(true, true), unsized and size-flagged; #49: v3 GT(1.toBytes,
+        // Int 0); #51: v3 GT(UnsignedBigInt 5, true). #16: GT(Int 1, Int 1) parses.
+        for hex in [
+            "00d19101010101",
+            "0806d19101010101",
+            "0b09d191db040604020400",
+            "0b07d1910901050101",
+        ] {
+            assert!(
+                matches!(tree(hex), Err(SigmaParsingError::ConstraintFailed(_))),
+                "{hex}: {:?}",
+                tree(hex)
+            );
+        }
+        assert!(roundtrips("00d19104020402"));
+    }
+
+    #[test]
+    fn below_tree_version_3_arithmetic_takes_the_wider_operand_type() {
+        // SANTA #31: v0 EQ(SizeOf(Coll[Long](Plus(Int 1, Long 2))), Int 1): the Int is
+        // upcast, so the Plus is a Long item, and the Upcast of a constant is written back
+        // as the constant. #32: the same at v3 is an Int item, an AssertionError.
+        assert!(roundtrips("00d193b18301059a040205040402"));
+        assert!(matches!(
+            tree("0b0dd193b18301059a040205040402"),
+            Err(SigmaParsingError::CollectionItemTypeMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn below_tree_version_3_the_upcast_of_a_non_constant_is_written_back() {
+        // v0 sigmaProp(HEIGHT > 1L): the builder wraps HEIGHT in an Upcast to Long, and the
+        // serializer writes that Upcast (`ValueSerializer.scala:157-169`), so the tree comes
+        // back one node longer, as the JVM writes it.
+        let bytes = base16::decode(b"00d191a30502").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert_eq!(
+            base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
+            "00d1917ea3050502"
+        );
+        // v0 sigmaProp(1L < HEIGHT): the narrower operand on the right is upcast the same way
+        let bytes = base16::decode(b"00d18f0502a3").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert_eq!(
+            base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
+            "00d18f05027ea305"
+        );
     }
 
     #[test]
