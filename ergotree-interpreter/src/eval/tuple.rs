@@ -38,7 +38,7 @@ impl Evaluable for Tuple {
                 // carried as a pair item; so is a pair item whose value is not a pair,
                 // the data of a pair tuple expression.
                 let v = i.eval(env, ctx)?;
-                crate::eval::check_value_of_type(&i.tpe(), &v)?;
+                crate::eval::check_value_of_type(&i.tpe(), &v, ctx.tree_version())?;
                 Ok(v)
             });
         Ok(Value::Tup(items_v?))

@@ -231,17 +231,25 @@ impl Evaluable for BinOp {
                 // `EQ`/`NEQ` check each operand's value against its type, the left one before
                 // the right is evaluated (`trees.scala:1204-1209`, `:1224-1229`)
                 RelationOp::Eq => {
-                    crate::eval::check_value_of_type(&self.left.tpe(), &lv)?;
+                    crate::eval::check_value_of_type(&self.left.tpe(), &lv, ctx.tree_version())?;
                     let rv_val = rv()?;
-                    crate::eval::check_value_of_type(&self.right.tpe(), &rv_val)?;
+                    crate::eval::check_value_of_type(
+                        &self.right.tpe(),
+                        &rv_val,
+                        ctx.tree_version(),
+                    )?;
                     Ok(Value::Boolean(
                         crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
                     ))
                 }
                 RelationOp::NEq => {
-                    crate::eval::check_value_of_type(&self.left.tpe(), &lv)?;
+                    crate::eval::check_value_of_type(&self.left.tpe(), &lv, ctx.tree_version())?;
                     let rv_val = rv()?;
-                    crate::eval::check_value_of_type(&self.right.tpe(), &rv_val)?;
+                    crate::eval::check_value_of_type(
+                        &self.right.tpe(),
+                        &rv_val,
+                        ctx.tree_version(),
+                    )?;
                     Ok(Value::Boolean(
                         !crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
                     ))

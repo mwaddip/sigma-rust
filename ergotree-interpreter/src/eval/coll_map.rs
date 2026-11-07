@@ -40,27 +40,10 @@ impl Evaluable for Map {
             }
         };
         let mut mapper_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
-        let mapper_input_tpe = self
-            .mapper_sfunc
-            .t_dom
-            .first()
-            .ok_or_else(|| {
-                EvalError::NotFound(
-                    "Map: mapper SFunc.t_dom is empty (does not have arguments)".to_string(),
-                )
-            })?
-            .clone();
+        // sigmastate reads no element type here: the mapper checks each element against its
+        // argument's type (v6.0.7 `transformers.scala:33-46`, `values.scala:1074`)
         let normalized_input_vals: Vec<Value> = match input_v {
-            Value::Coll(coll) => {
-                if *coll.elem_tpe() != mapper_input_tpe {
-                    return Err(EvalError::UnexpectedValue(format!(
-                        "expected Map input element type to be {0:?}, got: {1:?}",
-                        mapper_input_tpe,
-                        coll.elem_tpe()
-                    )));
-                };
-                Ok(coll.as_vec())
-            }
+            Value::Coll(coll) => Ok(coll.as_vec()),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected Map input to be Value::Coll, got: {0:?}",
                 input_v
@@ -173,5 +156,83 @@ mod tests {
             eval_out_wo_ctx::<SigmaProp>(&expr),
             SigmaProp::new(true.into())
         );
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+mod element_type_tests {
+    //! sigmastate's `MapCollection` reads no element type: the mapper checks each element against
+    //! its argument's type (v6.0.7 `transformers.scala:33-46`, `values.scala:1074`), so an empty
+    //! input checks nothing.
+    use super::*;
+    use crate::eval::test_util::{eval_out_wo_ctx, try_eval_out_wo_ctx};
+    use alloc::boxed::Box;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use ergotree_ir::mir::coll_size::SizeOf;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::func_value::{FuncArg, FuncValue};
+    use ergotree_ir::mir::if_op::If;
+    use ergotree_ir::mir::unary_op::OneArgOpTryBuild;
+    use ergotree_ir::mir::val_use::ValUse;
+    use ergotree_ir::types::sfunc::SFunc;
+    use ergotree_ir::types::stype::SType;
+
+    /// `if (false) Coll[Int](1) else <longs>`: typed `Coll[Int]` (an `If` is typed by its true
+    /// branch), holding `Long`s
+    fn int_coll_holding(longs: Vec<i64>) -> Expr {
+        If {
+            condition: Box::new(Expr::Const(false.into())),
+            true_branch: Box::new(vec![1i32].into()),
+            false_branch: Box::new(longs.into()),
+        }
+        .into()
+    }
+
+    fn lambda(arg_tpe: SType, body: Expr) -> Expr {
+        FuncValue::new(
+            vec![FuncArg {
+                idx: 1.into(),
+                tpe: arg_tpe,
+            }],
+            body,
+        )
+        .into()
+    }
+
+    /// `input.map({ (x: arg_tpe) => x })`
+    fn map(input: Expr, arg_tpe: SType) -> Expr {
+        let x: Expr = ValUse {
+            val_id: 1.into(),
+            tpe: arg_tpe.clone(),
+        }
+        .into();
+        Map {
+            input: Box::new(input),
+            mapper: Box::new(lambda(arg_tpe.clone(), x)),
+            mapper_sfunc: SFunc::new(vec![arg_tpe.clone()], arg_tpe),
+        }
+        .into()
+    }
+
+    #[test]
+    fn the_lambda_checks_each_element_as_the_jvm_closure_does() {
+        // (x: Long) => x maps the 2L; (x: Int) => x refuses it
+        assert_eq!(
+            eval_out_wo_ctx::<Vec<i64>>(&map(int_coll_holding(vec![2]), SType::SLong)),
+            vec![2i64]
+        );
+        assert!(
+            try_eval_out_wo_ctx::<Vec<i32>>(&map(int_coll_holding(vec![2]), SType::SInt)).is_err()
+        );
+    }
+
+    #[test]
+    fn an_empty_input_of_another_item_type_is_not_checked() {
+        let size: Expr = SizeOf::try_build(map(int_coll_holding(vec![]), SType::SInt))
+            .unwrap()
+            .into();
+        assert_eq!(eval_out_wo_ctx::<i32>(&size), 0);
     }
 }

@@ -10,14 +10,14 @@ impl Evaluable for ValUse {
     fn eval<'ctx>(
         &self,
         env: &mut Env<'ctx>,
-        _ctx: &Context<'ctx>,
+        ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        _ctx.add_jit_cost(5)?; // ValUse = Fixed(5)
+        ctx.add_jit_cost(5)?; // ValUse = Fixed(5)
         let v = env.get(self.val_id).cloned().ok_or_else(|| {
             EvalError::NotFound(format!("no value in env for id: {0:?}", self.val_id))
         })?;
         // `ValUse.eval` checks the value against its type (`values.scala:991`)
-        crate::eval::check_value_of_type(&self.tpe, &v)?;
+        crate::eval::check_value_of_type(&self.tpe, &v, ctx.tree_version())?;
         Ok(v)
     }
 }

@@ -41,7 +41,7 @@ impl Evaluable for Collection {
                     .iter()
                     .map(|i| {
                         let v = i.eval(env, ctx)?;
-                        crate::eval::check_value_of_type(&i.tpe(), &v)?;
+                        crate::eval::check_value_of_type(&i.tpe(), &v, ctx.tree_version())?;
                         Ok(v)
                     })
                     .collect();

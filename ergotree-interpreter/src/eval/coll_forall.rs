@@ -38,17 +38,10 @@ impl Evaluable for ForAll {
             }
         };
         let mut condition_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
+        // sigmastate reads no element type here: the lambda checks each element against its
+        // argument's type (v6.0.7 `transformers.scala:182-192`, `values.scala:1074`)
         let normalized_input_vals: Vec<Value> = match input_v {
-            Value::Coll(coll) => {
-                if coll.elem_tpe() != &*self.elem_tpe {
-                    return Err(EvalError::UnexpectedValue(format!(
-                        "expected ForAll input element type to be {0:?}, got: {1:?}",
-                        self.elem_tpe,
-                        coll.elem_tpe()
-                    )));
-                };
-                Ok(coll.as_vec())
-            }
+            Value::Coll(coll) => Ok(coll.as_vec()),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected Map input to be Value::Coll, got: {0:?}",
                 input_v
@@ -90,7 +83,7 @@ mod tests {
             right: Box::new(
                 ValUse {
                     val_id: 1.into(),
-                    tpe: SType::SBox,
+                    tpe: SType::SInt,
                 }
                 .into(),
             ),
@@ -178,5 +171,74 @@ mod tests {
              (4 iters) and short-circuit (1 iter); expected 30.",
             delta_full - delta_short,
         );
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+mod element_type_tests {
+    //! sigmastate's `ForAll` reads no element type: the lambda checks each element against its
+    //! argument's type (v6.0.7 `transformers.scala:182-192`, `values.scala:1074`), so an empty
+    //! input checks nothing.
+    use super::*;
+    use crate::eval::test_util::{eval_out_wo_ctx, try_eval_out_wo_ctx};
+    use alloc::boxed::Box;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::func_value::{FuncArg, FuncValue};
+    use ergotree_ir::mir::if_op::If;
+    use ergotree_ir::types::stype::SType;
+
+    /// `if (false) Coll[Int](1) else <longs>`: typed `Coll[Int]` (an `If` is typed by its true
+    /// branch), holding `Long`s
+    fn int_coll_holding(longs: Vec<i64>) -> Expr {
+        If {
+            condition: Box::new(Expr::Const(false.into())),
+            true_branch: Box::new(vec![1i32].into()),
+            false_branch: Box::new(longs.into()),
+        }
+        .into()
+    }
+
+    fn lambda(arg_tpe: SType, body: Expr) -> Expr {
+        FuncValue::new(
+            vec![FuncArg {
+                idx: 1.into(),
+                tpe: arg_tpe,
+            }],
+            body,
+        )
+        .into()
+    }
+
+    fn forall(input: Expr, arg_tpe: SType) -> Expr {
+        ForAll {
+            input: Box::new(input),
+            condition: Box::new(lambda(arg_tpe, Expr::Const(true.into()))),
+            elem_tpe: SType::SInt.into(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn the_lambda_checks_each_element_as_the_jvm_closure_does() {
+        // (x: Long) => true takes the 2L; (x: Int) => true does not
+        assert!(eval_out_wo_ctx::<bool>(&forall(
+            int_coll_holding(vec![2]),
+            SType::SLong
+        )));
+        assert!(
+            try_eval_out_wo_ctx::<bool>(&forall(int_coll_holding(vec![2]), SType::SInt)).is_err()
+        );
+    }
+
+    #[test]
+    fn an_empty_input_of_another_item_type_is_not_checked() {
+        // `forall` over no element is `true`
+        assert!(eval_out_wo_ctx::<bool>(&forall(
+            int_coll_holding(vec![]),
+            SType::SInt
+        )));
     }
 }

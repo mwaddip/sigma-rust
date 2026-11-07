@@ -60,13 +60,12 @@ impl Evaluable for Expr {
                             cp.id
                         ))
                     })?;
-                // Mirror the JVM `ConstantPlaceholder.eval`, which `checkType`s the
-                // resolved constant (values.scala:412): an unsupported (arity != 2)
-                // tuple type is rejected ("Unsupported tuple type"). Placeholders are
-                // resolved here at eval on the lazy constants path, so the check
-                // happens here rather than at substitution.
-                crate::eval::check_value_type(&constant.tpe)?;
-                Ok(Value::from(constant.v.clone()))
+                // `ConstantPlaceholder.eval` checks the resolved constant's value against its
+                // type (`values.scala:412`). Placeholders are resolved here at eval on the
+                // lazy constants path, so the check happens here rather than at substitution.
+                let value = Value::from(constant.v.clone());
+                crate::eval::check_value_of_type(&constant.tpe, &value, ctx.tree_version())?;
+                Ok(value)
             }
             Expr::Collection(op) => op.eval(env, ctx),
             Expr::ValDef(_) => Err(EvalError::UnexpectedExpr(

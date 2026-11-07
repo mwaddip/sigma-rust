@@ -197,41 +197,67 @@ fn convert_self_extension(ctx: &Context) -> Result<(), EvalError> {
         .map_err(EvalError::from)
 }
 
-/// Mirror of sigma-state `SType.isValueOfType`'s reachable rejections
-/// (`SType.scala:200-205`), invoked by the JVM via `Value.checkType` at the
-/// Tuple-eval items (`values.scala:801/804`) and `ConstantPlaceholder.eval`
-/// (`values.scala:412`): a tuple type must be a pair (arity 2) and a function
-/// type must be unary, otherwise the JVM throws "Unsupported tuple/function
-/// type". sigma-rust models flat N-ary tuples (`TupleItems` = `BoundedVec<2,255>`)
-/// so an arity≠2 tuple constant/value is representable and would otherwise
-/// evaluate where the JVM rejects (a consensus accept/reject divergence). The
-/// remaining `isValueOfType` arms only assert a value matches its type, which is
-/// an invariant of sigma-rust's typed `Value`s, so they need no run-time check.
-pub(crate) fn check_value_type(tpe: &SType) -> Result<(), EvalError> {
-    match tpe {
-        SType::STuple(t) if t.items.len() != 2 => {
-            Err(EvalError::Misc(format!("Unsupported tuple type {tpe:?}")))
+/// sigmastate's `Value.checkType` (v6.0.7 `values.scala:251-259`) through `SType.isValueOfType`
+/// (`SType.scala:187-213`), run wherever sigmastate evaluates a node whose value its static type
+/// does not guarantee. Shallow: only the type's root constructor is checked against the value, so
+/// any collection passes `Coll[Int]`. A node's static type and its value can disagree: an `If` is
+/// typed by its true branch and neither parser checks that the branches agree
+/// (`trees.scala:1351`), so `if (false) 1 else 2L` is an `Int` node holding a `Long`.
+pub(crate) fn check_value_of_type(
+    tpe: &SType,
+    value: &Value,
+    tree_version: ErgoTreeVersion,
+) -> Result<(), EvalError> {
+    let is_value_of_type = match tpe {
+        SType::SBoolean => matches!(value, Value::Boolean(_)),
+        SType::SByte => matches!(value, Value::Byte(_)),
+        SType::SShort => matches!(value, Value::Short(_)),
+        SType::SInt => matches!(value, Value::Int(_)),
+        SType::SLong => matches!(value, Value::Long(_)),
+        SType::SBigInt => matches!(value, Value::BigInt(_)),
+        SType::SUnsignedBigInt if tree_version >= ErgoTreeVersion::V3 => {
+            matches!(value, Value::UnsignedBigInt(_))
         }
-        SType::SFunc(f) if f.t_dom.len() != 1 => Err(EvalError::Misc(format!(
-            "Unsupported function type {tpe:?}"
-        ))),
-        _ => Ok(()),
-    }
-}
-
-/// sigmastate's `Value.checkType` (`values.scala:251-255`), through `SType.isValueOfType`
-/// (`SType.scala:187-213`): [`check_value_type`]'s tuple and function rules, and a pair type's
-/// value must be a pair. The other `isValueOfType` arms only assert that a value matches its
-/// type, which sigma-rust's typed values guarantee; a pair is the exception, as a pair tuple
-/// expression's data is a collection typed as a pair (`values.scala:818-822`).
-pub(crate) fn check_value_of_type(tpe: &SType, value: &Value) -> Result<(), EvalError> {
-    check_value_type(tpe)?;
-    match (tpe, value) {
-        (SType::STuple(_), Value::Tup(_)) => Ok(()),
-        (SType::STuple(_), _) => Err(EvalError::Misc(format!(
+        SType::SGroupElement => matches!(value, Value::GroupElement(_)),
+        SType::SSigmaProp => matches!(value, Value::SigmaProp(_)),
+        SType::SBox => matches!(value, Value::CBox(_)),
+        // a tuple of three or more items is a `Coll[Any]` in sigmastate (`TupleData`,
+        // `package.scala:67`, `Evaluation.scala:99-102`), so it passes as a collection
+        SType::SColl(_) => {
+            matches!(value, Value::Coll(_))
+                || matches!(value, Value::Tup(items) if items.len() != 2)
+        }
+        SType::SOption(_) => matches!(value, Value::Opt(_)),
+        SType::STuple(t) if t.items.len() == 2 => {
+            matches!(value, Value::Tup(items) if items.len() == 2)
+        }
+        SType::STuple(_) => return Err(EvalError::Misc(format!("Unsupported tuple type {tpe:?}"))),
+        SType::SFunc(f) if f.t_dom.len() == 1 => {
+            matches!(value, Value::Lambda(l) if l.args.len() == 1)
+        }
+        SType::SFunc(_) => {
+            return Err(EvalError::Misc(format!(
+                "Unsupported function type {tpe:?}"
+            )))
+        }
+        SType::SContext => matches!(value, Value::Context),
+        SType::SAvlTree => matches!(value, Value::AvlTree(_)),
+        SType::SGlobal => matches!(value, Value::Global),
+        SType::SHeader => matches!(value, Value::Header(_)),
+        SType::SPreHeader => matches!(value, Value::PreHeader(_)),
+        SType::SUnit => matches!(value, Value::Unit),
+        SType::SUnsignedBigInt
+        | SType::SAny
+        | SType::STypeVar(_)
+        | SType::SString
+        | SType::SNoType => return Err(EvalError::Misc(format!("Unknown type {tpe:?}"))),
+    };
+    if is_value_of_type {
+        Ok(())
+    } else {
+        Err(EvalError::Misc(format!(
             "Invalid type returned by evaluator: expected type {tpe:?}, resulting value {value:?}"
-        ))),
-        _ => Ok(()),
+        )))
     }
 }
 
@@ -499,7 +525,7 @@ impl<'l, 'ctx> LambdaInvoker<'l, 'ctx> {
         for (arg, v) in self.lambda.args.iter().zip(args) {
             // `FuncValue.eval`'s closure checks the argument against its type before it binds
             // it, and the body's result after (`values.scala:1074`, `:1080`)
-            check_value_of_type(&arg.tpe, &v)?;
+            check_value_of_type(&arg.tpe, &v, ctx.tree_version())?;
             // ADD_TO_ENV_COST per argument binding — Scala charges
             // AddToEnvironment inside the closure on every invocation
             // (`FuncValue.eval`); previously each invocation site charged
@@ -508,7 +534,7 @@ impl<'l, 'ctx> LambdaInvoker<'l, 'ctx> {
             self.env.insert(arg.idx, v);
         }
         let res = self.lambda.body.eval(&mut self.env, ctx)?;
-        check_value_of_type(&self.lambda.body.tpe(), &res)?;
+        check_value_of_type(&self.lambda.body.tpe(), &res, ctx.tree_version())?;
         Ok(res)
     }
 }
@@ -1309,26 +1335,39 @@ mod value_check_tests {
     //! `ValDef`'s value and a block's result (`:1027`, `:1034`), and a `ValUse` (`:991`).
     use super::*;
     use crate::eval::test_util::try_eval_out;
+    use crate::eval::test_util::{try_eval_out_with_version, try_eval_out_wo_ctx};
+    use ergo_chain_types::{EcPoint, Header, PreHeader};
+    use ergotree_ir::bigint256::BigInt256;
     use ergotree_ir::chain::context_extension::ContextExtension;
+    use ergotree_ir::chain::ergo_box::ErgoBox;
     use ergotree_ir::chain::evaluated_value::EvaluatedValue;
     use ergotree_ir::mir::apply::Apply;
+    use ergotree_ir::mir::avl_tree_data::AvlTreeData;
+    use ergotree_ir::mir::bin_op::{BinOp, RelationOp};
     use ergotree_ir::mir::block::BlockValue;
     use ergotree_ir::mir::coll_by_index::ByIndex;
     use ergotree_ir::mir::coll_fold::Fold;
     use ergotree_ir::mir::coll_size::SizeOf;
     use ergotree_ir::mir::collection::Collection;
-    use ergotree_ir::mir::constant::Constant;
+    use ergotree_ir::mir::constant::{Constant, Literal};
     use ergotree_ir::mir::func_value::{FuncArg, FuncValue};
     use ergotree_ir::mir::get_var::GetVar;
     use ergotree_ir::mir::if_op::If;
+    use ergotree_ir::mir::method_call::MethodCall;
     use ergotree_ir::mir::option_get::OptionGet;
+    use ergotree_ir::mir::option_get_or_else::OptionGetOrElse;
     use ergotree_ir::mir::select_field::SelectField;
     use ergotree_ir::mir::tuple::Tuple;
     use ergotree_ir::mir::unary_op::OneArgOpTryBuild;
     use ergotree_ir::mir::val_def::ValDef;
     use ergotree_ir::mir::val_use::ValUse;
     use ergotree_ir::serialization::SigmaSerializable;
+    use ergotree_ir::types::sfunc::SFunc;
+    use ergotree_ir::types::soption;
     use ergotree_ir::types::stuple::STuple;
+    use ergotree_ir::types::stype_param::STypeVar;
+    use ergotree_ir::unsignedbigint256::UnsignedBigInt;
+    use proptest::prelude::*;
     use sigma_test_util::force_any_val;
 
     fn pair_type() -> SType {
@@ -1522,6 +1561,430 @@ mod value_check_tests {
         let at0 =
             ByIndex::new(empty, Expr::Const(0i32.into()), Some(Box::new(pair_var0()))).unwrap();
         check_first_item(at0.into());
+    }
+
+    // `isValueOfType` at every site (v6.0.7 `SType.scala:187-213`, through `Value.checkType`,
+    // `values.scala:251-259`). `X` below is `int_holding_long()`.
+
+    /// `If(false, 1, 2L)`: typed `SInt`, as an `If` is typed by its true branch
+    /// (`trees.scala:1351`), and evaluates to `2L`
+    fn int_holding_long() -> Expr {
+        If {
+            condition: Box::new(Expr::Const(false.into())),
+            true_branch: Box::new(Expr::Const(1i32.into())),
+            false_branch: Box::new(Expr::Const(2i64.into())),
+        }
+        .into()
+    }
+
+    fn int(v: i32) -> Expr {
+        Expr::Const(v.into())
+    }
+
+    fn relation(op: RelationOp, left: Expr, right: Expr) -> Expr {
+        BinOp {
+            kind: op.into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+        .into()
+    }
+
+    fn lambda(arg_tpe: SType, body: Expr) -> Expr {
+        FuncValue::new(
+            vec![FuncArg {
+                idx: 1.into(),
+                tpe: arg_tpe,
+            }],
+            body,
+        )
+        .into()
+    }
+
+    /// `func(arg)` as the parser builds it, with no check of the argument's type
+    fn apply(func: Expr, arg: Expr) -> Expr {
+        Apply {
+            func: Box::new(func),
+            args: vec![arg],
+        }
+        .into()
+    }
+
+    fn is_value_check_error<T: core::fmt::Debug>(res: &Result<T, EvalError>) -> bool {
+        matches!(res, Err(e) if format!("{e:?}").contains("Invalid type returned by evaluator"))
+    }
+
+    fn rejects_another_kind(expr: &Expr) {
+        let res = try_eval_out_wo_ctx::<Value>(expr);
+        assert!(
+            is_value_check_error(&res),
+            "expected a value check to fail, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn the_check_is_the_jvm_table() {
+        let v3 = ErgoTreeVersion::V3;
+        let a_lambda = Value::Lambda(Lambda {
+            args: vec![FuncArg {
+                idx: 1.into(),
+                tpe: SType::SInt,
+            }],
+            body: Box::new(int(1)),
+            captured: vec![],
+        });
+        let rows: Vec<(SType, Value<'static>)> = vec![
+            (SType::SBoolean, Value::Boolean(true)),
+            (SType::SByte, Value::Byte(1)),
+            (SType::SShort, Value::Short(1)),
+            (SType::SInt, Value::Int(1)),
+            (SType::SLong, Value::Long(1)),
+            (SType::SBigInt, Value::BigInt(BigInt256::from(1i64))),
+            (
+                SType::SUnsignedBigInt,
+                Value::UnsignedBigInt(UnsignedBigInt::from(1u64)),
+            ),
+            (
+                SType::SGroupElement,
+                Value::from(force_any_val::<EcPoint>()),
+            ),
+            (
+                SType::SSigmaProp,
+                Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
+            ),
+            (SType::SBox, Value::CBox(force_any_val::<ErgoBox>().into())),
+            (
+                SType::SAvlTree,
+                Value::AvlTree(Box::new(force_any_val::<AvlTreeData>())),
+            ),
+            (SType::SColl(SType::SInt.into()), Value::from(vec![1i32])),
+            (
+                SType::SOption(SType::SInt.into()),
+                Value::Opt(Some(Box::new(Value::Int(1)))),
+            ),
+            (
+                pair_type(),
+                Value::Tup(vec![Value::Int(1), Value::Int(2)].try_into().unwrap()),
+            ),
+            (
+                SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)),
+                a_lambda.clone(),
+            ),
+            (SType::SContext, Value::Context),
+            (SType::SGlobal, Value::Global),
+            (
+                SType::SHeader,
+                Value::Header(Box::new(force_any_val::<Header>())),
+            ),
+            (
+                SType::SPreHeader,
+                Value::PreHeader(Box::new(force_any_val::<PreHeader>())),
+            ),
+            (SType::SUnit, Value::Unit),
+        ];
+        for (tpe, value) in &rows {
+            assert!(
+                check_value_of_type(tpe, value, v3).is_ok(),
+                "{tpe:?} refused {value:?}"
+            );
+            let other = if *tpe == SType::SInt {
+                Value::Long(1)
+            } else {
+                Value::Int(1)
+            };
+            assert!(
+                check_value_of_type(tpe, &other, v3).is_err(),
+                "{tpe:?} took {other:?}"
+            );
+        }
+        // no arm matches: "Unknown type", whatever the value
+        for tpe in [
+            SType::SAny,
+            SType::STypeVar(STypeVar::t()),
+            SType::SString,
+            SType::SNoType,
+        ] {
+            for (_, value) in &rows {
+                assert!(
+                    check_value_of_type(&tpe, value, v3).is_err(),
+                    "{tpe:?} took {value:?}"
+                );
+            }
+        }
+        // a tuple other than a pair and a function of other than one argument throw
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        let three = Value::Tup(
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+                .try_into()
+                .unwrap(),
+        );
+        assert!(check_value_of_type(&triple, &three, v3).is_err());
+        let binary = SType::SFunc(SFunc::new(vec![SType::SInt, SType::SInt], SType::SInt));
+        assert!(check_value_of_type(&binary, &a_lambda, v3).is_err());
+        // a pair needs a `Tuple2`, a unary function a `Function1`
+        assert!(check_value_of_type(&pair_type(), &three, v3).is_err());
+        let two_args = Value::Lambda(Lambda {
+            args: vec![
+                FuncArg {
+                    idx: 1.into(),
+                    tpe: SType::SInt,
+                },
+                FuncArg {
+                    idx: 2.into(),
+                    tpe: SType::SInt,
+                },
+            ],
+            body: Box::new(int(1)),
+            captured: vec![],
+        });
+        let unary = SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt));
+        assert!(check_value_of_type(&unary, &two_args, v3).is_err());
+    }
+
+    #[test]
+    fn a_tuple_of_three_is_a_collection() {
+        // sigmastate's data for a tuple of three or more items is a `Coll[Any]` (`TupleData`,
+        // `package.scala:67`; `Evaluation.toDslTuple`, `Evaluation.scala:99-102`), so it passes
+        // the collection arm (`SType.scala:198`); a pair is a `Tuple2`, which does not
+        let coll_type = SType::SColl(SType::SInt.into());
+        let three = Value::Tup(
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+                .try_into()
+                .unwrap(),
+        );
+        let pair = Value::Tup(vec![Value::Int(1), Value::Int(2)].try_into().unwrap());
+        assert!(check_value_of_type(&coll_type, &three, ErgoTreeVersion::V3).is_ok());
+        assert!(check_value_of_type(&coll_type, &pair, ErgoTreeVersion::V3).is_err());
+        // `{ (x: Coll[Int]) => true }((1, 2, 3))`: neither parser checks the argument's type
+        let items: Vec<Literal> = vec![1i32.into(), 2i32.into(), 3i32.into()];
+        let triple: Expr = Constant {
+            tpe: SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt)),
+            v: Literal::Tup(items.try_into().unwrap()),
+        }
+        .into();
+        let applied = apply(lambda(coll_type, Expr::Const(true.into())), triple);
+        assert!(try_eval_out_wo_ctx::<bool>(&applied).unwrap());
+    }
+
+    #[test]
+    fn unsigned_big_int_passes_from_tree_version_3() {
+        // `case SUnsignedBigInt if VersionContext.current.isV3OrLaterErgoTreeVersion`
+        // (`SType.scala:194`); below it no arm matches
+        let value = Value::UnsignedBigInt(UnsignedBigInt::from(1u64));
+        assert!(check_value_of_type(&SType::SUnsignedBigInt, &value, ErgoTreeVersion::V3).is_ok());
+        assert!(check_value_of_type(&SType::SUnsignedBigInt, &value, ErgoTreeVersion::V2).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn every_constant_passes_against_its_own_type(c in any::<Constant>()) {
+            let res = check_value_of_type(&c.tpe, &Value::from(c.v.clone()), ErgoTreeVersion::V3);
+            match &c.tpe {
+                // the JVM's `ConstantPlaceholder` throws on these too
+                SType::STuple(t) if t.items.len() != 2 => prop_assert!(res.is_err()),
+                _ => prop_assert!(res.is_ok(), "{:?} refused its own value: {:?}", c.tpe, res),
+            }
+        }
+    }
+
+    #[test]
+    fn a_val_def_rejects_another_kind() {
+        // `{ val x = X; true }` (`values.scala:1027`)
+        rejects_another_kind(
+            &BlockValue {
+                items: vec![ValDef {
+                    id: 1.into(),
+                    tpe_args: vec![],
+                    rhs: Box::new(int_holding_long()),
+                }
+                .into()],
+                result: Box::new(Expr::Const(true.into())),
+            }
+            .into(),
+        );
+    }
+
+    #[test]
+    fn a_block_result_rejects_another_kind() {
+        // `{ val y = 1; X } == 2` (`values.scala:1034`)
+        let block: Expr = BlockValue {
+            items: vec![ValDef {
+                id: 1.into(),
+                tpe_args: vec![],
+                rhs: Box::new(int(1)),
+            }
+            .into()],
+            result: Box::new(int_holding_long()),
+        }
+        .into();
+        rejects_another_kind(&relation(RelationOp::Eq, block, int(2)));
+    }
+
+    #[test]
+    fn eq_and_neq_check_both_operands() {
+        // `X == 2`, `2 == X`, `X != 3` (`trees.scala:1206-1208`, `:1226-1228`)
+        rejects_another_kind(&relation(RelationOp::Eq, int_holding_long(), int(2)));
+        rejects_another_kind(&relation(RelationOp::Eq, int(2), int_holding_long()));
+        rejects_another_kind(&relation(RelationOp::NEq, int_holding_long(), int(3)));
+    }
+
+    #[test]
+    fn an_if_branch_rejects_another_kind() {
+        // `(if (true) X else 3) == 2` (`trees.scala:1360`)
+        let outer: Expr = If {
+            condition: Box::new(Expr::Const(true.into())),
+            true_branch: Box::new(int_holding_long()),
+            false_branch: Box::new(int(3)),
+        }
+        .into();
+        rejects_another_kind(&relation(RelationOp::Eq, outer, int(2)));
+    }
+
+    #[test]
+    fn tuple_items_reject_another_kind() {
+        // `(X, 3)._1 == 2`, `(3, X)._2 == 2` (`values.scala:830`, `:833`)
+        for (items, field) in [
+            (vec![int_holding_long(), int(3)], 1u8),
+            (vec![int(3), int_holding_long()], 2u8),
+        ] {
+            let tuple: Expr = Tuple::new(items).unwrap().into();
+            let item: Expr = SelectField::new(tuple, field.try_into().unwrap())
+                .unwrap()
+                .into();
+            rejects_another_kind(&relation(RelationOp::Eq, item, int(2)));
+        }
+    }
+
+    #[test]
+    fn collection_items_reject_another_kind() {
+        // `Coll(X).size == 1` (`values.scala:894`)
+        let coll: Expr = Collection::new(SType::SInt, vec![int_holding_long()])
+            .unwrap()
+            .into();
+        let size: Expr = SizeOf::try_build(coll).unwrap().into();
+        rejects_another_kind(&relation(RelationOp::Eq, size, int(1)));
+    }
+
+    #[test]
+    fn a_lambda_argument_rejects_another_kind() {
+        // `{ (x: Int) => true }(X)` (`values.scala:1074`); `{ (x: Long) => true }(X)` takes
+        // the `2L`
+        let yes = || Expr::Const(true.into());
+        rejects_another_kind(&apply(lambda(SType::SInt, yes()), int_holding_long()));
+        assert!(try_eval_out_wo_ctx::<bool>(&apply(
+            lambda(SType::SLong, yes()),
+            int_holding_long()
+        ))
+        .unwrap());
+    }
+
+    #[test]
+    fn a_lambda_result_rejects_another_kind() {
+        // `{ (x: Int) => X }(1) == 2` (`values.scala:1080`)
+        let applied = apply(lambda(SType::SInt, int_holding_long()), int(1));
+        rejects_another_kind(&relation(RelationOp::Eq, applied, int(2)));
+    }
+
+    #[test]
+    fn a_fold_zero_rejects_another_kind() {
+        // `Coll[Int]().fold(X, { (p: (Int, Int)) => p._1 }) == 2` (`transformers.scala:227`)
+        let int_pair = SType::STuple(STuple::pair(SType::SInt, SType::SInt));
+        let p: Expr = ValUse {
+            val_id: 1.into(),
+            tpe: int_pair.clone(),
+        }
+        .into();
+        let op = lambda(
+            int_pair,
+            SelectField::new(p, 1u8.try_into().unwrap()).unwrap().into(),
+        );
+        let empty: Expr = Collection::new(SType::SInt, vec![]).unwrap().into();
+        let fold: Expr = Fold::new(empty, int_holding_long(), op).unwrap().into();
+        rejects_another_kind(&relation(RelationOp::Eq, fold, int(2)));
+    }
+
+    /// at activated 3 and the given tree version
+    fn eval_at(expr: &Expr, ctx: &Context<'static>, tree_version: u8) -> Result<i32, EvalError> {
+        try_eval_out_with_version::<i32>(expr, ctx, tree_version, 3)
+    }
+
+    #[test]
+    fn by_index_checks_its_default_by_tree_version() {
+        // lazy from tree version 3, eager below (`transformers.scala:258-276`)
+        let ctx = force_any_val::<Context>();
+        let empty: Expr = Collection::new(SType::SInt, vec![]).unwrap().into();
+        let five: Expr = Collection::new(SType::SInt, vec![int(5)]).unwrap().into();
+        let at0 = |coll: Expr| -> Expr {
+            ByIndex::new(coll, int(0), Some(Box::new(int_holding_long())))
+                .unwrap()
+                .into()
+        };
+        assert!(is_value_check_error(&eval_at(&at0(empty), &ctx, 3)));
+        assert_eq!(eval_at(&at0(five.clone()), &ctx, 3).unwrap(), 5);
+        assert!(is_value_check_error(&eval_at(&at0(five), &ctx, 2)));
+    }
+
+    #[test]
+    fn option_get_or_else_checks_its_default_by_tree_version() {
+        // lazy from tree version 3, eager below (`transformers.scala:627-643`); var 0 is the
+        // `Int` 5, var 1 is absent
+        let ctx = ctx_with_var0("040a");
+        let var = |id: u8| -> Expr {
+            GetVar {
+                var_id: id,
+                var_tpe: SType::SInt,
+            }
+            .into()
+        };
+        let or_x = |input: Expr| -> Expr {
+            OptionGetOrElse::new(input, int_holding_long())
+                .unwrap()
+                .into()
+        };
+        assert!(is_value_check_error(&eval_at(&or_x(var(1)), &ctx, 3)));
+        assert_eq!(eval_at(&or_x(var(0)), &ctx, 3).unwrap(), 5);
+        assert!(is_value_check_error(&eval_at(&or_x(var(0)), &ctx, 2)));
+    }
+
+    #[test]
+    fn an_option_map_lambda_checks_its_argument() {
+        // `If(false, Some(1), Some(2L)).map({ (x: Int) => x })`: a method's lambda checks its
+        // argument as any lambda does (`values.scala:1074`)
+        let opt: Expr = If {
+            condition: Box::new(Expr::Const(false.into())),
+            true_branch: Box::new(Expr::Const(Some(1i32).into())),
+            false_branch: Box::new(Expr::Const(Some(2i64).into())),
+        }
+        .into();
+        let map = |arg_tpe: SType| -> Expr {
+            MethodCall {
+                obj: Box::new(opt.clone()),
+                method: soption::MAP_METHOD.clone().with_concrete_types(
+                    &[
+                        (STypeVar::iv(), arg_tpe.clone()),
+                        (STypeVar::ov(), arg_tpe.clone()),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                ),
+                args: vec![lambda(
+                    arg_tpe.clone(),
+                    ValUse {
+                        val_id: 1.into(),
+                        tpe: arg_tpe,
+                    }
+                    .into(),
+                )],
+                explicit_type_args: Default::default(),
+            }
+            .into()
+        };
+        rejects_another_kind(&map(SType::SInt));
+        assert_eq!(
+            try_eval_out_wo_ctx::<Value>(&map(SType::SLong)).unwrap(),
+            Value::Opt(Some(Box::new(Value::Long(2))))
+        );
     }
 }
 
