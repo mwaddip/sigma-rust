@@ -112,7 +112,7 @@ static BITWISE_OR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let rhs = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::NotFound("bitwiseOr: missing right argument".to_string()))?;
+        .ok_or_else(|| EvalError::NotFound("bitwiseOr: missing right argument".into()))?;
     Ok(match _mc.obj_type {
         STypeCompanion::SByte => {
             (obj.try_extract_into::<i8>()? | rhs.try_extract_into::<i8>()?).into()
@@ -148,7 +148,7 @@ static BITWISE_AND_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let rhs = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::NotFound("bitwiseAnd: missing right argument".to_string()))?;
+        .ok_or_else(|| EvalError::NotFound("bitwiseAnd: missing right argument".into()))?;
     Ok(match _mc.obj_type {
         STypeCompanion::SByte => {
             (obj.try_extract_into::<i8>()? & rhs.try_extract_into::<i8>()?).into()

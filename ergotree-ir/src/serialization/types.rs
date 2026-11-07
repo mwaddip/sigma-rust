@@ -379,7 +379,7 @@ impl SigmaSerializable for SType {
                     // NoType has no wire form: its type code is 0, which this parser rejects as a
                     // hard InvalidTypePrefix, so it must never be written
                     SNoType => Err(SigmaSerializationError::NotSupported(
-                        "NoType has no serialized form".to_string(),
+                        "NoType has no serialized form".into(),
                     )),
                 },
                 STypeVar(_) | SAny | SUnit | SBox | SAvlTree | SOption(_) | STuple(_)
@@ -392,7 +392,7 @@ impl SigmaSerializable for SType {
                 // NoType has no wire form: its type code is 0, which this parser rejects as a
                 // hard InvalidTypePrefix, so it must never be written
                 SNoType => Err(SigmaSerializationError::NotSupported(
-                    "NoType has no serialized form".to_string(),
+                    "NoType has no serialized form".into(),
                 )),
             },
 
@@ -432,7 +432,7 @@ impl SigmaSerializable for SType {
                     // NoType has no wire form: its type code is 0, which this parser rejects as a
                     // hard InvalidTypePrefix, so it must never be written
                     SNoType => Err(SigmaSerializationError::NotSupported(
-                        "NoType has no serialized form".to_string(),
+                        "NoType has no serialized form".into(),
                     )),
                 },
                 STypeVar(_) | SAny | SUnit | SBox | SAvlTree | SOption(_) | STuple(_)
@@ -445,7 +445,7 @@ impl SigmaSerializable for SType {
                 // NoType has no wire form: its type code is 0, which this parser rejects as a
                 // hard InvalidTypePrefix, so it must never be written
                 SNoType => Err(SigmaSerializationError::NotSupported(
-                    "NoType has no serialized form".to_string(),
+                    "NoType has no serialized form".into(),
                 )),
             },
             SType::STuple(stuple::STuple { items }) => match items.as_slice() {
@@ -504,7 +504,7 @@ impl SigmaSerializable for SType {
                     // NoType has no wire form: its type code is 0, which this parser rejects as a
                     // hard InvalidTypePrefix, so it must never be written
                     (SNoType, _) | (_, SNoType) => Err(SigmaSerializationError::NotSupported(
-                        "NoType has no serialized form".to_string(),
+                        "NoType has no serialized form".into(),
                     )),
                 },
                 [t1, t2, t3] => {
@@ -561,7 +561,7 @@ impl SigmaSerializable for SType {
             // hard InvalidTypePrefix, so it must never be written. Explicit rather than
             // falling into the catch-all below, which panics.
             SType::SNoType => Err(SigmaSerializationError::NotSupported(
-                "NoType has no serialized form".to_string(),
+                "NoType has no serialized form".into(),
             )),
             #[allow(clippy::unreachable)] // Primitive types are covered by if .is_prim() branch
             _ => unreachable!(),
