@@ -106,27 +106,10 @@ pub(crate) fn flatmap_eval<'ctx>(
     // below.
     let mut invoker = LambdaInvoker::new(lambda);
     let mut lambda_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
-    let mapper_input_tpe = lambda
-        .args
-        .first()
-        .cloned()
-        .map(|arg| arg.tpe)
-        .ok_or_else(|| {
-            EvalError::NotFound(
-                "flatmap: lambda args are empty (does not have arguments)".to_string(),
-            )
-        })?;
+    // sigmastate reads no element type here: the lambda checks each element against its
+    // argument's type (v6.0.7 `methods.scala` `flatMap_eval`, `values.scala:1074`)
     let normalized_input_vals: Vec<Value> = match input_v {
-        Value::Coll(coll) => {
-            if *coll.elem_tpe() != mapper_input_tpe {
-                return Err(EvalError::UnexpectedValue(format!(
-                    "expected Flatmap input element type to be {0:?}, got: {1:?}",
-                    mapper_input_tpe,
-                    coll.elem_tpe()
-                )));
-            };
-            Ok(coll.as_vec())
-        }
+        Value::Coll(coll) => Ok(coll.as_vec()),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected Flatmap input to be Value::Coll, got: {0:?}",
             input_v
@@ -1304,6 +1287,106 @@ mod tests {
             (ctx.jit_cost_value() - mark) - obj_cost - suffix_cost,
             4 + 11,
             "endsWith must charge MethodCall Fixed(4) + Zip_CostKind PerItemCost(10,1,10)",
+        );
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+mod flat_map_element_type_tests {
+    //! sigmastate's `flatMap_eval` reads no element type (v6.0.7 `methods.scala`, `flatMap_eval`):
+    //! the lambda checks each element against its argument's type (`values.scala:1074`), a shallow
+    //! check, so a `Coll[Long]` element passes a `Coll[Int]` argument and an empty input checks
+    //! nothing.
+    use crate::eval::test_util::{eval_out_wo_ctx, try_eval_out_wo_ctx};
+    use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::func_value::{FuncArg, FuncValue};
+    use ergotree_ir::mir::if_op::If;
+    use ergotree_ir::mir::method_call::MethodCall;
+    use ergotree_ir::mir::val_use::ValUse;
+    use ergotree_ir::types::scoll;
+    use ergotree_ir::types::stype::SType;
+    use ergotree_ir::types::stype_param::STypeVar;
+
+    fn coll_of(t: SType) -> SType {
+        SType::SColl(Arc::new(t))
+    }
+
+    /// `if (false) Coll(Coll(1)) else <other>`: typed `Coll[Coll[Int]]` (an `If` is typed by its
+    /// true branch), holding whatever `other` holds
+    fn int_colls_holding(other: Expr) -> Expr {
+        If {
+            condition: Box::new(Expr::Const(false.into())),
+            true_branch: Box::new(vec![vec![1i32]].into()),
+            false_branch: Box::new(other),
+        }
+        .into()
+    }
+
+    /// `input.flatMap({ (x: Coll[Int]) => x.indices })`, built as the parser builds it
+    fn flat_map_indices(input: Expr) -> Expr {
+        let arg = coll_of(SType::SInt);
+        let x: Expr = ValUse {
+            val_id: 1.into(),
+            tpe: arg.clone(),
+        }
+        .into();
+        let indices: Expr = MethodCall {
+            obj: Box::new(x),
+            method: scoll::INDICES_METHOD
+                .clone()
+                .with_concrete_types(&[(STypeVar::t(), SType::SInt)].iter().cloned().collect()),
+            args: vec![],
+            explicit_type_args: Default::default(),
+        }
+        .into();
+        MethodCall {
+            obj: Box::new(input),
+            method: scoll::FLATMAP_METHOD.clone().with_concrete_types(
+                &[(STypeVar::iv(), arg.clone()), (STypeVar::ov(), SType::SInt)]
+                    .iter()
+                    .cloned()
+                    .collect(),
+            ),
+            args: vec![FuncValue::new(
+                vec![FuncArg {
+                    idx: 1.into(),
+                    tpe: arg,
+                }],
+                indices,
+            )
+            .into()],
+            explicit_type_args: Default::default(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn the_lambda_checks_each_element_as_the_jvm_closure_does() {
+        // a `Coll[Long]` element passes the `Coll[Int]` argument: `Coll(2L).indices`
+        let longs: Expr = vec![vec![2i64]].into();
+        assert_eq!(
+            eval_out_wo_ctx::<Vec<i32>>(&flat_map_indices(int_colls_holding(longs))),
+            vec![0]
+        );
+        // a `Long` element does not
+        let bare_long: Expr = vec![2i64].into();
+        assert!(
+            try_eval_out_wo_ctx::<Vec<i32>>(&flat_map_indices(int_colls_holding(bare_long)))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_empty_input_of_another_item_type_is_not_checked() {
+        let no_longs: Expr = Vec::<Vec<i64>>::new().into();
+        assert_eq!(
+            eval_out_wo_ctx::<Vec<i32>>(&flat_map_indices(int_colls_holding(no_longs))),
+            Vec::<i32>::new()
         );
     }
 }
