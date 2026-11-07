@@ -170,6 +170,14 @@ pub enum SigmaParsingError {
     /// asserts each item's type, an `AssertionError`
     #[error("collection item type mismatch: {0}")]
     CollectionItemTypeMismatch(String),
+    /// Collection data whose element type is zero-width: `SUnit`, or a collection or tuple
+    /// built only from it. Its elements take no bytes, so its declared length escapes the
+    /// position limit. Rule 1020 `CheckZeroWidthCollection` (sigmastate 6.0.7
+    /// `CoreDataSerializer.scala:159-169`, `ValidationRules.scala:199-210`), a
+    /// `ValidationException`: a size-flagged tree degrades on it, and a box register or a
+    /// context-extension value, which no tree encloses, rejects
+    #[error("collection with zero-width element type {0} cannot be deserialized (rule 1020)")]
+    ZeroWidthCollection(String),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),

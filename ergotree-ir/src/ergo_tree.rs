@@ -1479,6 +1479,47 @@ mod depth_limit_tests {
     }
 
     #[test]
+    fn a_zero_width_collection_constant_degrades_a_size_flagged_tree() {
+        // Rule 1020 is a `ValidationException` inside `deserializeErgoTree`'s `try`: a
+        // size-flagged tree degrades with its bytes kept, an unsized one rejects (SANTA,
+        // sigma-state 6.0.7). Coll[Unit] of 3 and of 0, Coll[Coll[Unit]], Coll[(Unit, Unit)].
+        let constants: [&[u8]; 4] = [
+            &[0x0c, 0x62, 0x03],
+            &[0x0c, 0x62, 0x00],
+            &[0x0c, 0x0c, 0x62, 0x01],
+            &[0x0c, 0x3c, 0x62, 0x62, 0x01],
+        ];
+        for constant in constants {
+            let bytes = tree_with_constant(constant);
+            match ErgoTree::sigma_parse_bytes(&bytes).unwrap() {
+                ErgoTree::Unparsed {
+                    tree_bytes,
+                    error:
+                        ErgoTreeError::SigmaParsingError(SigmaParsingError::ZeroWidthCollection(_)),
+                } => assert_eq!(tree_bytes, bytes),
+                t => panic!("{constant:02x?}: {t:?}"),
+            }
+            let mut unsized_bytes = vec![0x10, 1];
+            unsized_bytes.extend_from_slice(constant);
+            unsized_bytes.extend([0x08, OpCode::TRIVIAL_PROP_TRUE.value()]);
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse_bytes(&unsized_bytes),
+                    Err(SigmaParsingError::UnsizedTreeValidationError(_))
+                ),
+                "{constant:02x?}"
+            );
+        }
+        // Coll[(Unit, Int)](((), 1)) is not zero-width, and neither is Unit
+        for constant in [&[0x0c, 0x4c, 0x62, 0x01, 0x02][..], &[0x62][..]] {
+            assert!(matches!(
+                ErgoTree::sigma_parse_bytes(&tree_with_constant(constant)),
+                Ok(ErgoTree::Parsed(_))
+            ));
+        }
+    }
+
+    #[test]
     fn size_flagged_tree_continues_from_the_outer_level() {
         // At outer level l (a Box in an extension value is at 2), the constant reaches l + n.
         // A type nests at most `MaxTypeDepth` (8) deep, so start near `MaxTreeDepth`.

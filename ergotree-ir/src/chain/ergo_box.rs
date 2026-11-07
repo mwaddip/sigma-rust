@@ -1045,6 +1045,22 @@ mod creation_height_bound_tests {
     }
 
     #[test]
+    fn a_zero_width_collection_register_rejects() {
+        // Rule 1020 outside any tree: no degrade (SANTA, sigma-state 6.0.7). With no
+        // tokens and no registers, the register count is the byte before the tx id and the
+        // one-byte index.
+        let mut bytes = box_at(0).sigma_serialize_bytes().unwrap();
+        let count_at = bytes.len() - 34;
+        assert_eq!(bytes[count_at], 0);
+        bytes[count_at] = 1;
+        bytes.splice(count_at + 1..count_at + 1, [0x0c, 0x62, 0x03]); // R4 = Coll[Unit] of 3
+        assert!(matches!(
+            ErgoBox::sigma_parse_bytes(&bytes),
+            Err(SigmaParsingError::ZeroWidthCollection(_))
+        ));
+    }
+
+    #[test]
     fn box_constant_rejects_embedded_creation_height_above_int_max() {
         // The reachable form at block version >= 2: a Box-typed constant
         // (context-extension variable or register) embedding such a box.

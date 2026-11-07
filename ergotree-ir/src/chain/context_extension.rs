@@ -738,6 +738,15 @@ mod depth_limit_tests {
     }
 
     #[test]
+    fn a_zero_width_collection_value_rejects() {
+        // Rule 1020 outside any tree: no degrade (SANTA, sigma-state 6.0.7)
+        assert!(matches!(
+            ContextExtension::sigma_parse_bytes(&extension(vec![0x0c, 0x62, 0x03])),
+            Err(SigmaParsingError::ZeroWidthCollection(_))
+        ));
+    }
+
+    #[test]
     fn extension_sigma_prop_takes_a_value_level() {
         // A value level, a data level, k CAND levels and the innermost leaf: k + 3.
         assert!(ContextExtension::sigma_parse_bytes(&extension(cand_chain(107))).is_ok());
