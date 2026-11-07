@@ -1,8 +1,6 @@
 use alloc::boxed::Box;
 use alloc::format;
 
-use alloc::sync::Arc;
-
 use crate::ergo_tree::ErgoTreeVersion;
 use crate::mir::upcast::Upcast;
 use crate::serialization::op_code::OpCode;
@@ -27,8 +25,6 @@ pub struct ByIndex {
     pub index: Box<Expr>,
     /// Default value, returned if index is out of bounds in "Coll.getOrElse()" op
     pub default: Option<Box<Expr>>,
-    /// Input collection element type
-    input_elem_tpe: Arc<SType>,
 }
 
 impl ByIndex {
@@ -65,17 +61,14 @@ impl ByIndex {
             input: input.into(),
             index: index.into(),
             default,
-            input_elem_tpe: input_elem_type,
         })
     }
 
-    /// Rebuild this node with new children, keeping the element type this one was built with.
+    /// Rebuild this node with new children.
     ///
     /// The printer walks a tree and rebuilds every node it passes from the children it has
-    /// printed. It cannot go back through `new()`: a later round lets the parser accept nodes
-    /// `new()` refuses, and printing one must not fail. Reusing the cached element type rather
-    /// than deriving it again keeps this a pure rebuild — the caching question itself is a
-    /// later round's.
+    /// printed. It cannot go back through `new()`: the parser accepts nodes `new()` refuses,
+    /// and printing one must not fail.
     pub(crate) fn with_children(
         &self,
         input: Expr,
@@ -86,13 +79,20 @@ impl ByIndex {
             input: Box::new(input),
             index: Box::new(index),
             default,
-            input_elem_tpe: self.input_elem_tpe.clone(),
         }
     }
 
-    /// Type
+    /// Type: the input's element type, computed on access so that it cannot go stale when the
+    /// input is replaced (sigmastate computes its `val tpe = input.tpe.elemType` whenever it
+    /// builds the node, v6.0.7 `transformers.scala:254`). `SAny` for a tuple, an
+    /// `SCollection[SAny]` (`SType.scala:838-841`); NoType for anything else, which the
+    /// parser refuses (`check_build`) and `new()` refuses.
     pub fn tpe(&self) -> SType {
-        (*self.input_elem_tpe).clone()
+        match self.input.tpe() {
+            SType::SColl(elem_tpe) => (*elem_tpe).clone(),
+            SType::STuple(_) => SType::SAny,
+            _ => SType::SNoType,
+        }
     }
 }
 
@@ -120,7 +120,13 @@ impl SigmaSerializable for ByIndex {
             index
         };
         let default = Option::<Box<Expr>>::sigma_parse(r)?;
-        Ok(Self::new(input, index, default)?)
+        // built as sigmastate builds it, its input's cast in `check_build`; its index and its
+        // default are not checked
+        Ok(Self {
+            input: input.into(),
+            index: index.into(),
+            default,
+        })
     }
 }
 

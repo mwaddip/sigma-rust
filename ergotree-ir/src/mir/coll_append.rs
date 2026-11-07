@@ -74,15 +74,11 @@ impl SigmaSerializable for Append {
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
         let col_2 = Expr::sigma_parse(r)?;
-        // sigmastate types `Append` eagerly as its input's type, cast to a collection, so an
-        // input of any other type throws a `ClassCastException` (v6.0.6 `transformers.scala:62`)
-        if !matches!(input.tpe(), SType::SColl(_)) {
-            return Err(SigmaParsingError::CollectionInputExpected(format!(
-                "Append input of type {:?}",
-                input.tpe()
-            )));
-        }
-        Ok(Append::new(input, col_2)?)
+        // built as sigmastate builds it, its input's cast in `check_build`
+        Ok(Append {
+            input: input.into(),
+            col_2: col_2.into(),
+        })
     }
 }
 

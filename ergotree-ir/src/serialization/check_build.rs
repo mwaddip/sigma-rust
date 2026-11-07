@@ -156,6 +156,13 @@ fn check_constructor(expr: &Expr) -> Result<(), SigmaParsingError> {
         // `OptionGet`'s `val opType` reads its type, `input.tpe.elemType`, a cast to `SOption`
         // (`transformers.scala:600-601`), a `ClassCastException`
         Expr::OptionGet(op) => require_option("OptionGet", &op.expr.input),
+        // `Append`'s and `Slice`'s `val tpe = input.tpe` and `ByIndex`'s
+        // `val tpe = input.tpe.elemType` cast the input's type to `SCollection`, which a tuple
+        // passes (`transformers.scala:62`, `:89`, `:254`; `SType.scala:838-841`), a
+        // `ClassCastException`
+        Expr::Append(op) => require_collection("Append", &op.expr.input),
+        Expr::Slice(op) => require_collection("Slice", &op.expr.input),
+        Expr::ByIndex(op) => require_collection("ByIndex", &op.expr.input),
         // `BitOp` requires both operands numeric or NoType (`trees.scala:913`), an
         // `IllegalArgumentException`
         Expr::BinOp(op) if matches!(op.expr.kind, BinOpKind::Bit(_)) => {
@@ -175,6 +182,16 @@ fn require_num_type_or_no_type(node: &str, input: &Expr) -> Result<(), SigmaPars
     let input_tpe = input.tpe();
     if !is_num_type_or_no_type(&input_tpe) {
         return Err(SigmaParsingError::NumericOperandExpected(format!(
+            "{node} of an input of type {input_tpe:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_collection(node: &str, input: &Expr) -> Result<(), SigmaParsingError> {
+    let input_tpe = input.tpe();
+    if !matches!(input_tpe, SType::SColl(_) | SType::STuple(_)) {
+        return Err(SigmaParsingError::CollectionInputExpected(format!(
             "{node} of an input of type {input_tpe:?}"
         )));
     }
@@ -416,6 +433,36 @@ mod tests {
             base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
             "00d1e6db650bfe"
         );
+    }
+
+    #[test]
+    fn a_collection_node_takes_a_tuple_and_checks_nothing_else() {
+        // sigmaProp(EQ(SizeOf(Append((1, 2), (3, 4))), 0)), the same with Slice((1, 2), 0, 1),
+        // sigmaProp(ByIndex((true, false), 0)), sigmaProp(EQ(SizeOf(Map(Int 1, (x: Int) =>
+        // true)), 0)), and SANTA #34: v3 ByIndex(Coll[Boolean](true), Long 0)
+        for hex in [
+            "00d193b1b3860204020404860204060408 0400",
+            "00d193b1b48602040204040400040204 00",
+            "00d1b2860201010100040000",
+            "00d193b1ad0402d901010401010400",
+            "0b08d1b20d0101050000",
+        ] {
+            let hex = hex.replace(' ', "");
+            assert!(roundtrips(&hex), "{hex}: {:?}", tree(&hex));
+        }
+    }
+
+    #[test]
+    fn a_collection_node_over_a_non_collection_rejects() {
+        // size-flagged: ByIndex(Int 1, 0); Map(Coll[Int](), Int 1), whose mapper is no function
+        assert!(matches!(
+            tree("0807d1b20402040000"),
+            Err(SigmaParsingError::CollectionInputExpected(_))
+        ));
+        assert!(matches!(
+            tree("080ad193b1ad100004020400"),
+            Err(SigmaParsingError::FunctionExpected(_))
+        ));
     }
 
     #[test]
