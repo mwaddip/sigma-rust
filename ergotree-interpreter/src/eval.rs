@@ -319,7 +319,7 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
                 .set(ctx.jit_cost.get().saturating_sub(subst_cost_jit));
         }
         let expr = tree.proposition()?;
-        let expr = expr.substitute_deserialize(ctx)?;
+        let expr = to_valid_script_type(expr.substitute_deserialize(ctx)?)?;
         // sigmastate evaluates the substituted tree whatever it is, a `SigmaProp` constant
         // included, building the script context first (`Interpreter.scala:171-177`)
         convert_self_extension(ctx)?;
@@ -424,6 +424,25 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
             inner(&spanned_expr, ctx, cost_before)
                 .map_err(|e| e.wrap_spanned_with_src(printed_expr_str.to_string()))
         }
+    }
+}
+
+/// sigmastate's `toValidScriptTypeJITC` after the substitution (v6.0.7 `Interpreter.scala:598-602`):
+/// a Boolean root is wrapped in `BoolToSigmaProp`, a node evaluated and charged; a SigmaProp
+/// root is kept; any other fails the spend. sigmastate's read of the root's type can throw (a
+/// `Filter` over a non-collection); `tpe()` answers NoType, or a type built around it, where it
+/// would, so such a root fails here too.
+fn to_valid_script_type(expr: Expr) -> Result<Expr, EvalError> {
+    match expr.tpe() {
+        SType::SBoolean => Ok(ergotree_ir::mir::bool_to_sigma::BoolToSigmaProp {
+            input: alloc::boxed::Box::new(expr),
+        }
+        .into()),
+        SType::SSigmaProp => Ok(expr),
+        tpe => Err(EvalError::Misc(format!(
+            "Context-dependent pre-processing should produce tree of type Boolean or SigmaProp \
+             but was {tpe:?}"
+        ))),
     }
 }
 
@@ -1503,5 +1522,53 @@ mod value_check_tests {
         let at0 =
             ByIndex::new(empty, Expr::Const(0i32.into()), Some(Box::new(pair_var0()))).unwrap();
         check_first_item(at0.into());
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod root_wrap_tests {
+    //! JVM parity: after the substitution, `toValidScriptTypeJITC` wraps a Boolean root in
+    //! `BoolToSigmaProp`, keeps a SigmaProp root and throws for any other (v6.0.7
+    //! `Interpreter.scala:598-602`). The wrap is a node, so it is evaluated and charged.
+    use super::*;
+    use ergotree_ir::chain::ergo_box::{ErgoBox, NonMandatoryRegisters};
+    use ergotree_ir::serialization::SigmaSerializable;
+    use sigma_test_util::force_any_val;
+
+    /// `reduce_to_crypto` of the tree `hex` under activated version 3, with a self box without
+    /// registers: the result and the JIT cost charged
+    fn reduce(hex: &str) -> (Result<SigmaBoolean, EvalError>, u64) {
+        let tree = ErgoTree::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap()).unwrap();
+        let self_box =
+            force_any_val::<ErgoBox>().with_additional_registers(NonMandatoryRegisters::empty());
+        let mut ctx = Context {
+            self_box: &self_box,
+            ..force_any_val::<Context>()
+        };
+        ctx.activated_script_version_byte = 3;
+        ctx.jit_cost_limit = None;
+        let before = ctx.jit_cost_value();
+        let res = reduce_to_crypto(&tree, &ctx).map(|r| r.sigma_prop);
+        (res, ctx.jit_cost_value() - before)
+    }
+
+    #[test]
+    fn a_boolean_root_after_the_substitution_is_wrapped() {
+        // SANTA #20: the root DeserializeRegister(R4, SigmaProp, default true), R4 absent
+        let (res, wrapped) = reduce("00d50408010101");
+        assert_eq!(res, Ok(SigmaBoolean::TrivialProp(true)));
+        // the default written as sigmaProp(true): the same BoolToSigmaProp evaluated, in a tree
+        // one byte longer (20 jit), so the wrap is charged as that node is
+        let (res, explicit) = reduce("00d5040801d10101");
+        assert_eq!(res, Ok(SigmaBoolean::TrivialProp(true)));
+        assert_eq!(wrapped + 20, explicit);
+    }
+
+    #[test]
+    fn a_root_of_another_type_fails() {
+        // the default Int 1 is neither Boolean nor SigmaProp
+        assert!(reduce("00d50408010402").0.is_err());
     }
 }
