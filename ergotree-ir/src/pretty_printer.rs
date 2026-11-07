@@ -94,15 +94,32 @@ mod tests {
     use crate::chain::address::AddressEncoder;
     use crate::chain::address::NetworkPrefix;
     use crate::ergo_tree::ErgoTree;
+    use crate::mir::apply::Apply;
     use crate::mir::bin_op::ArithOp;
     use crate::mir::bin_op::BinOp;
     use crate::mir::block::BlockValue;
+    use crate::mir::constant::Constant;
     use crate::mir::expr::Expr;
     use crate::mir::val_def::ValDef;
     use crate::mir::val_use::ValUse;
     use crate::serialization::SigmaSerializable;
     use crate::types::stype::SType;
     use alloc::boxed::Box;
+
+    /// A later round lets the parser build nodes a strict `new()` refuses, the way sigmastate
+    /// does. The printer rebuilds thirteen node kinds on its way through a tree, and every one
+    /// of those rebuilds used to go through the strict constructor and `.unwrap()` — so printing
+    /// such a node aborted the process. It has to come back as a value, error or not.
+    #[test]
+    fn printing_a_node_a_strict_constructor_refuses_does_not_panic() {
+        // `Apply::new` refuses an Int callee; the struct literal does not.
+        let e: Expr = Apply {
+            func: Box::new(Expr::Const(Constant::from(1i32))),
+            args: vec![],
+        }
+        .into();
+        assert!(e.pretty_print().is_ok());
+    }
 
     use super::*;
 

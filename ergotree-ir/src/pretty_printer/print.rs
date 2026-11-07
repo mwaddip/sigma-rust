@@ -64,7 +64,6 @@ use crate::mir::sigma_prop_bytes::SigmaPropBytes;
 use crate::mir::subst_const::SubstConstants;
 use crate::mir::tree_lookup::TreeLookup;
 use crate::mir::tuple::Tuple;
-use crate::mir::unary_op::OneArgOpTryBuild;
 use crate::mir::upcast::Upcast;
 use crate::mir::val_def::ValDef;
 use crate::mir::val_use::ValUse;
@@ -72,7 +71,6 @@ use crate::mir::xor::Xor;
 use crate::mir::xor_of::XorOf;
 use crate::source_span::SourceSpan;
 use crate::source_span::Spanned;
-use crate::types::stype::SType;
 
 use super::PosTrackingWriter;
 use super::Printer;
@@ -299,7 +297,7 @@ impl Print for ByIndex {
         #[allow(clippy::unwrap_used)] // we only added spans
         Ok(Spanned {
             source_span: SourceSpan { offset, length },
-            expr: ByIndex::new(input, index, self.default.clone()).unwrap(),
+            expr: self.with_children(input, index, self.default.clone()),
         }
         .into())
     }
@@ -316,7 +314,11 @@ impl Print for Map {
         #[allow(clippy::unwrap_used)] // we only added spans
         Ok(Spanned {
             source_span: SourceSpan { offset, length },
-            expr: Map::new(input, mapper).unwrap(),
+            expr: Map {
+                input: Box::new(input),
+                mapper: Box::new(mapper),
+                mapper_sfunc: self.mapper_sfunc.clone(),
+            },
         }
         .into())
     }
@@ -333,7 +335,11 @@ impl Print for Exists {
         #[allow(clippy::unwrap_used)] // we only added spans
         Ok(Spanned {
             source_span: SourceSpan { offset, length },
-            expr: Exists::new(input, condition).unwrap(),
+            expr: Exists {
+                input: Box::new(input),
+                condition: Box::new(condition),
+                elem_tpe: self.elem_tpe.clone(),
+            },
         }
         .into())
     }
@@ -354,7 +360,11 @@ impl Print for Fold {
         #[allow(clippy::unwrap_used)] // we only added spans
         Ok(Spanned {
             source_span: SourceSpan { offset, length },
-            expr: Fold::new(input, zero, fold_op).unwrap(),
+            expr: Fold {
+                input: Box::new(input),
+                zero: Box::new(zero),
+                fold_op: Box::new(fold_op),
+            },
         }
         .into())
     }
@@ -400,7 +410,11 @@ impl Print for Filter {
         #[allow(clippy::unwrap_used)] // we only added spans
         Ok(Spanned {
             source_span: SourceSpan { offset, length },
-            expr: Filter::new(input, condition).unwrap(),
+            expr: Filter {
+                input: Box::new(input),
+                condition: Box::new(condition),
+                elem_tpe: self.elem_tpe.clone(),
+            },
         }
         .into())
     }
@@ -451,12 +465,11 @@ impl Print for ExtractRegisterAs {
         #[allow(clippy::unwrap_used)] // we only added spans
         Ok(Spanned {
             source_span: SourceSpan { offset, length },
-            expr: ExtractRegisterAs::new(
-                input,
-                self.register_id,
-                SType::SOption(self.elem_tpe.clone()),
-            )
-            .unwrap(),
+            expr: ExtractRegisterAs {
+                input: Box::new(input),
+                register_id: self.register_id,
+                elem_tpe: self.elem_tpe.clone(),
+            },
         }
         .into())
     }
@@ -471,7 +484,7 @@ impl Print for SelectField {
         #[allow(clippy::unwrap_used)] // we only added spans
         Ok(Spanned {
             source_span: SourceSpan { offset, length },
-            expr: SelectField::new(input, self.field_index).unwrap(),
+            expr: self.with_children(input),
         }
         .into())
     }
@@ -537,10 +550,9 @@ impl Print for OptionGet {
         let input = self.input.print(w)?;
         write!(w, ".get")?;
         let length = w.current_pos() - offset;
-        #[allow(clippy::unwrap_used)] // we only added spans
         Ok(Spanned {
             source_span: SourceSpan { offset, length },
-            expr: OptionGet::try_build(input).unwrap(),
+            expr: self.with_children(input),
         }
         .into())
     }
@@ -682,7 +694,11 @@ impl Print for Upcast {
         let input = self.input.print(w)?;
         write!(w, ")")?;
         #[allow(clippy::unwrap_used)] // we only added spans
-        Ok(Upcast::new(input, self.tpe.clone()).unwrap().into())
+        Ok(Upcast {
+            input: Box::new(input),
+            tpe: self.tpe.clone(),
+        }
+        .into())
     }
 }
 
@@ -764,7 +780,11 @@ impl Print for Apply {
             .collect::<Result<Vec<_>, _>>()?;
         write!(w, ")")?;
         #[allow(clippy::unwrap_used)] // we only added spans
-        Ok(Apply::new(func, args).unwrap().into())
+        Ok(Apply {
+            func: Box::new(func),
+            args,
+        }
+        .into())
     }
 }
 
@@ -789,7 +809,11 @@ impl Print for Collection {
                     .collect::<Result<Vec<_>, _>>()?;
                 write!(w, ")")?;
                 #[allow(clippy::unwrap_used)] // we only added spans
-                Ok(Collection::new(elem_tpe.clone(), items).unwrap().into())
+                Ok(Collection::Exprs {
+                    elem_tpe: elem_tpe.clone(),
+                    items,
+                }
+                .into())
             }
         }
     }
@@ -926,7 +950,7 @@ impl Print for OptionGetOrElse {
         let length = w.current_pos() - offset;
         #[allow(clippy::unwrap_used)] // we only added spans
         Ok(Spanned {
-            expr: OptionGetOrElse::new(input, default).unwrap(),
+            expr: self.with_children(input, default),
             source_span: SourceSpan { offset, length },
         }
         .into())
@@ -976,7 +1000,11 @@ impl Print for ForAll {
         let length = w.current_pos() - offset;
         #[allow(clippy::unwrap_used)] // we only added spans
         Ok(Spanned {
-            expr: ForAll::new(input, condition).unwrap(),
+            expr: ForAll {
+                input: Box::new(input),
+                condition: Box::new(condition),
+                elem_tpe: self.elem_tpe.clone(),
+            },
             source_span: SourceSpan { offset, length },
         }
         .into())
