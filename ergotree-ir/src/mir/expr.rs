@@ -314,6 +314,66 @@ impl Expr {
         }
     }
 
+    /// The type as sigmastate reads it, which throws where its `tpe` does: a `Filter` whose
+    /// input is not a collection (its `def tpe` casts the input's type to `SCollection` on every
+    /// read, v6.0.7 `transformers.scala:121`), and every node whose `tpe` is a `def` or `lazy
+    /// val` over a child whose read throws: `If`, `ArithOp`, `BitOp`, `Negation`,
+    /// `BitInversion`, `BlockValue`, `ValDef`, `Fold`, `Apply`, `FuncValue`, `Tuple`. Every
+    /// other node's type is a `val` fixed when sigmastate built it, so reading it cannot
+    /// throw. Where it does not throw it is [`Expr::tpe`]. Call it where sigmastate reads a
+    /// type.
+    pub(crate) fn try_tpe(&self) -> Result<SType, SigmaParsingError> {
+        match self {
+            Expr::Filter(v) => {
+                let input_tpe = v.expr().input.try_tpe()?;
+                if !matches!(input_tpe, SType::SColl(_) | SType::STuple(_)) {
+                    return Err(SigmaParsingError::TypeReadFailed(format!(
+                        "Filter of an input of type {input_tpe:?}"
+                    )));
+                }
+            }
+            Expr::If(v) => {
+                v.true_branch.try_tpe()?;
+            }
+            Expr::BinOp(v)
+                if matches!(
+                    v.expr().kind,
+                    super::bin_op::BinOpKind::Arith(_) | super::bin_op::BinOpKind::Bit(_)
+                ) =>
+            {
+                v.expr().left.try_tpe()?;
+            }
+            Expr::Negation(v) => {
+                v.expr().input.try_tpe()?;
+            }
+            Expr::BitInversion(v) => {
+                v.input.try_tpe()?;
+            }
+            Expr::BlockValue(v) => {
+                v.expr().result.try_tpe()?;
+            }
+            Expr::ValDef(v) => {
+                v.expr().rhs.try_tpe()?;
+            }
+            Expr::Fold(v) => {
+                v.expr().zero.try_tpe()?;
+            }
+            Expr::Apply(v) => {
+                v.func.try_tpe()?;
+            }
+            Expr::FuncValue(v) => {
+                v.body().try_tpe()?;
+            }
+            Expr::Tuple(v) => {
+                for item in v.items.iter() {
+                    item.try_tpe()?;
+                }
+            }
+            _ => (),
+        }
+        Ok(self.tpe())
+    }
+
     /// Type expected after the evaluation
     pub fn post_eval_tpe(&self) -> SType {
         match self.tpe() {
@@ -1087,6 +1147,107 @@ mod substitute_deserialize_tests {
                 activated,
                 refused,
             );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) mod type_read_tests {
+    use super::*;
+    use crate::mir::bin_op::{ArithOp, BinOp};
+    use crate::mir::coll_by_index::ByIndex;
+    use crate::mir::coll_filter::Filter;
+    use crate::mir::coll_size::SizeOf;
+    use crate::mir::func_value::{FuncArg, FuncValue};
+    use crate::mir::if_op::If;
+    use crate::mir::tuple::Tuple;
+    use alloc::boxed::Box;
+    use alloc::vec;
+
+    /// `ByIndex(Tuple(0, 0), 0)`, typed SAny (a tuple is a collection of SAny)
+    pub(crate) fn bi() -> Expr {
+        ByIndex {
+            input: Box::new(Tuple::new(vec![0i32.into(), 0i32.into()]).unwrap().into()),
+            index: Box::new(0i32.into()),
+            default: None,
+        }
+        .into()
+    }
+
+    /// `Filter(input, (i: Int) => true)`, built without the constructor's checks
+    pub(crate) fn filter(input: Expr) -> Expr {
+        Filter {
+            input: Box::new(input),
+            condition: Box::new(
+                FuncValue::new(
+                    vec![FuncArg {
+                        idx: 1.into(),
+                        tpe: SType::SInt,
+                    }],
+                    Expr::Const(true.into()),
+                )
+                .into(),
+            ),
+            elem_tpe: SType::SAny.into(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn a_filter_over_a_non_collection_throws_when_its_type_is_read() {
+        // sigmastate's `Filter.tpe` casts its input's type to `SCollection` on every read
+        // (v6.0.7 `transformers.scala:121`); `If.tpe` and `ArithOp.tpe` read a child's type
+        // (`trees.scala:1351`, `:707-708`), `SizeOf`'s is `SInt`
+        let throws = |e: Expr| matches!(e.try_tpe(), Err(SigmaParsingError::TypeReadFailed(_)));
+        assert!(throws(filter(bi())));
+        assert!(throws(
+            If {
+                condition: Box::new(Expr::Const(true.into())),
+                true_branch: Box::new(filter(bi())),
+                false_branch: Box::new(filter(bi())),
+            }
+            .into()
+        ));
+        assert!(throws(
+            BinOp {
+                kind: ArithOp::Plus.into(),
+                left: Box::new(filter(bi())),
+                right: Box::new(filter(bi())),
+            }
+            .into()
+        ));
+        let size: Expr = SizeOf {
+            input: Box::new(filter(bi())),
+        }
+        .into();
+        assert_eq!(size.try_tpe().unwrap(), SType::SInt);
+    }
+
+    #[test]
+    fn a_filter_over_a_tuple_is_typed_as_the_tuple() {
+        // a tuple passes the cast to `SCollection` (`SType.scala:838-841`), so `Filter.tpe` is
+        // the tuple's type
+        let tuple: Expr = Tuple::new(vec![0i32.into(), 0i32.into()]).unwrap().into();
+        let tpe = tuple.tpe();
+        let f = filter(tuple);
+        assert_eq!(f.tpe(), tpe);
+        assert_eq!(f.try_tpe().unwrap(), tpe);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod type_read_proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn try_tpe_equals_tpe_without_a_throwing_filter(e in any::<Expr>()) {
+            prop_assert_eq!(e.try_tpe(), Ok(e.tpe()));
         }
     }
 }

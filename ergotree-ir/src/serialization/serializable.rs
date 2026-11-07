@@ -217,6 +217,11 @@ pub enum SigmaParsingError {
     /// type to `SFunc` (v6.0.7 `transformers.scala:38`), a `ClassCastException`
     #[error("a function expected: {0}")]
     FunctionExpected(String),
+    /// A node's type read that sigmastate's throws on: `Filter`'s `def tpe = input.tpe` casts
+    /// the input's type to `SCollection` on every read (v6.0.7 `transformers.scala:121`), a
+    /// `ClassCastException`
+    #[error("a type read that throws: {0}")]
+    TypeReadFailed(String),
     /// Collection data whose element type is zero-width: `SUnit`, or a collection or tuple
     /// built only from it. Its elements take no bytes, so its declared length escapes the
     /// position limit. Rule 1020 `CheckZeroWidthCollection` (sigmastate 6.0.7
@@ -350,6 +355,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::InvalidTypePrefix
                 | SigmaParsingError::InvalidTypeParameter(_)
                 | SigmaParsingError::TypeParameterNotTypeVar(_)
+                | SigmaParsingError::TypeReadFailed(_)
                 | SigmaParsingError::InvalidSigmaBooleanOpCode(_)
                 | SigmaParsingError::InvalidBigIntSize(_)
                 | SigmaParsingError::ExceedsIntMax(_, _)

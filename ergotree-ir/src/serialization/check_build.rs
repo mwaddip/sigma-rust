@@ -43,7 +43,7 @@ fn apply_builder(expr: Expr, tree_version: ErgoTreeVersion) -> Result<Expr, Sigm
     let op = match op.kind {
         // `equalityOp`: `applyUpcast`, then `check2(SameType)` (`:298-301`, `:686-693`)
         BinOpKind::Relation(RelationOp::Eq | RelationOp::NEq) => {
-            let op = apply_upcast(op, tree_version);
+            let op = apply_upcast(op, tree_version)?;
             check2_same_type(&op)?;
             op
         }
@@ -51,12 +51,12 @@ fn apply_builder(expr: Expr, tree_version: ErgoTreeVersion) -> Result<Expr, Sigm
         // `check2(SameType)` (`:304-313`, `:696-704`)
         BinOpKind::Relation(_) => {
             check2_only_numeric(&op)?;
-            let op = apply_upcast(op, tree_version);
+            let op = apply_upcast(op, tree_version)?;
             check2_same_type(&op)?;
             op
         }
         // `arithOp`: `applyUpcast` only (`:316-340`, `:707-712`)
-        BinOpKind::Arith(_) => apply_upcast(op, tree_version),
+        BinOpKind::Arith(_) => apply_upcast(op, tree_version)?,
         BinOpKind::Logical(_) | BinOpKind::Bit(_) => op,
     };
     Ok(op.into())
@@ -65,16 +65,16 @@ fn apply_builder(expr: Expr, tree_version: ErgoTreeVersion) -> Result<Expr, Sigm
 /// `applyUpcast` (`:674-683`): two numeric operands of different types are each upcast to the
 /// wider (`upcastTo`, `syntax.scala:168-177`), which wraps the narrower in an `Upcast` node and
 /// so rewrites the tree. A no-op from tree version 3 (`:757-763`).
-fn apply_upcast(op: BinOp, tree_version: ErgoTreeVersion) -> BinOp {
+fn apply_upcast(op: BinOp, tree_version: ErgoTreeVersion) -> Result<BinOp, SigmaParsingError> {
     if tree_version >= ErgoTreeVersion::V3 {
-        return op;
+        return Ok(op);
     }
-    let (lt, rt) = (op.left.tpe(), op.right.tpe());
-    match (numeric_type_index(&lt), numeric_type_index(&rt)) {
+    let (lt, rt) = (op.left.try_tpe()?, op.right.try_tpe()?);
+    Ok(match (numeric_type_index(&lt), numeric_type_index(&rt)) {
         (Some(li), Some(ri)) if li != ri => {
-            let tmax = if li > ri { lt } else { rt };
-            let upcast = |e: Box<Expr>| -> Box<Expr> {
-                if e.tpe() == tmax {
+            let tmax = if li > ri { lt.clone() } else { rt.clone() };
+            let upcast = |e: Box<Expr>, tpe: SType| -> Box<Expr> {
+                if tpe == tmax {
                     e
                 } else {
                     Box::new(
@@ -88,18 +88,18 @@ fn apply_upcast(op: BinOp, tree_version: ErgoTreeVersion) -> BinOp {
             };
             BinOp {
                 kind: op.kind,
-                left: upcast(op.left),
-                right: upcast(op.right),
+                left: upcast(op.left, lt),
+                right: upcast(op.right, rt),
             }
         }
         _ => op,
-    }
+    })
 }
 
 /// `check2(SameType)`: `left.tpe == right.tpe`, else `ConstraintFailed` (`:286-295`,
 /// `:786-788`)
 fn check2_same_type(op: &BinOp) -> Result<(), SigmaParsingError> {
-    let (lt, rt) = (op.left.tpe(), op.right.tpe());
+    let (lt, rt) = (op.left.try_tpe()?, op.right.try_tpe()?);
     if lt != rt {
         return Err(SigmaParsingError::ConstraintFailed(format!(
             "{:?} needs operands of one type, got {lt:?} and {rt:?}",
@@ -112,7 +112,7 @@ fn check2_same_type(op: &BinOp) -> Result<(), SigmaParsingError> {
 /// `check2(OnlyNumeric)`: both operands numeric (NoType is not), else `ConstraintFailed`
 /// (`:775-784`)
 fn check2_only_numeric(op: &BinOp) -> Result<(), SigmaParsingError> {
-    let (lt, rt) = (op.left.tpe(), op.right.tpe());
+    let (lt, rt) = (op.left.try_tpe()?, op.right.try_tpe()?);
     if !(lt.is_numeric() && rt.is_numeric()) {
         return Err(SigmaParsingError::ConstraintFailed(format!(
             "{:?} needs numeric operands, got {lt:?} and {rt:?}",
@@ -169,7 +169,7 @@ fn check_constructor(expr: &Expr) -> Result<(), SigmaParsingError> {
         // `BitOp` requires both operands numeric or NoType (`trees.scala:913`), an
         // `IllegalArgumentException`
         Expr::BinOp(op) if matches!(op.expr.kind, BinOpKind::Bit(_)) => {
-            let (lt, rt) = (op.expr.left.tpe(), op.expr.right.tpe());
+            let (lt, rt) = (op.expr.left.try_tpe()?, op.expr.right.try_tpe()?);
             if !(is_num_type_or_no_type(&lt) && is_num_type_or_no_type(&rt)) {
                 return Err(SigmaParsingError::BitOpOperandsNotNumeric(format!(
                     "left: {lt:?}, right: {rt:?}"
@@ -177,12 +177,37 @@ fn check_constructor(expr: &Expr) -> Result<(), SigmaParsingError> {
             }
             Ok(())
         }
+        // Constructors that only read: a read that throws fails the build, nothing else does.
+        // `ArithOp`'s `val opType` reads both operands' types (`trees.scala:707-708`)
+        Expr::BinOp(op) if matches!(op.expr.kind, BinOpKind::Arith(_)) => {
+            op.expr.left.try_tpe()?;
+            op.expr.right.try_tpe()?;
+            Ok(())
+        }
+        // `If`'s and `TreeLookup`'s `Quadruple.opType` reads all three children's types
+        // (`trees.scala:1313`)
+        Expr::If(op) => {
+            op.condition.try_tpe()?;
+            op.true_branch.try_tpe()?;
+            op.false_branch.try_tpe()?;
+            Ok(())
+        }
+        Expr::TreeLookup(op) => {
+            op.expr.tree.try_tpe()?;
+            op.expr.key.try_tpe()?;
+            op.expr.proof.try_tpe()?;
+            Ok(())
+        }
+        // `OptionIsDefined`'s and `SigmaPropBytes`' `val opType` reads the input's type
+        // (`transformers.scala:656`, `:336`)
+        Expr::OptionIsDefined(op) => op.expr.input.try_tpe().map(|_| ()),
+        Expr::SigmaPropBytes(op) => op.input.try_tpe().map(|_| ()),
         _ => Ok(()),
     }
 }
 
 fn require_num_type_or_no_type(node: &str, input: &Expr) -> Result<(), SigmaParsingError> {
-    let input_tpe = input.tpe();
+    let input_tpe = input.try_tpe()?;
     if !is_num_type_or_no_type(&input_tpe) {
         return Err(SigmaParsingError::NumericOperandExpected(format!(
             "{node} of an input of type {input_tpe:?}"
@@ -192,7 +217,7 @@ fn require_num_type_or_no_type(node: &str, input: &Expr) -> Result<(), SigmaPars
 }
 
 fn require_collection(node: &str, input: &Expr) -> Result<(), SigmaParsingError> {
-    let input_tpe = input.tpe();
+    let input_tpe = input.try_tpe()?;
     if !matches!(input_tpe, SType::SColl(_) | SType::STuple(_)) {
         return Err(SigmaParsingError::CollectionInputExpected(format!(
             "{node} of an input of type {input_tpe:?}"
@@ -202,7 +227,7 @@ fn require_collection(node: &str, input: &Expr) -> Result<(), SigmaParsingError>
 }
 
 fn require_option(node: &str, input: &Expr) -> Result<(), SigmaParsingError> {
-    let input_tpe = input.tpe();
+    let input_tpe = input.try_tpe()?;
     if !matches!(input_tpe, SType::SOption(_)) {
         return Err(SigmaParsingError::OptionInputExpected(format!(
             "{node} of an input of type {input_tpe:?}"
@@ -221,7 +246,7 @@ fn require_numeric_cast(
             "{node} to {target:?}"
         )));
     }
-    let input_tpe = input.tpe();
+    let input_tpe = input.try_tpe()?;
     if !input_tpe.is_numeric() {
         return Err(SigmaParsingError::NumericOperandExpected(format!(
             "{node} of an input of type {input_tpe:?}"
@@ -350,6 +375,102 @@ mod tests {
             base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
             "00d18f05027ea305"
         );
+    }
+
+    #[test]
+    fn a_type_read_that_throws_fails_the_build() {
+        // Where sigmastate reads a child's type while it builds the node, a child whose read
+        // throws (a `Filter` over a non-collection, v6.0.7 `transformers.scala:121`) fails the
+        // build with a `ClassCastException`: the builder's `check2` and `applyUpcast`
+        // (`SigmaBuilder.scala:286-340`), every constructor of §1a, the read-only ones too
+        // (`ArithOp`'s and `If`'s `opType`, `trees.scala:707-708`, `:1313`)
+        use crate::ergo_tree::ErgoTreeVersion;
+        const V0: ErgoTreeVersion = ErgoTreeVersion::V0;
+        const V3: ErgoTreeVersion = ErgoTreeVersion::V3;
+        use crate::mir::bin_op::{ArithOp, BinOp, BitOp, RelationOp};
+        use crate::mir::bit_inversion::BitInversion;
+        use crate::mir::coll_by_index::ByIndex;
+        use crate::mir::expr::type_read_tests::{bi, filter};
+        use crate::mir::expr::Expr;
+        use crate::mir::if_op::If;
+        use crate::mir::negation::Negation;
+        use crate::mir::option_get::OptionGet;
+        use crate::mir::option_is_defined::OptionIsDefined;
+        use crate::mir::sigma_prop_bytes::SigmaPropBytes;
+        use crate::mir::tree_lookup::TreeLookup;
+        use crate::mir::upcast::Upcast;
+        use crate::types::stype::SType;
+        use alloc::boxed::Box;
+        let f = || Box::new(filter(bi()));
+        let bin = |kind: crate::mir::bin_op::BinOpKind| -> Expr {
+            BinOp {
+                kind,
+                left: f(),
+                right: f(),
+            }
+            .into()
+        };
+        let cases: [(&str, Expr, ErgoTreeVersion); 15] = [
+            (
+                "If",
+                If {
+                    condition: Box::new(Expr::Const(true.into())),
+                    true_branch: f(),
+                    false_branch: f(),
+                }
+                .into(),
+                V3,
+            ),
+            (
+                "TreeLookup",
+                TreeLookup {
+                    tree: f(),
+                    key: f(),
+                    proof: f(),
+                }
+                .into(),
+                V3,
+            ),
+            ("EQ v0", bin(RelationOp::Eq.into()), V0),
+            ("EQ v3", bin(RelationOp::Eq.into()), V3),
+            ("GT", bin(RelationOp::Gt.into()), V3),
+            ("Plus v0", bin(ArithOp::Plus.into()), V0),
+            ("Plus v3", bin(ArithOp::Plus.into()), V3),
+            ("BitOr", bin(BitOp::BitOr.into()), V3),
+            ("Negation", Negation { input: f() }.into(), V3),
+            ("BitInversion", BitInversion { input: f() }.into(), V3),
+            (
+                "Upcast",
+                Upcast {
+                    input: f(),
+                    tpe: SType::SLong,
+                }
+                .into(),
+                V3,
+            ),
+            ("OptionGet", OptionGet { input: f() }.into(), V3),
+            (
+                "ByIndex",
+                ByIndex {
+                    input: f(),
+                    index: Box::new(0i32.into()),
+                    default: None,
+                }
+                .into(),
+                V3,
+            ),
+            ("OptionIsDefined", OptionIsDefined { input: f() }.into(), V3),
+            ("SigmaPropBytes", SigmaPropBytes { input: f() }.into(), V3),
+        ];
+        for (name, expr, version) in cases {
+            assert!(
+                matches!(
+                    super::check_build(expr, version),
+                    Err(SigmaParsingError::TypeReadFailed(_))
+                ),
+                "{name}"
+            );
+        }
     }
 
     #[test]
