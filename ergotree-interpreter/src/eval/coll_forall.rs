@@ -90,7 +90,7 @@ mod tests {
             right: Box::new(
                 ValUse {
                     val_id: 1.into(),
-                    tpe: SType::SBox,
+                    tpe: SType::SInt,
                 }
                 .into(),
             ),
