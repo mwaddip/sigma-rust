@@ -77,11 +77,15 @@ impl SigmaSerializable for ExtractRegisterAs {
             return Err(SigmaParsingError::RegisterIdOutOfRange(register_id));
         }
         let elem_tpe = SType::sigma_parse(r)?;
-        Ok(ExtractRegisterAs::new(
-            input,
+        // sigmastate casts the input to a box value with no check (the cast is erased) and
+        // builds the node over it, so evaluating it fails if the value is not a box (v6.0.7
+        // `ExtractRegisterAsSerializer.scala:25-31`, `transformers.scala:484-496`); `new`
+        // stays strict for library users
+        Ok(ExtractRegisterAs {
+            input: input.into(),
             register_id,
-            SType::SOption(elem_tpe.into()),
-        )?)
+            elem_tpe: elem_tpe.into(),
+        })
     }
 }
 

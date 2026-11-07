@@ -18,7 +18,7 @@ pub struct Negation {
 impl Negation {
     /// Type
     pub fn tpe(&self) -> SType {
-        self.input.post_eval_tpe()
+        self.input.tpe()
     }
 }
 

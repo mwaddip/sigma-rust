@@ -149,6 +149,13 @@ fn check_constructor(expr: &Expr) -> Result<(), SigmaParsingError> {
         // an `IllegalArgumentException` (`trees.scala:398`, `:431`). NoType is not numeric.
         Expr::Upcast(cast) => require_numeric_cast("Upcast", &cast.input, &cast.tpe),
         Expr::Downcast(cast) => require_numeric_cast("Downcast", &cast.input, &cast.tpe),
+        // `Negation` and `BitInversion` require a numeric input or NoType (`trees.scala:882`,
+        // `:900`), an `IllegalArgumentException`
+        Expr::Negation(op) => require_num_type_or_no_type("Negation", &op.expr.input),
+        Expr::BitInversion(op) => require_num_type_or_no_type("BitInversion", &op.input),
+        // `OptionGet`'s `val opType` reads its type, `input.tpe.elemType`, a cast to `SOption`
+        // (`transformers.scala:600-601`), a `ClassCastException`
+        Expr::OptionGet(op) => require_option("OptionGet", &op.expr.input),
         // `BitOp` requires both operands numeric or NoType (`trees.scala:913`), an
         // `IllegalArgumentException`
         Expr::BinOp(op) if matches!(op.expr.kind, BinOpKind::Bit(_)) => {
@@ -162,6 +169,26 @@ fn check_constructor(expr: &Expr) -> Result<(), SigmaParsingError> {
         }
         _ => Ok(()),
     }
+}
+
+fn require_num_type_or_no_type(node: &str, input: &Expr) -> Result<(), SigmaParsingError> {
+    let input_tpe = input.tpe();
+    if !is_num_type_or_no_type(&input_tpe) {
+        return Err(SigmaParsingError::NumericOperandExpected(format!(
+            "{node} of an input of type {input_tpe:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_option(node: &str, input: &Expr) -> Result<(), SigmaParsingError> {
+    let input_tpe = input.tpe();
+    if !matches!(input_tpe, SType::SOption(_)) {
+        return Err(SigmaParsingError::OptionInputExpected(format!(
+            "{node} of an input of type {input_tpe:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn require_numeric_cast(
@@ -303,6 +330,46 @@ mod tests {
             base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
             "00d18f05027ea305"
         );
+    }
+
+    #[test]
+    fn a_unary_node_is_built_without_reading_its_input_type() {
+        // SANTA `tree_parse_acceptance` #1: LogicalNot(Int 1); #10: OptionIsDefined(Int 1);
+        // EQ(SizeOf(Int 1), Int 0). sigmastate builds each with no check of its input.
+        for hex in ["00d1ef0402", "00d1e60402", "00d193b104020400"] {
+            assert!(roundtrips(hex), "{hex}: {:?}", tree(hex));
+        }
+        // OptionIsDefined(ExtractRegisterAs(Int 1, R4, Int)), unsized and size-flagged:
+        // the serializer casts the input to a box value with no check
+        for hex in ["00d1e6c604020404", "0b07d1e6c604020404"] {
+            assert!(roundtrips(hex), "{hex}: {:?}", tree(hex));
+        }
+    }
+
+    #[test]
+    fn negation_needs_a_numeric_input_or_no_type() {
+        // size-flagged root Negation(true): the require throws; Negation(Int 1) builds, and
+        // its Int root degrades the tree on rule 1001
+        assert!(matches!(
+            tree("0803f00101"),
+            Err(SigmaParsingError::NumericOperandExpected(_))
+        ));
+        assert!(matches!(
+            tree("0803f00402"),
+            Ok(ErgoTree::Unparsed {
+                error: ErgoTreeError::RootTpeError(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn option_get_needs_an_option_input() {
+        // size-flagged root OptionGet(Int 1): the cast to SOption throws
+        assert!(matches!(
+            tree("0803e40402"),
+            Err(SigmaParsingError::OptionInputExpected(_))
+        ));
     }
 
     #[test]

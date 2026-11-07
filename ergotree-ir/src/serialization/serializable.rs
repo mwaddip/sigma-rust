@@ -176,8 +176,8 @@ pub enum SigmaParsingError {
     #[error("a numeric cast to a non-numeric type: {0}")]
     NumericCastTargetNotNumeric(String),
     /// A node whose constructor requires a numeric operand got another type: the `require` of
-    /// `Upcast` or `Downcast` (v6.0.7 `trees.scala:398`, `:431`), an
-    /// `IllegalArgumentException`
+    /// `Upcast` or `Downcast` (v6.0.7 `trees.scala:398`, `:431`), or of `Negation` or
+    /// `BitInversion`, which admit NoType too (`:882`, `:900`), an `IllegalArgumentException`
     #[error("a numeric operand expected: {0}")]
     NumericOperandExpected(String),
     /// A relation whose operands fail the deserializing builder's `check2`: a comparison of a
@@ -204,6 +204,15 @@ pub enum SigmaParsingError {
     /// some after reading them (v6.0.7 `MethodCallSerializer.scala:52-55`), an `AssertionError`
     #[error("a MethodCall with no arguments in a tree of version 3 or later")]
     MethodCallWithoutArguments,
+    /// A node whose constructor casts its input's type to `SOption` got another type:
+    /// `OptionGet` and `OptionGetOrElse` (v6.0.7 `transformers.scala:600-601`, `:625-626`), a
+    /// `ClassCastException`
+    #[error("an Option input expected: {0}")]
+    OptionInputExpected(String),
+    /// A `MapCollection` whose mapper is not a function: its constructor casts the mapper's
+    /// type to `SFunc` (v6.0.7 `transformers.scala:38`), a `ClassCastException`
+    #[error("a function expected: {0}")]
+    FunctionExpected(String),
     /// Collection data whose element type is zero-width: `SUnit`, or a collection or tuple
     /// built only from it. Its elements take no bytes, so its declared length escapes the
     /// position limit. Rule 1020 `CheckZeroWidthCollection` (sigmastate 6.0.7
@@ -355,6 +364,8 @@ impl SigmaParsingError {
                 | SigmaParsingError::BlockItemNotValDef(_)
                 | SigmaParsingError::RegisterIdOutOfRange(_)
                 | SigmaParsingError::MethodCallWithoutArguments
+                | SigmaParsingError::OptionInputExpected(_)
+                | SigmaParsingError::FunctionExpected(_)
                 | SigmaParsingError::UnsizedTreeValidationError(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)
