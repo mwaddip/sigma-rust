@@ -649,6 +649,7 @@ mod depth_limit_tests {
     use crate::ergo_tree::ErgoTree;
     use crate::has_opcode::HasStaticOpCode;
     use crate::serialization::op_code::OpCode;
+    use crate::serialization::sigma_byte_reader::from_bytes;
     use crate::serialization::sigma_byte_writer::SigmaByteWriter;
     use crate::sigma_protocol::sigma_boolean::cand::Cand;
     use alloc::vec::Vec;
@@ -717,12 +718,22 @@ mod depth_limit_tests {
         matches!(r, Err(SigmaParsingError::DeserializeCallDepthExceeded(111)))
     }
 
+    /// Parse `bytes` as an extension on a reader already `level` deep. A type nests at most
+    /// `MaxTypeDepth` (8) deep, so a collection alone cannot reach `MaxTreeDepth` (110) from
+    /// level 0: start near it instead.
+    fn parse_at_level(level: usize, bytes: &[u8]) -> Result<ContextExtension, SigmaParsingError> {
+        let mut r = from_bytes(bytes);
+        r.set_level(level)?;
+        ContextExtension::sigma_parse(&mut r)
+    }
+
     #[test]
     fn extension_value_takes_a_value_level() {
         // Coll^n[Byte]: a value level and n data levels.
-        assert!(ContextExtension::sigma_parse_bytes(&extension(coll_n_byte(109))).is_ok());
-        assert!(depth_exceeded(ContextExtension::sigma_parse_bytes(
-            &extension(coll_n_byte(110))
+        assert!(parse_at_level(100, &extension(coll_n_byte(9))).is_ok());
+        assert!(depth_exceeded(parse_at_level(
+            100,
+            &extension(coll_n_byte(10))
         )));
     }
 
@@ -743,10 +754,8 @@ mod depth_limit_tests {
             let value = box_with_deep_tree_constant(n);
             extension(value.sigma_serialize_bytes().unwrap())
         };
-        assert!(ContextExtension::sigma_parse_bytes(&ext_bytes(108)).is_ok());
-        assert!(depth_exceeded(ContextExtension::sigma_parse_bytes(
-            &ext_bytes(109)
-        )));
+        assert!(parse_at_level(100, &ext_bytes(8)).is_ok());
+        assert!(depth_exceeded(parse_at_level(100, &ext_bytes(9))));
     }
 }
 

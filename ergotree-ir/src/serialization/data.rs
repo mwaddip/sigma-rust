@@ -338,6 +338,7 @@ mod depth_limit_tests {
     //! `MaxTreeDepth` = 110 per reader. A constant read on its own, as a segregated
     //! tree constant is, counts data levels only.
     use crate::mir::constant::Constant;
+    use crate::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
     use crate::serialization::{SigmaParsingError, SigmaSerializable};
     use alloc::vec::Vec;
 
@@ -368,23 +369,28 @@ mod depth_limit_tests {
         matches!(r, Err(SigmaParsingError::DeserializeCallDepthExceeded(111)))
     }
 
+    /// Parse `bytes` as a constant on a reader already `level` deep. A type nests at most
+    /// `MaxTypeDepth` (8) deep, so a collection alone cannot reach `MaxTreeDepth` (110) from
+    /// level 0: start near it instead.
+    fn parse_at_level(level: usize, bytes: &[u8]) -> Result<Constant, SigmaParsingError> {
+        let mut r = from_bytes(bytes);
+        r.set_level(level)?;
+        Constant::sigma_parse(&mut r)
+    }
+
     #[test]
     fn nested_coll_of_bytes_reaches_exactly_max_tree_depth() {
         // Coll[Byte] reads its bytes in bulk, so Coll^n[Byte] takes n levels.
-        assert!(Constant::sigma_parse_bytes(&coll_n_byte(110)).is_ok());
-        assert!(depth_exceeded(Constant::sigma_parse_bytes(&coll_n_byte(
-            111
-        ))));
+        assert!(parse_at_level(102, &coll_n_byte(8)).is_ok());
+        assert!(depth_exceeded(parse_at_level(102, &coll_n_byte(9))));
     }
 
     #[test]
     fn each_element_of_a_non_byte_coll_is_one_more_level() {
         // Coll[Int] reads each element as a data value: one level past the collection.
-        assert!(Constant::sigma_parse_bytes(&coll_n_int(109, true)).is_ok());
-        assert!(depth_exceeded(Constant::sigma_parse_bytes(&coll_n_int(
-            110, true
-        ))));
+        assert!(parse_at_level(101, &coll_n_int(8, true)).is_ok());
+        assert!(depth_exceeded(parse_at_level(101, &coll_n_int(9, true))));
         // An empty innermost Coll[Int] reads no element.
-        assert!(Constant::sigma_parse_bytes(&coll_n_int(110, false)).is_ok());
+        assert!(parse_at_level(101, &coll_n_int(9, false)).is_ok());
     }
 }
