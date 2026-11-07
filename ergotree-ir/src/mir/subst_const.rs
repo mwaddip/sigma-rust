@@ -70,7 +70,13 @@ impl SigmaSerializable for SubstConstants {
         let script_bytes = Expr::sigma_parse(r)?;
         let positions = Expr::sigma_parse(r)?;
         let new_values = Expr::sigma_parse(r)?;
-        Ok(SubstConstants::new(script_bytes, positions, new_values)?)
+        // sigmastate builds `SubstConstants` with no check of its arguments (v6.0.7
+        // `trees.scala:624-627`)
+        Ok(SubstConstants {
+            script_bytes: script_bytes.into(),
+            positions: positions.into(),
+            new_values: new_values.into(),
+        })
     }
 }
 
@@ -132,5 +138,21 @@ mod tests {
             let expr: Expr = v.into();
             prop_assert_eq![sigma_serialize_roundtrip(&expr), expr];
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod parse_tests {
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::SigmaSerializable;
+
+    #[test]
+    fn its_arguments_are_not_checked_at_parse() {
+        // sigmaProp(EQ(SizeOf(SubstConstants(Int 1, Int 2, Int 3)), 0))
+        let bytes = base16::decode(b"00d193b1740402040404060400").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)));
+        assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
     }
 }
