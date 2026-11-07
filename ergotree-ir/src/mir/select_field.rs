@@ -131,31 +131,46 @@ impl SigmaSerializable for SelectField {
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
         let field_index = r.get_i8()?;
-        let items = match input.try_tpe()? {
-            SType::STuple(STuple { items }) => items,
-            tpe => {
-                return Err(SigmaParsingError::TupleInputExpected(format!(
-                    "SelectField of an input of type {tpe:?}"
-                )))
-            }
-        };
-        let field_tpe = usize::try_from(field_index)
-            .ok()
-            .and_then(|i| i.checked_sub(1))
-            .and_then(|i| items.get(i))
-            .ok_or_else(|| {
-                SigmaParsingError::TupleFieldOutOfBounds(format!(
-                    "field {field_index} of a tuple of {} items",
-                    items.len()
-                ))
-            })?
-            .clone();
+        let field_tpe = field_tpe(&input, field_index)?;
         Ok(SelectField {
             input: Box::new(input),
             // 1..=127 here, as the index is a positive signed byte that names an item
             field_index: TupleFieldIndex(field_index as u8),
             field_tpe,
         })
+    }
+}
+
+/// sigmastate's `val tpe = input.tpe.items(fieldIndex - 1)` (v6.0.7 `transformers.scala:294`):
+/// the input's type cast to `STuple`, then the field, by a signed index
+fn field_tpe(input: &Expr, field_index: i8) -> Result<SType, SigmaParsingError> {
+    let items = match input.try_tpe()? {
+        SType::STuple(STuple { items }) => items,
+        tpe => {
+            return Err(SigmaParsingError::TupleInputExpected(format!(
+                "SelectField of an input of type {tpe:?}"
+            )))
+        }
+    };
+    Ok(usize::try_from(field_index)
+        .ok()
+        .and_then(|i| i.checked_sub(1))
+        .and_then(|i| items.get(i))
+        .ok_or_else(|| {
+            SigmaParsingError::TupleFieldOutOfBounds(format!(
+                "field {field_index} of a tuple of {} items",
+                items.len()
+            ))
+        })?
+        .clone())
+}
+
+impl SelectField {
+    /// Recomputes the field's type from the current input, as sigmastate's constructor does
+    /// on a node it rebuilds (the substitution at spend)
+    pub(crate) fn rebuild(&mut self) -> Result<(), SigmaParsingError> {
+        self.field_tpe = field_tpe(&self.input, self.field_index.0 as i8)?;
+        Ok(())
     }
 }
 

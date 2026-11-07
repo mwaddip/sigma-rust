@@ -489,28 +489,14 @@ impl Expr {
 
     /// Rewrite expr, replacing [`DeserializeContext`] and [`DeserializeRegister`] nodes with
     /// the scripts their context variable or register holds, as sigmastate's
-    /// `applyDeserializeContextJITC` does (v6.0.7 `Interpreter.scala:149-157`): bottom-up, with
-    /// the rule tried on each node. A `ClassCastException` raised inside the rule leaves the
-    /// node where it is (Kiama's `strategy`, `Rewriter.scala:180-191`); it errors only if the
-    /// live path evaluates it. Any other failure fails the substitution.
-    pub fn substitute_deserialize(self, ctx: &Context) -> Result<Self, SubstDeserializeError> {
-        self.try_rewrite_bu(
-            |expr| {
-                matches!(
-                    expr,
-                    Expr::DeserializeContext(_) | Expr::DeserializeRegister(_)
-                )
-            },
-            |expr| match subst_deserialize(expr, ctx) {
-                Ok(Some(script)) => {
-                    *expr = script;
-                    Ok(())
-                }
-                Ok(None) => Ok(()),
-                Err(e) if e.is_class_cast() => Ok(()),
-                Err(e) => Err(e),
-            },
-        )
+    /// `applyDeserializeContextJITC` does (v6.0.7 `Interpreter.scala:149-157`), through Kiama's
+    /// `everywherebu(strategy(rule))`. A `ClassCastException` raised inside the rule leaves the
+    /// node where it is (`strategy`, `Rewriter.scala:180-191`); it errors only if the live path
+    /// evaluates it. Any other failure fails the substitution, and so does a failure to rebuild
+    /// an ancestor of a replaced node.
+    pub fn substitute_deserialize(mut self, ctx: &Context) -> Result<Self, SubstDeserializeError> {
+        subst_bu(&mut self, ctx)?;
+        Ok(self)
     }
 
     /// Substitute [`ConstantPlaceholder`] nodes in `self` with [`Constant`]
@@ -722,6 +708,36 @@ impl From<BoundedVecOutOfBounds> for InvalidArgumentError {
     }
 }
 
+/// `everywherebu`'s walk (v6.0.7 `Rewriter.scala:841`, `:812`, `bottomup(s) = all(bottomup(s))
+/// <* s`): the children first; then the node is rebuilt through its constructor if a child
+/// changed (`all`'s `allProduct`, which builds a new node only then); then the rule is tried
+/// on it, and its replacement is not traversed. Returns whether the subtree changed.
+fn subst_bu(node: &mut Expr, ctx: &Context) -> Result<bool, SubstDeserializeError> {
+    let mut changed = false;
+    for child in node.children_mut() {
+        changed |= subst_bu(child, ctx)?;
+    }
+    if changed {
+        crate::serialization::check_build::rebuild(node)
+            .map_err(SubstDeserializeError::AncestorRebuild)?;
+    }
+    if matches!(
+        node,
+        Expr::DeserializeContext(_) | Expr::DeserializeRegister(_)
+    ) {
+        match subst_deserialize(node, ctx) {
+            Ok(Some(script)) => {
+                *node = script;
+                return Ok(true);
+            }
+            Ok(None) => (),
+            Err(e) if e.is_class_cast() => (),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(changed)
+}
+
 /// sigmastate's rule for one node (v6.0.7 `Interpreter.scala:110-127`,
 /// `ErgoLikeInterpreter.scala:17-38`): the script to put in its place, or `None` to leave it
 // TODO: soft fork. sigmastate runs the substitution inside `trySoftForkable`
@@ -763,20 +779,10 @@ fn subst_deserialize(expr: &Expr, ctx: &Context) -> Result<Option<Expr>, SubstDe
                     check_script_tpe(&script, tpe)?;
                     Ok(Some(script))
                 }
-                // An absent register substitutes the default (`.orElse(d.default)`, `:36`);
-                // with no default the node stays, and errors if it is evaluated
-                None => match default {
-                    Some(default) => {
-                        if default.tpe() != *tpe {
-                            return Err(SubstDeserializeError::ExprTpeError {
-                                expected: tpe.clone(),
-                                actual: default.tpe(),
-                            });
-                        }
-                        Ok(Some((**default).clone()))
-                    }
-                    None => Ok(None),
-                },
+                // An absent register substitutes the default, whose type nothing checks
+                // (`.orElse(d.default)`, `:36`); with no default the node stays, and errors if
+                // it is evaluated
+                None => Ok(default.as_deref().cloned()),
             }
         }
         _ => Ok(None),
@@ -867,6 +873,11 @@ pub enum SubstDeserializeError {
     CostLimitExceeded(CostLimitExceeded),
     #[error("a register that is not a Coll[Byte]: {0}")]
     RegisterNotBytes(String),
+    /// A substituted node's ancestor failed to rebuild: `everywherebu`'s `all` rebuilds it
+    /// through its constructor outside the rule, with no catch (v6.0.7 `Rewriter.scala:427`,
+    /// `:260`), so any failure there fails the spend
+    #[error("rebuilding an ancestor of a substituted node: {0}")]
+    AncestorRebuild(SigmaParsingError),
 }
 
 impl SubstDeserializeError {
@@ -884,7 +895,8 @@ impl SubstDeserializeError {
             | SubstDeserializeError::RegisterNotFound(_)
             | SubstDeserializeError::RegisterValueError(_)
             | SubstDeserializeError::ExprTpeError { .. }
-            | SubstDeserializeError::CostLimitExceeded(_) => false,
+            | SubstDeserializeError::CostLimitExceeded(_)
+            | SubstDeserializeError::AncestorRebuild(_) => false,
         }
     }
 }
@@ -1230,7 +1242,7 @@ mod substitute_deserialize_tests {
 
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod substitution_rule_tests {
     //! sigmastate's rule (v6.0.7 `Interpreter.scala:110-127`, `ErgoLikeInterpreter.scala:17-38`)
     //! decodes, then charges (`deserializeMeasured`, `:99-107`), then checks the decoded
@@ -1318,6 +1330,169 @@ mod substitution_rule_tests {
         // SANTA s15: `eba.value.toArray` on an Int is a cast, so the default is not reached
         let expr = register(SType::SInt, Some(2i32.into()));
         assert_eq!(substitute(&expr, 1i32.into()), (Ok(expr.clone()), 0));
+    }
+
+    /// Substitutes `expr` in a context whose self box has no registers and whose extension is
+    /// empty
+    fn substitute_empty(expr: &Expr) -> Result<Expr, SubstDeserializeError> {
+        let self_box = force_any_val::<ErgoBox>()
+            .with_additional_registers(crate::chain::ergo_box::NonMandatoryRegisters::empty());
+        let extension = ContextExtension::empty();
+        let ctx = Context {
+            self_box: &self_box,
+            ..force_any_val::<Context>()
+        }
+        .with_extension(&extension);
+        expr.clone().substitute_deserialize(&ctx)
+    }
+
+    /// sigmaProp(If(false, c, true)), whose `c` is never evaluated
+    fn dead(c: Expr) -> Expr {
+        crate::mir::bool_to_sigma::BoolToSigmaProp {
+            input: Box::new(
+                crate::mir::if_op::If {
+                    condition: Box::new(false.into()),
+                    true_branch: Box::new(c),
+                    false_branch: Box::new(true.into()),
+                }
+                .into(),
+            ),
+        }
+        .into()
+    }
+
+    fn bin(kind: crate::mir::bin_op::BinOpKind, left: Expr, right: Expr) -> Expr {
+        crate::mir::bin_op::BinOp {
+            kind,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+        .into()
+    }
+
+    #[test]
+    fn a_default_is_substituted_untyped() {
+        // `.orElse(d.default)` checks nothing (v6.0.7 `ErgoLikeInterpreter.scala:36`; SANTA s2)
+        assert_eq!(
+            substitute_empty(&register(SType::SAny, Some(1i32.into()))),
+            Ok(1i32.into())
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_if_reads_its_branch_types() {
+        // SANTA s8: dead(EQ(If(true, DR(R4, SAny, F(BI)), BI), BI)), R4 absent. `all` rebuilds
+        // each ancestor through its constructor, with no catch (`Rewriter.scala:427`, `:260`),
+        // and the rebuilt If reads F(BI)'s type (`trees.scala:1313`): the spend fails although
+        // the branch is dead
+        use crate::mir::bin_op::RelationOp;
+        let if_: Expr = crate::mir::if_op::If {
+            condition: Box::new(true.into()),
+            true_branch: Box::new(register(SType::SAny, Some(filter(bi())))),
+            false_branch: Box::new(bi()),
+        }
+        .into();
+        assert!(matches!(
+            substitute_empty(&dead(bin(RelationOp::Eq.into(), if_, bi()))),
+            Err(SubstDeserializeError::AncestorRebuild(
+                SigmaParsingError::TypeReadFailed(_)
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_rebuilt_plus_reads_its_operand_types() {
+        // SANTA s9: dead(GT(Plus(DR(R4, Int, F(BI)), 0), 0)), R4 absent: the rebuilt Plus reads
+        // both operands' types (`trees.scala:707-708`)
+        use crate::mir::bin_op::{ArithOp, RelationOp};
+        let plus = bin(
+            ArithOp::Plus.into(),
+            register(SType::SInt, Some(filter(bi()))),
+            0i32.into(),
+        );
+        assert!(matches!(
+            substitute_empty(&dead(bin(RelationOp::Gt.into(), plus, 0i32.into()))),
+            Err(SubstDeserializeError::AncestorRebuild(
+                SigmaParsingError::TypeReadFailed(_)
+            ))
+        ));
+    }
+
+    #[test]
+    fn an_unchanged_sibling_is_not_rebuilt() {
+        // `allProduct` rebuilds a node only when a child changed: If(true, F(BI), F(BI)) would
+        // fail a rebuild, and as the substituted node's sibling it is left as it is
+        use crate::mir::bin_op::RelationOp;
+        let sibling: Expr = crate::mir::if_op::If {
+            condition: Box::new(true.into()),
+            true_branch: Box::new(filter(bi())),
+            false_branch: Box::new(filter(bi())),
+        }
+        .into();
+        let expr = dead(bin(
+            RelationOp::Eq.into(),
+            register(SType::SAny, Some(bi())),
+            sibling.clone(),
+        ));
+        assert_eq!(
+            substitute_empty(&expr),
+            Ok(dead(bin(RelationOp::Eq.into(), bi(), sibling)))
+        );
+    }
+
+    #[test]
+    fn a_decoded_script_is_not_traversed_again() {
+        // bottom-up, the rule runs after the children and the replacement is not traversed:
+        // R4 holds DeserializeContext(Int, 1), and variable 1 holds Int 5
+        let script: Expr = DeserializeContext {
+            tpe: SType::SInt,
+            id: 1,
+        }
+        .into();
+        let self_box = force_any_val::<ErgoBox>()
+            .with_additional_registers(vec![bytes(script.clone())].try_into().unwrap());
+        let extension = ContextExtension {
+            values: [(1u8, bytes(5i32.into()).into())].into_iter().collect(),
+        };
+        let ctx = Context {
+            self_box: &self_box,
+            ..force_any_val::<Context>()
+        }
+        .with_extension(&extension);
+        assert_eq!(
+            register(SType::SInt, None).substitute_deserialize(&ctx),
+            Ok(script)
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_node_recomputes_its_cached_type() {
+        // Exists(DR(R4, Coll[Int], default Coll[Long](2)), (x: Long) => true), R4 absent: the
+        // default goes in untyped, and the rebuilt Exists takes its element type from it
+        use crate::mir::coll_exists::Exists;
+        use crate::mir::func_value::{FuncArg, FuncValue};
+        let exists: Expr = Exists {
+            input: Box::new(register(
+                SType::SColl(SType::SInt.into()),
+                Some(vec![2i64].into()),
+            )),
+            condition: Box::new(
+                FuncValue::new(
+                    vec![FuncArg {
+                        idx: 1.into(),
+                        tpe: SType::SLong,
+                    }],
+                    true.into(),
+                )
+                .into(),
+            ),
+            elem_tpe: SType::SInt.into(),
+        }
+        .into();
+        match substitute_empty(&exists).unwrap() {
+            Expr::Exists(e) => assert_eq!(*e.expr().elem_tpe, SType::SLong),
+            e => panic!("{e:?}"),
+        }
     }
 
     /// Substitutes `expr` in a context whose R4 holds the register value `value`

@@ -32,6 +32,34 @@ pub(crate) fn check_build(
     Ok(expr)
 }
 
+/// sigmastate rebuilding a node one of whose children the substitution at spend replaced:
+/// `dup` calls the node's constructor, not the builder (v6.0.7 `Rewriter.scala:241-260`), so
+/// its `val`s are computed afresh and its checks run again. Recomputes the types sigma-rust
+/// caches from the children, then makes the constructor's checks.
+pub(crate) fn rebuild(expr: &mut Expr) -> Result<(), SigmaParsingError> {
+    use crate::mir::coll_exists::parsed_elem_tpe;
+    match expr {
+        Expr::Exists(e) => e.expr.elem_tpe = parsed_elem_tpe(&e.expr.input),
+        Expr::ForAll(e) => e.expr.elem_tpe = parsed_elem_tpe(&e.expr.input),
+        Expr::Filter(e) => e.expr.elem_tpe = parsed_elem_tpe(&e.expr.input),
+        // `MapCollection`'s `val tpe` casts the mapper's type to `SFunc` (`transformers.scala:38`)
+        Expr::Map(m) => {
+            m.expr.mapper_sfunc = match m.expr.mapper.try_tpe()? {
+                SType::SFunc(sfunc) => sfunc,
+                tpe => {
+                    return Err(SigmaParsingError::FunctionExpected(format!(
+                        "a Map mapper of type {tpe:?}"
+                    )))
+                }
+            }
+        }
+        Expr::SelectField(s) => s.expr.rebuild()?,
+        Expr::FuncValue(f) => f.rebuild(),
+        _ => (),
+    }
+    check_constructor(expr)
+}
+
 /// `DeserializationSigmaBuilder`'s checks (v6.0.7 `SigmaBuilder.scala:286-340`, `:674-704`,
 /// `:750-764`). Only the relations and the arithmetic operations go through one; every other
 /// `mk*` is a plain constructor call.
