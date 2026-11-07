@@ -132,11 +132,15 @@ pub enum SigmaParsingError {
     /// Type code 0, which sigmastate's `TypeSerializer` refuses with `InvalidTypePrefix`
     #[error("type code 0 is not a type")]
     InvalidTypePrefix,
-    /// A type parameter sigmastate cannot build: a negative `FunDef` count, or a `FunDef` or
-    /// `SFunc` type parameter that is not a type variable (a `NegativeArraySizeException`, a
-    /// `ClassCastException`, a failed `require`)
+    /// A type parameter sigmastate cannot build: a negative `FunDef` count, or an `SFunc` type
+    /// parameter that is not a type variable (a `NegativeArraySizeException`, a failed
+    /// `require`)
     #[error("invalid type parameter: {0}")]
     InvalidTypeParameter(String),
+    /// A `FunDef` type parameter that is not a type variable: `ValDefSerializer` casts it
+    /// with `.asInstanceOf[STypeVar]`, a `ClassCastException`
+    #[error("a FunDef type parameter that is not a type variable: {0}")]
+    TypeParameterNotTypeVar(String),
     /// A SigmaBoolean opcode sigmastate's parser does not match (a `MatchError`)
     #[error("unexpected SigmaBoolean opcode {0:#04x}")]
     InvalidSigmaBooleanOpCode(u8),
@@ -345,6 +349,7 @@ impl SigmaParsingError {
                 | SigmaParsingError::ValDefIdNotFound(_)
                 | SigmaParsingError::InvalidTypePrefix
                 | SigmaParsingError::InvalidTypeParameter(_)
+                | SigmaParsingError::TypeParameterNotTypeVar(_)
                 | SigmaParsingError::InvalidSigmaBooleanOpCode(_)
                 | SigmaParsingError::InvalidBigIntSize(_)
                 | SigmaParsingError::ExceedsIntMax(_, _)

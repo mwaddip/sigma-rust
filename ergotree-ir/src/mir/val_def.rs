@@ -104,9 +104,8 @@ impl ValDef {
         let tpe_args = (0..n_tpe_args)
             .map(|_| match SType::sigma_parse(r)? {
                 SType::STypeVar(tv) => Ok(tv),
-                other => Err(SigmaParsingError::InvalidTypeParameter(format!(
-                    "FunDef: expected a type variable as type parameter, got {:?}",
-                    other
+                other => Err(SigmaParsingError::TypeParameterNotTypeVar(format!(
+                    "{other:?}"
                 ))),
             })
             .collect::<Result<Vec<_>, _>>()?;

@@ -2221,13 +2221,9 @@ mod type_tests {
 
     #[test]
     fn a_type_parameter_that_is_no_type_variable_rejects_a_sized_tree() {
-        // #9 a `FunDef` with -1 type parameters, #10 a `FunDef` whose type parameter is `Int`,
-        // #12 a v3 `SFunc` constant whose type parameter is `Int`
-        for hex in [
-            "0809d801d701ff08d37201",
-            "080ad801d701010408d37201",
-            "1b0a01700104040104027300",
-        ] {
+        // #9 a `FunDef` with -1 type parameters, #12 a v3 `SFunc` constant whose type parameter
+        // is `Int`
+        for hex in ["0809d801d701ff08d37201", "1b0a01700104040104027300"] {
             assert!(
                 matches!(
                     ErgoTree::sigma_parse_bytes(&tree(hex)),
@@ -2236,6 +2232,12 @@ mod type_tests {
                 "{hex}"
             );
         }
+        // #10 a `FunDef` whose type parameter is `Int`: `ValDefSerializer`'s
+        // `.asInstanceOf[STypeVar]`, a `ClassCastException`
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&tree("080ad801d701010408d37201")),
+            Err(SigmaParsingError::TypeParameterNotTypeVar(_))
+        ));
     }
 
     #[test]
