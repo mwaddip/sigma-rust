@@ -42,7 +42,7 @@ impl SigmaSerializable for PropertyCall {
         // `SMethod.scala:185-191`); sigmastate builds the call with no check of its own
         let method = method
             .clone()
-            .specialize_for(obj.tpe(), Vec::new())
+            .specialize_for(obj.try_tpe()?, Vec::new())
             .unwrap_or(method);
         Ok(PropertyCall {
             obj: obj.into(),

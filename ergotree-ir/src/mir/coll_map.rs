@@ -76,7 +76,7 @@ impl SigmaSerializable for Map {
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
         let mapper = Expr::sigma_parse(r)?;
-        match mapper.tpe() {
+        match mapper.try_tpe()? {
             SType::SFunc(mapper_sfunc) => Ok(Map {
                 input: input.into(),
                 mapper: mapper.into(),

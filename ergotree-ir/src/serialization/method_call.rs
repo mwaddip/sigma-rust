@@ -61,11 +61,17 @@ impl SigmaSerializable for MethodCall {
         // arguments' types and the object's, which returns the method as it is when they do
         // not unify (v6.0.7 `MethodCallSerializer.scala:77-97`, `SMethod.scala:185-191`).
         // sigmastate builds the call with no arity or type check of its own.
+        // The arguments' types are read first, then the object's (`:84-96`), where a read can
+        // throw ([`Expr::try_tpe`])
         let method = method.with_concrete_types(&explicit_type_args);
-        let arg_types = args.iter().map(|arg| arg.tpe()).collect();
+        let arg_types = args
+            .iter()
+            .map(|arg| arg.try_tpe())
+            .collect::<Result<_, _>>()?;
+        let obj_tpe = obj.try_tpe()?;
         let method = method
             .clone()
-            .specialize_for(obj.tpe(), arg_types)
+            .specialize_for(obj_tpe, arg_types)
             .unwrap_or(method);
         Ok(MethodCall {
             obj: obj.into(),

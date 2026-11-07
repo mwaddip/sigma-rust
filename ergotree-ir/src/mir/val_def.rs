@@ -110,7 +110,9 @@ impl ValDef {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let rhs = Expr::sigma_parse(r)?;
-        r.val_def_type_store().insert(id, rhs.tpe());
+        // `ValDefSerializer` stores the right-hand side's type as it reads it (v6.0.7
+        // `ValDefSerializer.scala:48`), a read that can throw
+        r.val_def_type_store().insert(id, rhs.try_tpe()?);
         Ok(ValDef {
             id,
             tpe_args,
@@ -151,7 +153,9 @@ impl SigmaSerializable for ValDef {
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let id = ValId::sigma_parse_exact(r)?;
         let rhs = Expr::sigma_parse(r)?;
-        r.val_def_type_store().insert(id, rhs.tpe());
+        // `ValDefSerializer` stores the right-hand side's type as it reads it (v6.0.7
+        // `ValDefSerializer.scala:48`), a read that can throw
+        r.val_def_type_store().insert(id, rhs.try_tpe()?);
         Ok(ValDef {
             id,
             tpe_args: Vec::new(),
