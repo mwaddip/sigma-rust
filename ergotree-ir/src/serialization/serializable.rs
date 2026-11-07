@@ -222,6 +222,15 @@ pub enum SigmaParsingError {
     /// `ClassCastException`
     #[error("a type read that throws: {0}")]
     TypeReadFailed(String),
+    /// A `SelectField` whose input is not a tuple: its `val tpe` casts the input's type to
+    /// `STuple` (v6.0.7 `transformers.scala:294`), a `ClassCastException`
+    #[error("a tuple input expected: {0}")]
+    TupleInputExpected(String),
+    /// A `SelectField` whose field index, a signed byte, is not one of the tuple's: its
+    /// `val tpe` takes `items(fieldIndex - 1)` (`transformers.scala:294`), an
+    /// `IndexOutOfBoundsException`
+    #[error("a tuple field index out of bounds: {0}")]
+    TupleFieldOutOfBounds(String),
     /// Collection data whose element type is zero-width: `SUnit`, or a collection or tuple
     /// built only from it. Its elements take no bytes, so its declared length escapes the
     /// position limit. Rule 1020 `CheckZeroWidthCollection` (sigmastate 6.0.7
@@ -356,6 +365,8 @@ impl SigmaParsingError {
                 | SigmaParsingError::InvalidTypeParameter(_)
                 | SigmaParsingError::TypeParameterNotTypeVar(_)
                 | SigmaParsingError::TypeReadFailed(_)
+                | SigmaParsingError::TupleInputExpected(_)
+                | SigmaParsingError::TupleFieldOutOfBounds(_)
                 | SigmaParsingError::InvalidSigmaBooleanOpCode(_)
                 | SigmaParsingError::InvalidBigIntSize(_)
                 | SigmaParsingError::ExceedsIntMax(_, _)
