@@ -103,6 +103,16 @@ impl HasStaticOpCode for SelectField {
 }
 
 impl SelectField {
+    /// Rebuild this node with a new input, keeping the field type this one was built with.
+    /// See `ByIndex::with_children` for why the printer cannot go back through `new()`.
+    pub(crate) fn with_children(&self, input: Expr) -> Self {
+        Self {
+            input: Box::new(input),
+            field_index: self.field_index,
+            field_tpe: self.field_tpe.clone(),
+        }
+    }
+
     /// Type
     pub fn tpe(&self) -> SType {
         self.field_tpe.clone()

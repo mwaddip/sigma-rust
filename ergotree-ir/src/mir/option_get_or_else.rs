@@ -43,6 +43,16 @@ impl OptionGetOrElse {
         }
     }
 
+    /// Rebuild this node with new children, keeping the element type this one was built with.
+    /// See `ByIndex::with_children` for why the printer cannot go back through `new()`.
+    pub(crate) fn with_children(&self, input: Expr, default: Expr) -> Self {
+        Self {
+            input: Box::new(input),
+            default: Box::new(default),
+            elem_tpe: self.elem_tpe.clone(),
+        }
+    }
+
     /// Type
     pub fn tpe(&self) -> SType {
         (*self.elem_tpe).clone()

@@ -66,6 +66,27 @@ impl ByIndex {
         })
     }
 
+    /// Rebuild this node with new children, keeping the element type this one was built with.
+    ///
+    /// The printer walks a tree and rebuilds every node it passes from the children it has
+    /// printed. It cannot go back through `new()`: a later round lets the parser accept nodes
+    /// `new()` refuses, and printing one must not fail. Reusing the cached element type rather
+    /// than deriving it again keeps this a pure rebuild — the caching question itself is a
+    /// later round's.
+    pub(crate) fn with_children(
+        &self,
+        input: Expr,
+        index: Expr,
+        default: Option<Box<Expr>>,
+    ) -> Self {
+        Self {
+            input: Box::new(input),
+            index: Box::new(index),
+            default,
+            input_elem_tpe: self.input_elem_tpe.clone(),
+        }
+    }
+
     /// Type
     pub fn tpe(&self) -> SType {
         (*self.input_elem_tpe).clone()
