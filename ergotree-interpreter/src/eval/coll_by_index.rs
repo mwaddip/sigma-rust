@@ -31,7 +31,7 @@ impl Evaluable for ByIndex {
                 // evaluates it (`transformers.scala:259-276`)
                 let mut default_v = || -> Result<Value<'ctx>, EvalError> {
                     let d = default.eval(env, ctx)?;
-                    crate::eval::check_value_of_type(&default.tpe(), &d)?;
+                    crate::eval::check_value_of_type(&default.tpe(), &d, ctx.tree_version())?;
                     Ok(d)
                 };
                 let val =

@@ -15,7 +15,13 @@ impl Evaluable for OptionGetOrElse {
     ) -> Result<Value<'ctx>, EvalError> {
         ctx.add_jit_cost(20)?; // OptionGetOrElse = Fixed(20)
         let v = self.input.eval(env, ctx)?;
-        let mut default_v = || self.default.eval(env, ctx);
+        // `OptionGetOrElse.eval` checks the default's value against its type wherever it
+        // evaluates it: lazily from tree version 3, eagerly below (`transformers.scala:627-643`)
+        let mut default_v = || -> Result<Value<'ctx>, EvalError> {
+            let d = self.default.eval(env, ctx)?;
+            crate::eval::check_value_of_type(&self.default.tpe(), &d, ctx.tree_version())?;
+            Ok(d)
+        };
         match v {
             Value::Opt(opt_v) if ctx.tree_version() >= ErgoTreeVersion::V3 => {
                 opt_v.as_deref().cloned().map(Ok).unwrap_or_else(default_v)

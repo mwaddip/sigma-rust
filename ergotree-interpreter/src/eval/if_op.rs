@@ -22,7 +22,7 @@ impl Evaluable for If {
         };
         // `If.eval` checks the branch's value against its type (`trees.scala:1358-1365`)
         let res = branch.eval(env, ctx)?;
-        crate::eval::check_value_of_type(&branch.tpe(), &res)?;
+        crate::eval::check_value_of_type(&branch.tpe(), &res, ctx.tree_version())?;
         Ok(res)
     }
 }
