@@ -205,6 +205,13 @@ impl DataSerializer {
         r.set_level(depth + 1)?;
         use SType::*;
         let literal = match tpe {
+            // NoType has no wire form: type code 0 is rejected as a hard InvalidTypePrefix
+            // before a value is ever read, so this arm is unreachable from the wire
+            SNoType => {
+                return Err(SigmaParsingError::NotSupported(
+                    "NoType has no serialized data form",
+                ))
+            }
             SBoolean => Literal::Boolean(r.get_u8()? != 0),
             SByte => Literal::Byte(r.get_i8()?),
             SShort => Literal::Short(r.get_i16()?),

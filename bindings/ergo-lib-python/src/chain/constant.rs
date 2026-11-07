@@ -82,7 +82,8 @@ impl SType {
             | stype::SType::SPreHeader
             | stype::SType::SGlobal
             | stype::SType::SContext
-            | stype::SType::SFunc(_) => return Err(PyValueError::new_err("unexpected tpe")),
+            | stype::SType::SFunc(_)
+            | stype::SType::SNoType => return Err(PyValueError::new_err("unexpected tpe")),
         })
     }
     fn to_stype(&self, py: Python) -> PyResult<stype::SType> {
@@ -337,7 +338,8 @@ fn constant_to_py(py: Python, c: Constant) -> PyResult<Py<PyAny>> {
         | stype::SType::SString
         | stype::SType::SHeader
         | stype::SType::SPreHeader
-        | stype::SType::SGlobal => return Err(PyValueError::new_err("unsupported constant tpe")),
+        | stype::SType::SGlobal
+        | stype::SType::SNoType => return Err(PyValueError::new_err("unsupported constant tpe")),
     })
 }
 

@@ -129,6 +129,8 @@ impl TypeCode {
 
     fn from_primitive_type(stype: &SType) -> Option<Self> {
         Some(match stype {
+            // NoType is not a type at all on the wire; it has no primitive code
+            SType::SNoType => return None,
             SType::SAny => TypeCode::SANY,
             SType::SUnit => TypeCode::SUNIT,
             SType::SBoolean => TypeCode::SBOOLEAN,
@@ -374,6 +376,11 @@ impl SigmaSerializable for SType {
                         TypeCode::OPTION.sigma_serialize(w)?;
                         elem_type.sigma_serialize(w)
                     }
+                    // NoType has no wire form: its type code is 0, which this parser rejects as a
+                    // hard InvalidTypePrefix, so it must never be written
+                    SNoType => Err(SigmaSerializationError::NotSupported(
+                        "NoType has no serialized form".to_string(),
+                    )),
                 },
                 STypeVar(_) | SAny | SUnit | SBox | SAvlTree | SOption(_) | STuple(_)
                 | SFunc(_) | SContext | SString | SHeader | SPreHeader | SGlobal => {
@@ -382,6 +389,11 @@ impl SigmaSerializable for SType {
                     TypeCode::OPTION.sigma_serialize(w)?;
                     elem_type.sigma_serialize(w)
                 }
+                // NoType has no wire form: its type code is 0, which this parser rejects as a
+                // hard InvalidTypePrefix, so it must never be written
+                SNoType => Err(SigmaSerializationError::NotSupported(
+                    "NoType has no serialized form".to_string(),
+                )),
             },
 
             SType::SColl(elem_type) => match &**elem_type {
@@ -417,6 +429,11 @@ impl SigmaSerializable for SType {
                         TypeCode::COLL.sigma_serialize(w)?;
                         elem_type.sigma_serialize(w)
                     }
+                    // NoType has no wire form: its type code is 0, which this parser rejects as a
+                    // hard InvalidTypePrefix, so it must never be written
+                    SNoType => Err(SigmaSerializationError::NotSupported(
+                        "NoType has no serialized form".to_string(),
+                    )),
                 },
                 STypeVar(_) | SAny | SUnit | SBox | SAvlTree | SOption(_) | STuple(_)
                 | SFunc(_) | SContext | SString | SHeader | SPreHeader | SGlobal => {
@@ -425,6 +442,11 @@ impl SigmaSerializable for SType {
                     TypeCode::COLL.sigma_serialize(w)?;
                     elem_type.sigma_serialize(w)
                 }
+                // NoType has no wire form: its type code is 0, which this parser rejects as a
+                // hard InvalidTypePrefix, so it must never be written
+                SNoType => Err(SigmaSerializationError::NotSupported(
+                    "NoType has no serialized form".to_string(),
+                )),
             },
             SType::STuple(stuple::STuple { items }) => match items.as_slice() {
                 #[allow(clippy::unwrap_used)]
@@ -479,6 +501,11 @@ impl SigmaSerializable for SType {
                         t1.sigma_serialize(w)?;
                         t2.sigma_serialize(w)
                     }
+                    // NoType has no wire form: its type code is 0, which this parser rejects as a
+                    // hard InvalidTypePrefix, so it must never be written
+                    (SNoType, _) | (_, SNoType) => Err(SigmaSerializationError::NotSupported(
+                        "NoType has no serialized form".to_string(),
+                    )),
                 },
                 [t1, t2, t3] => {
                     TypeCode::TUPLE_PAIR2.sigma_serialize(w)?;
@@ -530,6 +557,12 @@ impl SigmaSerializable for SType {
             SType::SFunc(_) => Err(SigmaSerializationError::NotSupported(
                 "SFunc serialization is not supported".into(),
             )),
+            // NoType has no wire form: its type code is 0, which this parser rejects as a
+            // hard InvalidTypePrefix, so it must never be written. Explicit rather than
+            // falling into the catch-all below, which panics.
+            SType::SNoType => Err(SigmaSerializationError::NotSupported(
+                "NoType has no serialized form".to_string(),
+            )),
             #[allow(clippy::unreachable)] // Primitive types are covered by if .is_prim() branch
             _ => unreachable!(),
         }
@@ -553,6 +586,18 @@ mod tests {
     use crate::types::stype_param::STypeVar;
 
     use proptest::prelude::*;
+
+    #[test]
+    fn no_type_has_no_serialized_form() {
+        // the JVM's NoType carries typeCode 0, which round 2 made a hard parse
+        // reject (`InvalidTypePrefix`), so it must never reach the wire
+        assert!(SType::SNoType.sigma_serialize_bytes().is_err());
+    }
+
+    #[test]
+    fn no_type_is_not_a_primitive_type_code() {
+        assert!(TypeCode::from_primitive_type(&SType::SNoType).is_none());
+    }
 
     #[test]
     fn function_type_code_is_a_type_from_v3_and_an_unknown_code_before() {

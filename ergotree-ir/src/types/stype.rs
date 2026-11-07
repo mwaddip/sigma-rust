@@ -73,6 +73,12 @@ pub enum SType {
     SPreHeader,
     /// Data type introduced to unify handling of global and non-global (i.e. methods) operations.
     SGlobal,
+    /// The JVM's `NoType` (`sigma/ast/SType.scala:278`): the type of a node whose type cannot be
+    /// assigned statically. sigmastate accepts it wherever a numeric type is required
+    /// (`isNumTypeOrNoType`, `sigma/ast/package.scala:135`, gating `Negation`, `BitInversion` and
+    /// `BitOp`), which is wired up in a later round. It carries type code 0 and has **no wire
+    /// form**: type code 0 is a hard parse reject here, so it must never be serialized.
+    SNoType,
 }
 
 impl SType {
@@ -160,6 +166,7 @@ impl core::fmt::Display for SType {
         match self {
             SType::STypeVar(t) => write!(f, "{}", t.as_string()),
             SType::SAny => write!(f, "Any"),
+            SType::SNoType => write!(f, "NoType"),
             SType::SUnit => write!(f, "Unit"),
             SType::SBoolean => write!(f, "Boolean"),
             SType::SByte => write!(f, "Byte"),
@@ -371,5 +378,23 @@ pub(crate) mod tests {
                 )
                 .boxed()
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod no_type_tests {
+    use super::*;
+    use alloc::format;
+
+    #[test]
+    fn no_type_is_neither_primitive_nor_numeric() {
+        assert!(!SType::SNoType.is_prim());
+        assert!(!SType::SNoType.is_numeric());
+    }
+
+    #[test]
+    fn no_type_displays_as_no_type() {
+        assert_eq!(format!("{}", SType::SNoType), "NoType");
     }
 }
