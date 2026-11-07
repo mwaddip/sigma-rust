@@ -1,7 +1,7 @@
 //! Serializers
 
 mod bin_op;
-mod check_build;
+pub(crate) mod check_build;
 mod constant;
 mod constant_placeholder;
 /// Serializer for literals & constants

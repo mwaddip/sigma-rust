@@ -69,7 +69,8 @@ mod tests {
         let ctx = make_ctx_with_self_box(b.clone());
         assert!(try_eval_out::<Value>(&expr, &ctx).is_err());
 
-        // default with wrong type provided
+        // a default of another type than the declared one: sigmastate substitutes it as it is,
+        // as nothing checks a default's type (v6.0.7 `ErgoLikeInterpreter.scala:36`)
         let expr: Expr = DeserializeRegister {
             reg: NonMandatoryRegisterId::R5.into(),
             tpe: SType::SInt,
@@ -77,15 +78,7 @@ mod tests {
         }
         .into();
         let ctx = make_ctx_with_self_box(b.clone());
-        assert!(matches!(
-            try_eval_with_deserialize::<i32>(&expr, &ctx),
-            Err(EvalError::SubstDeserializeError(
-                ergotree_ir::mir::expr::SubstDeserializeError::ExprTpeError {
-                    expected: _,
-                    actual: _
-                }
-            ))
-        ));
+        assert!(try_eval_with_deserialize::<bool>(&expr, &ctx).unwrap());
         // default provided
         let expr: Expr = DeserializeRegister {
             reg: NonMandatoryRegisterId::R5.into(),
@@ -139,7 +132,9 @@ mod tests {
 
     #[test]
     fn eval_reg_wrong_type() {
-        // SInt, expected SColl(SByte)
+        // SInt, expected SColl(SByte): `eba.value.toArray` is a `ClassCastException`, which
+        // Kiama's `strategy` swallows (v6.0.7 `ErgoLikeInterpreter.scala:20-22`,
+        // `Rewriter.scala:180-191`), so the node stays, and evaluating it errors
         let reg_value: Constant = 1i32.into();
         let b = force_any_val::<ErgoBox>()
             .with_additional_registers(vec![reg_value].try_into().unwrap());
@@ -150,10 +145,11 @@ mod tests {
         }
         .into();
         let ctx = make_ctx_with_self_box(b);
-        assert!(matches!(
-            try_eval_with_deserialize::<Value>(&expr, &ctx),
-            Err(EvalError::SubstDeserializeError(_))
-        ));
+        let res = try_eval_with_deserialize::<Value>(&expr, &ctx);
+        assert!(
+            alloc::format!("{res:?}").contains("DeserializeRegister cannot be evaluated"),
+            "{res:?}"
+        );
     }
 
     #[test]

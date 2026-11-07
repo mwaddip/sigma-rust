@@ -88,15 +88,22 @@ impl EvaluatedValue {
     pub fn to_script_value(&self) -> Result<ScriptValue, TryExtractFromError> {
         // `stypeToRType(v.tpe)`, then `v.value` (`ErgoLikeContext.scala:159-160`)
         let tpe = self.script_type()?;
-        let v = match self {
+        let v = self.script_data()?;
+        Ok(ScriptValue { tpe, v })
+    }
+
+    /// The value's data as a script reads it, sigmastate's `v.value`: a constant's data, a
+    /// tuple's or a collection's (`Tuple.value`, `ConcreteCollection.value`), which fails on an
+    /// item that is not a value or on a pair's tuple expression
+    pub(crate) fn script_data(&self) -> Result<Literal, TryExtractFromError> {
+        Ok(match self {
             EvaluatedValue::Constant(c) => c.v.clone(),
             EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => tuple_script_data(items)?,
             EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => collection_script_data(c)?,
             EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => {
                 Literal::GroupElement(generator().into())
             }
-        };
-        Ok(ScriptValue { tpe, v })
+        })
     }
 
     /// The type a script reads the value at (see [`ScriptValue::tpe`]), before its data is read:
@@ -203,9 +210,11 @@ impl EvaluatedValue {
     pub fn check_v6_type(&self) -> Result<(), SigmaParsingError> {
         match self {
             EvaluatedValue::Constant(c) => c.tpe.check_v6_type(),
-            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => {
-                items.iter().try_for_each(|item| item.tpe().check_v6_type())
-            }
+            // each item's type is read, a read that can throw, then checked
+            // (`ValidationRules.scala:187`)
+            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => items
+                .iter()
+                .try_for_each(|item| item.try_tpe()?.check_v6_type()),
             EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => c.tpe().check_v6_type(),
             EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => Ok(()),
         }
@@ -591,5 +600,61 @@ mod script_value_tests {
         }
         // C2's twin, a function of one argument, converts
         assert!(parse("83007001040400").to_script_value().is_ok());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod v6_type_read_tests {
+    //! `CheckV6Type` (rule 1019) reads each tuple item's type and checks it, in order
+    //! (v6.0.7 `ValidationRules.scala:187`), on every box register (`ErgoBoxCandidate.scala:232`)
+    //! and context-extension value (`ContextExtension.scala:62`). A read that throws (a `Filter`
+    //! over a non-collection) is a `ClassCastException`, not the rule's `ValidationException`.
+    use super::*;
+    use crate::chain::context_extension::ContextExtension;
+    use crate::chain::ergo_box::NonMandatoryRegisters;
+    use crate::mir::expr::type_read_tests::{bi, filter};
+    use crate::mir::tuple::Tuple;
+    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+    use alloc::vec;
+
+    fn option_constant() -> Expr {
+        Constant {
+            tpe: SType::SOption(SType::SInt.into()),
+            v: Literal::Opt(None),
+        }
+        .into()
+    }
+
+    #[test]
+    fn rule_1019_reads_each_tuple_item_type_then_checks_it() {
+        let tuple = |items| EvaluatedValue::Expr(EvaluatedExpr::Tuple(items));
+        assert!(matches!(
+            tuple(vec![filter(bi()), option_constant()]).check_v6_type(),
+            Err(SigmaParsingError::TypeReadFailed(_))
+        ));
+        assert_eq!(
+            tuple(vec![option_constant(), filter(bi())]).check_v6_type(),
+            Err(SigmaParsingError::V6TypeError)
+        );
+    }
+
+    #[test]
+    fn a_register_or_extension_tuple_whose_item_type_read_throws_rejects() {
+        // Tuple(F(BI), Int 1) as R4, and as context variable 1
+        let value: Expr = Tuple::new(vec![filter(bi()), 1i32.into()]).unwrap().into();
+        let value_bytes = value.sigma_serialize_bytes().unwrap();
+        let mut registers = vec![1u8];
+        registers.extend(&value_bytes);
+        assert!(matches!(
+            NonMandatoryRegisters::sigma_parse_bytes(&registers),
+            Err(SigmaParsingError::TypeReadFailed(_))
+        ));
+        let mut extension = vec![1u8, 1u8];
+        extension.extend(&value_bytes);
+        assert!(matches!(
+            ContextExtension::sigma_parse_bytes(&extension),
+            Err(SigmaParsingError::TypeReadFailed(_))
+        ));
     }
 }

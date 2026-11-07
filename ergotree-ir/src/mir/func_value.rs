@@ -74,6 +74,15 @@ impl FuncValue {
         }
     }
 
+    /// Recomputes the type from the arguments and the current body: sigmastate's `lazy val tpe`
+    /// is computed afresh on a node it rebuilds, as the substitution at spend does
+    pub(crate) fn rebuild(&mut self) {
+        *self = FuncValue::new(
+            core::mem::take(&mut self.args),
+            core::mem::replace(&mut *self.body, Expr::Const(true.into())),
+        );
+    }
+
     /// Function arguments
     pub fn args(&self) -> &[FuncArg] {
         self.args.as_ref()

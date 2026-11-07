@@ -104,14 +104,15 @@ impl ValDef {
         let tpe_args = (0..n_tpe_args)
             .map(|_| match SType::sigma_parse(r)? {
                 SType::STypeVar(tv) => Ok(tv),
-                other => Err(SigmaParsingError::InvalidTypeParameter(format!(
-                    "FunDef: expected a type variable as type parameter, got {:?}",
-                    other
+                other => Err(SigmaParsingError::TypeParameterNotTypeVar(format!(
+                    "{other:?}"
                 ))),
             })
             .collect::<Result<Vec<_>, _>>()?;
         let rhs = Expr::sigma_parse(r)?;
-        r.val_def_type_store().insert(id, rhs.tpe());
+        // `ValDefSerializer` stores the right-hand side's type as it reads it (v6.0.7
+        // `ValDefSerializer.scala:48`), a read that can throw
+        r.val_def_type_store().insert(id, rhs.try_tpe()?);
         Ok(ValDef {
             id,
             tpe_args,
@@ -152,7 +153,9 @@ impl SigmaSerializable for ValDef {
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let id = ValId::sigma_parse_exact(r)?;
         let rhs = Expr::sigma_parse(r)?;
-        r.val_def_type_store().insert(id, rhs.tpe());
+        // `ValDefSerializer` stores the right-hand side's type as it reads it (v6.0.7
+        // `ValDefSerializer.scala:48`), a read that can throw
+        r.val_def_type_store().insert(id, rhs.try_tpe()?);
         Ok(ValDef {
             id,
             tpe_args: Vec::new(),

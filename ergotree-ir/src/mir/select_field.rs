@@ -125,10 +125,52 @@ impl SigmaSerializable for SelectField {
         self.field_index.sigma_serialize(w)
     }
 
+    /// sigmastate reads the input and the field index, a signed byte, and builds the node
+    /// (v6.0.7 `SelectFieldSerializer.scala:26-30`), whose `val tpe = input.tpe.items(fieldIndex
+    /// - 1)` casts the input's type to `STuple`, then takes the field (`transformers.scala:294`)
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
-        let field_index = TupleFieldIndex::sigma_parse(r)?;
-        Ok(SelectField::new(input, field_index)?)
+        let field_index = r.get_i8()?;
+        let field_tpe = field_tpe(&input, field_index)?;
+        Ok(SelectField {
+            input: Box::new(input),
+            // 1..=127 here, as the index is a positive signed byte that names an item
+            field_index: TupleFieldIndex(field_index as u8),
+            field_tpe,
+        })
+    }
+}
+
+/// sigmastate's `val tpe = input.tpe.items(fieldIndex - 1)` (v6.0.7 `transformers.scala:294`):
+/// the input's type cast to `STuple`, then the field, by a signed index
+fn field_tpe(input: &Expr, field_index: i8) -> Result<SType, SigmaParsingError> {
+    let items = match input.try_tpe()? {
+        SType::STuple(STuple { items }) => items,
+        tpe => {
+            return Err(SigmaParsingError::TupleInputExpected(format!(
+                "SelectField of an input of type {tpe:?}"
+            )))
+        }
+    };
+    Ok(usize::try_from(field_index)
+        .ok()
+        .and_then(|i| i.checked_sub(1))
+        .and_then(|i| items.get(i))
+        .ok_or_else(|| {
+            SigmaParsingError::TupleFieldOutOfBounds(format!(
+                "field {field_index} of a tuple of {} items",
+                items.len()
+            ))
+        })?
+        .clone())
+}
+
+impl SelectField {
+    /// Recomputes the field's type from the current input, as sigmastate's constructor does
+    /// on a node it rebuilds (the substitution at spend)
+    pub(crate) fn rebuild(&mut self) -> Result<(), SigmaParsingError> {
+        self.field_tpe = field_tpe(&self.input, self.field_index.0 as i8)?;
+        Ok(())
     }
 }
 
@@ -150,5 +192,43 @@ mod tests {
             .unwrap()
             .into();
         assert_eq![sigma_serialize_roundtrip(&e), e];
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod build_tests {
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+
+    fn tree(hex: &str) -> Result<ErgoTree, SigmaParsingError> {
+        ErgoTree::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap())
+    }
+
+    #[test]
+    fn select_field_casts_its_input_to_a_tuple_and_then_indexes_it() {
+        // `SelectField`'s `val tpe = input.tpe.items(fieldIndex - 1)` (v6.0.7
+        // `transformers.scala:294`): an input that is not a tuple is a `ClassCastException`,
+        // a field index (a signed byte, `SelectFieldSerializer.scala:28`) outside 1..=n an
+        // `IndexOutOfBoundsException`; neither is a `ValidationException`, so a size-flagged
+        // tree rejects. sigmaProp(EQ(SelectField(x, i), Int 1)), v0, size-flagged:
+        // over Int 1, then over the pair (1, 2) with i = 0, 3 and 200 (-56).
+        assert!(matches!(
+            tree("0808d1938c0402010402"),
+            Err(SigmaParsingError::TupleInputExpected(_))
+        ));
+        for i in ["00", "03", "c8"] {
+            let hex = format!("080cd1938c8602040204 04{i}0402").replace(' ', "");
+            assert!(
+                matches!(tree(&hex), Err(SigmaParsingError::TupleFieldOutOfBounds(_))),
+                "{hex}: {:?}",
+                tree(&hex)
+            );
+        }
+        // the second field of (1, 2) parses and round-trips
+        let bytes = base16::decode(b"080cd1938c860204020404020402").unwrap();
+        let parsed = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(parsed, ErgoTree::Parsed(_)));
+        assert_eq!(parsed.sigma_serialize_bytes().unwrap(), bytes);
     }
 }
