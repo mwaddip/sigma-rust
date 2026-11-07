@@ -58,8 +58,11 @@ impl SigmaSerializable for SigmaOr {
         self.items.sigma_serialize(w)
     }
 
+    /// sigmastate builds `SigmaOr` with no check of its items (v6.0.7 `trees.scala:158`)
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
-        Ok(Self::new(Vec::<Expr>::sigma_parse(r)?)?)
+        Ok(Self {
+            items: Vec::<Expr>::sigma_parse(r)?,
+        })
     }
 }
 

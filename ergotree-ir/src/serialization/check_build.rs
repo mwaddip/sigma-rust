@@ -156,6 +156,9 @@ fn check_constructor(expr: &Expr) -> Result<(), SigmaParsingError> {
         // `OptionGet`'s `val opType` reads its type, `input.tpe.elemType`, a cast to `SOption`
         // (`transformers.scala:600-601`), a `ClassCastException`
         Expr::OptionGet(op) => require_option("OptionGet", &op.expr.input),
+        // `OptionGetOrElse`'s `val opType` reads `tpe`, `input.tpe.elemType`, the same cast
+        // (`transformers.scala:625-626`)
+        Expr::OptionGetOrElse(op) => require_option("OptionGetOrElse", &op.expr.input),
         // `Append`'s and `Slice`'s `val tpe = input.tpe` and `ByIndex`'s
         // `val tpe = input.tpe.elemType` cast the input's type to `SCollection`, which a tuple
         // passes (`transformers.scala:62`, `:89`, `:254`; `SType.scala:838-841`), a
@@ -463,6 +466,25 @@ mod tests {
             tree("080ad193b1ad100004020400"),
             Err(SigmaParsingError::FunctionExpected(_))
         ));
+    }
+
+    #[test]
+    fn option_get_or_else_casts_its_input_and_not_its_default() {
+        // sigmaProp(getVar[Int](1).getOrElse(true) == 1) parses; the size-flagged
+        // sigmaProp(OptionGetOrElse(Int 1, Int 0)) rejects
+        assert!(roundtrips("00d193e5e3010401010402"));
+        assert!(matches!(
+            tree("0806d1e504020400"),
+            Err(SigmaParsingError::OptionInputExpected(_))
+        ));
+    }
+
+    #[test]
+    fn the_sigma_combinators_check_nothing() {
+        // SigmaAnd(true, SigmaProp(true)); AtLeast(true, Coll[Int]())
+        for hex in ["00ea02010108d3", "009801011000"] {
+            assert!(roundtrips(hex), "{hex}: {:?}", tree(hex));
+        }
     }
 
     #[test]

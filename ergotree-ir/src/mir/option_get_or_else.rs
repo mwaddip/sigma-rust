@@ -11,8 +11,6 @@ use crate::traversable::impl_traversable_expr;
 use crate::types::stype::SType;
 use alloc::boxed::Box;
 
-use alloc::sync::Arc;
-
 /// Returns the Option's value or error if no value
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct OptionGetOrElse {
@@ -20,8 +18,6 @@ pub struct OptionGetOrElse {
     pub input: Box<Expr>,
     /// Default value if option is empty
     pub default: Box<Expr>,
-    /// Option element type
-    elem_tpe: Arc<SType>,
 }
 
 impl OptionGetOrElse {
@@ -33,7 +29,6 @@ impl OptionGetOrElse {
                 Ok(OptionGetOrElse {
                     input: Box::new(input),
                     default: Box::new(default),
-                    elem_tpe,
                 })
             }
             _ => Err(InvalidArgumentError(format!(
@@ -43,19 +38,23 @@ impl OptionGetOrElse {
         }
     }
 
-    /// Rebuild this node with new children, keeping the element type this one was built with.
-    /// See `ByIndex::with_children` for why the printer cannot go back through `new()`.
+    /// Rebuild this node with new children. See `ByIndex::with_children` for why the printer
+    /// cannot go back through `new()`.
     pub(crate) fn with_children(&self, input: Expr, default: Expr) -> Self {
         Self {
             input: Box::new(input),
             default: Box::new(default),
-            elem_tpe: self.elem_tpe.clone(),
         }
     }
 
-    /// Type
+    /// Type: the input's Option element type, computed on access as sigmastate's `def tpe` is
+    /// (v6.0.7 `transformers.scala:626`). NoType for an input that is not an Option, which the
+    /// parser refuses (`check_build`) and `new()` refuses.
     pub fn tpe(&self) -> SType {
-        (*self.elem_tpe).clone()
+        match self.input.tpe() {
+            SType::SOption(elem_tpe) => (*elem_tpe).clone(),
+            _ => SType::SNoType,
+        }
     }
 }
 
@@ -72,7 +71,12 @@ impl SigmaSerializable for OptionGetOrElse {
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
         let default = Expr::sigma_parse(r)?;
-        Ok(OptionGetOrElse::new(input, default)?)
+        // built as sigmastate builds it, its input's cast in `check_build`; the default is not
+        // checked (v6.0.7 `transformers.scala:622-626`)
+        Ok(OptionGetOrElse {
+            input: Box::new(input),
+            default: Box::new(default),
+        })
     }
 }
 
