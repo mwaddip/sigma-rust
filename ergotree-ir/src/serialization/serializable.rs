@@ -170,6 +170,16 @@ pub enum SigmaParsingError {
     /// asserts each item's type, an `AssertionError`
     #[error("collection item type mismatch: {0}")]
     CollectionItemTypeMismatch(String),
+    /// A numeric cast to a type that is not numeric: sigmastate's `NumericCastSerializer` casts
+    /// the target with `asNumType`, a `ClassCastException` (v6.0.7
+    /// `NumericCastSerializer.scala:20-24`)
+    #[error("a numeric cast to a non-numeric type: {0}")]
+    NumericCastTargetNotNumeric(String),
+    /// A node whose constructor requires a numeric operand got another type: the `require` of
+    /// `Upcast` or `Downcast` (v6.0.7 `trees.scala:398`, `:431`), an
+    /// `IllegalArgumentException`
+    #[error("a numeric operand expected: {0}")]
+    NumericOperandExpected(String),
     /// Collection data whose element type is zero-width: `SUnit`, or a collection or tuple
     /// built only from it. Its elements take no bytes, so its declared length escapes the
     /// position limit. Rule 1020 `CheckZeroWidthCollection` (sigmastate 6.0.7
@@ -314,6 +324,8 @@ impl SigmaParsingError {
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::TreeVersionAboveActivated(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)
+                | SigmaParsingError::NumericCastTargetNotNumeric(_)
+                | SigmaParsingError::NumericOperandExpected(_)
                 | SigmaParsingError::UnsizedTreeValidationError(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)

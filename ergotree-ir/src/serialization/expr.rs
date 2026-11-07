@@ -1,5 +1,6 @@
 use super::bin_op::bin_op_sigma_parse;
 use super::bin_op::bin_op_sigma_serialize;
+use super::check_build::check_build;
 use super::{op_code::OpCode, sigma_byte_writer::SigmaByteWrite};
 use crate::ergo_tree::ErgoTreeVersion;
 use crate::has_opcode::HasOpCode;
@@ -106,7 +107,7 @@ impl Expr {
             Ok(Expr::Const(constant))
         } else {
             let op_code = OpCode::parse(tag);
-            match op_code {
+            let expr = match op_code {
                 OpCode::APPEND => Ok(Append::sigma_parse(r)?.into()),
                 OpCode::FOLD => Ok(Fold::sigma_parse(r)?.into()),
                 ConstantPlaceholder::OP_CODE => {
@@ -224,7 +225,9 @@ impl Expr {
                     o.value(),
                     o.shift()
                 ))),
-            }
+            }?;
+            // sigmastate builds the node now, its bytes read (`check_build`'s module doc)
+            check_build(expr, r.tree_version())
         }
     }
 }
