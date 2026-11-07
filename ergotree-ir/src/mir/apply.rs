@@ -24,7 +24,6 @@ pub struct Apply {
     pub func: Box<Expr>,
     /// Arguments
     pub args: Vec<Expr>,
-    tpe: SType,
 }
 
 impl Apply {
@@ -42,7 +41,6 @@ impl Apply {
                     Ok(Apply {
                         func: Box::new(func),
                         args,
-                        tpe: *sfunc.t_range,
                     })
                 }
             }
@@ -54,8 +52,18 @@ impl Apply {
     }
 
     /// Type
+    ///
+    /// sigmastate's `Apply.tpe` is a `lazy val` over the function's type
+    /// (`data/shared/src/main/scala/sigma/ast/values.scala:1247-1251`): an `SFunc` gives its
+    /// range, a collection gives its element type, and anything else gives `NoType`. It is
+    /// computed on access rather than cached at construction, so a node whose child has been
+    /// replaced in place still reports the right type — which is why the cached field is gone.
     pub fn tpe(&self) -> SType {
-        self.tpe.clone()
+        match self.func.tpe() {
+            SType::SFunc(sfunc) => *sfunc.t_range,
+            SType::SColl(elem_tpe) => (*elem_tpe).clone(),
+            _ => SType::SNoType,
+        }
     }
 }
 
@@ -124,7 +132,54 @@ mod tests {
 
     use super::*;
 
+    use crate::mir::constant::Constant;
+    use crate::mir::func_value::{FuncArg, FuncValue};
     use proptest::prelude::*;
+
+    /// `(Int) => Int` applied to one Int: the shape `Apply::new` accepts.
+    fn int_to_int_func() -> Expr {
+        FuncValue::new(
+            vec![FuncArg {
+                idx: 1u32.into(),
+                tpe: SType::SInt,
+            }],
+            Expr::Const(Constant::from(1i32)),
+        )
+        .into()
+    }
+
+    #[test]
+    fn apply_over_a_function_is_its_range() {
+        // unchanged behaviour, pinned so the refactor cannot move it
+        let a = Apply::new(int_to_int_func(), vec![Expr::Const(Constant::from(1i32))]).unwrap();
+        assert_eq!(a.tpe(), SType::SInt);
+    }
+
+    #[test]
+    fn apply_over_a_collection_is_its_element_type() {
+        // JVM `values.scala:1247-1251`: a collection-typed func gives the element type.
+        // Not reachable through new(); build the struct literal directly.
+        let a = Apply {
+            func: Box::new(Expr::Const(Constant::from(vec![1i8, 2i8]))),
+            args: vec![],
+        };
+        assert_eq!(a.tpe(), SType::SByte);
+    }
+
+    #[test]
+    fn apply_over_anything_else_is_no_type() {
+        let a = Apply {
+            func: Box::new(Expr::Const(Constant::from(1i32))),
+            args: vec![],
+        };
+        assert_eq!(a.tpe(), SType::SNoType);
+    }
+
+    #[test]
+    fn apply_new_still_refuses_a_non_function() {
+        // new() stays strict for library users (spec decision 1)
+        assert!(Apply::new(Expr::Const(Constant::from(1i32)), vec![]).is_err());
+    }
 
     proptest! {
 
