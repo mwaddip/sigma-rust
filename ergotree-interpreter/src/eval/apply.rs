@@ -16,6 +16,14 @@ impl Evaluable for Apply {
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
         ctx.add_jit_cost(30)?; // Apply = Fixed(30)
+                               // sigmastate applies a function to exactly one argument, and checks that before it
+                               // evaluates the function or the argument (v6.0.7 `values.scala:1263-1273`). The parser
+                               // builds an `Apply` of any arity, as sigmastate's does.
+        if self.args.len() != 1 {
+            return Err(EvalError::Misc(format!(
+                "Function application must have 1 argument, but was: {self:?}"
+            )));
+        }
         let func_v: Value<'ctx> = self.func.eval(env, ctx)?;
         let args_v: Vec<Value> = self
             .args
@@ -77,6 +85,41 @@ mod tests {
     // a lambda whose argument type is still a type variable is rejected —
     // mirroring the JVM boundary (`Unknown type T` fires at application via
     // `Value.checkType` inside the closure, never at binding).
+    #[test]
+    fn apply_needs_exactly_one_argument() {
+        // SANTA `eval/v5 Apply.non_unary_arity` #0: { val inc = (x: Int) => x + 1; inc(3, 4) }
+        // errors; the same with no argument errors too
+        use crate::eval::test_util::try_eval_out_wo_ctx;
+        let inc = || -> Expr {
+            FuncValue::new(
+                vec![FuncArg {
+                    idx: 1.into(),
+                    tpe: SType::SInt,
+                }],
+                ValUse {
+                    val_id: 1.into(),
+                    tpe: SType::SInt,
+                }
+                .into(),
+            )
+            .into()
+        };
+        for args in [vec![], vec![3i32.into(), 4i32.into()]] {
+            let apply: Expr = Apply {
+                func: Box::new(inc()),
+                args,
+            }
+            .into();
+            assert!(try_eval_out_wo_ctx::<i32>(&apply).is_err());
+        }
+        let apply: Expr = Apply {
+            func: Box::new(inc()),
+            args: vec![3i32.into()],
+        }
+        .into();
+        assert_eq!(try_eval_out_wo_ctx::<i32>(&apply).unwrap(), 3);
+    }
+
     #[test]
     fn fundef_polymorphic_apply_boundary() {
         use crate::eval::test_util::try_eval_out_with_version;

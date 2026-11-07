@@ -61,10 +61,15 @@ impl SigmaSerializable for Atleast {
         self.input.sigma_serialize(w)
     }
 
+    /// sigmastate builds `AtLeast` with no check of its bound or input (v6.0.7
+    /// `trees.scala:307`)
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let bound = Expr::sigma_parse(r)?;
         let input = Expr::sigma_parse(r)?;
-        Ok(Self::new(bound, input)?)
+        Ok(Self {
+            bound: bound.into(),
+            input: input.into(),
+        })
     }
 }
 

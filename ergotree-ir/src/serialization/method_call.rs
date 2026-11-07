@@ -1,5 +1,7 @@
 use hashbrown::HashMap;
 
+use crate::ergo_tree::ErgoTreeVersion;
+
 use alloc::vec::Vec;
 
 use crate::mir::expr::Expr;
@@ -35,8 +37,12 @@ impl SigmaSerializable for MethodCall {
         let method_id = MethodId::sigma_parse(r)?;
         let obj = Expr::sigma_parse(r)?;
         let args = Vec::<Expr>::sigma_parse(r)?;
-        let arg_types = args.iter().map(|arg| arg.tpe()).collect();
-        let method = SMethod::from_ids(type_id, method_id)?.specialize_for(obj.tpe(), arg_types)?;
+        // From tree version 3 sigmastate asserts there are arguments, before the method lookup
+        // (v6.0.7 `MethodCallSerializer.scala:52-55`)
+        if r.tree_version() >= ErgoTreeVersion::V3 && args.is_empty() {
+            return Err(SigmaParsingError::MethodCallWithoutArguments);
+        }
+        let method = SMethod::from_ids(type_id, method_id)?;
         if r.tree_version() < method.method_raw.min_version {
             return Err(SigmaParsingError::UnknownMethodId(
                 method_id,
@@ -51,12 +57,22 @@ impl SigmaSerializable for MethodCall {
             .zip(core::iter::from_fn(|| Some(SType::sigma_parse(r))))
             .map(|(tpe, res)| -> Result<(STypeVar, SType), SigmaParsingError> { Ok((tpe, res?)) })
             .collect::<Result<HashMap<STypeVar, SType>, _>>()?;
-        Ok(MethodCall::with_type_args(
-            obj,
+        // `getSpecializedMethodFor`: the explicit types, then `specializeFor` over the
+        // arguments' types and the object's, which returns the method as it is when they do
+        // not unify (v6.0.7 `MethodCallSerializer.scala:77-97`, `SMethod.scala:185-191`).
+        // sigmastate builds the call with no arity or type check of its own.
+        let method = method.with_concrete_types(&explicit_type_args);
+        let arg_types = args.iter().map(|arg| arg.tpe()).collect();
+        let method = method
+            .clone()
+            .specialize_for(obj.tpe(), arg_types)
+            .unwrap_or(method);
+        Ok(MethodCall {
+            obj: obj.into(),
             method,
             args,
             explicit_type_args,
-        )?)
+        })
     }
 }
 
@@ -74,6 +90,24 @@ mod tests {
     use crate::types::stype::SType;
     use crate::types::stype_param::STypeVar;
     use crate::types::{scoll, sglobal};
+
+    #[test]
+    fn from_tree_version_3_a_method_call_needs_arguments() {
+        use crate::ergo_tree::ErgoTree;
+        use crate::serialization::{SigmaParsingError, SigmaSerializable};
+        // SANTA `tree_parse_acceptance` #43: v3 sigmaProp(CONTEXT method 11 ().isDefined), an
+        // AssertionError; #45: the same call with its argument Byte 0 parses
+        let tree =
+            |hex: &str| ErgoTree::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap());
+        assert!(matches!(
+            tree("0b07d1e6dc650bfe00"),
+            Err(SigmaParsingError::MethodCallWithoutArguments)
+        ));
+        assert!(matches!(
+            tree("0b09d1e6dc650bfe010200"),
+            Ok(ErgoTree::Parsed(_))
+        ));
+    }
 
     #[test]
     fn ser_roundtrip() {

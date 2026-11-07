@@ -1,7 +1,5 @@
 use alloc::boxed::Box;
 
-use alloc::sync::Arc;
-
 use super::expr::Expr;
 use super::expr::InvalidArgumentError;
 use super::unary_op::OneArgOp;
@@ -15,24 +13,26 @@ use crate::types::stype::SType;
 pub struct OptionGet {
     /// Object of SOption type
     pub input: Box<Expr>,
-    /// Option element type
-    elem_tpe: Arc<SType>,
 }
 
 impl OptionGet {
-    /// Rebuild this node with a new input, keeping the element type this one was built with.
-    /// See `ByIndex::with_children` for why the printer cannot go back through its strict
-    /// constructor.
+    /// Rebuild this node with a new input. See `ByIndex::with_children` for why the printer
+    /// cannot go back through its strict constructor.
     pub(crate) fn with_children(&self, input: Expr) -> Self {
         Self {
             input: Box::new(input),
-            elem_tpe: self.elem_tpe.clone(),
         }
     }
 
-    /// Type
+    /// Type: the input's Option element type, computed on access as sigmastate's `def tpe`
+    /// is (v6.0.7 `transformers.scala:601`), so it cannot go stale when the input is
+    /// replaced. NoType for an input that is not an Option, which the parser refuses
+    /// (`check_build`) and `try_build` refuses.
     pub fn tpe(&self) -> SType {
-        (*self.elem_tpe).clone()
+        match self.input.tpe() {
+            SType::SOption(elem_tpe) => (*elem_tpe).clone(),
+            _ => SType::SNoType,
+        }
     }
 }
 
@@ -52,9 +52,8 @@ impl OneArgOp for OptionGet {
 impl OneArgOpTryBuild for OptionGet {
     fn try_build(input: Expr) -> Result<Self, InvalidArgumentError> {
         match input.post_eval_tpe() {
-            SType::SOption(elem_tpe) => Ok(OptionGet {
+            SType::SOption(_) => Ok(OptionGet {
                 input: Box::new(input),
-                elem_tpe,
             }),
             _ => Err(InvalidArgumentError(format!(
                 "expected OptionGet::input type to be SOption, got: {0:?}",

@@ -94,11 +94,12 @@ pub enum SigmaParsingError {
     )]
     DeserializeCallDepthExceeded(usize),
     /// A type nested deeper than
-    /// [`MAX_TREE_DEPTH`](crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH). A
-    /// temporary bound, until a protocol-level limit is defined.
+    /// [`MAX_TYPE_DEPTH`](crate::serialization::types::MAX_TYPE_DEPTH): sigmastate's
+    /// `TypeSerializer` throws `DeserializeCallDepthExceeded` (v6.0.7
+    /// `TypeSerializer.scala:133-136`), a `SerializerException`
     #[error(
         "type nesting depth({0}) exceeds allowed maximum {max}",
-        max = crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH
+        max = crate::serialization::types::MAX_TYPE_DEPTH
     )]
     TypeDepthExceeded(usize),
     /// A declared item count above [`MAX_ARRAY_LENGTH`]: sigmastate's `safeNewArray` refuses it
@@ -169,6 +170,57 @@ pub enum SigmaParsingError {
     /// asserts each item's type, an `AssertionError`
     #[error("collection item type mismatch: {0}")]
     CollectionItemTypeMismatch(String),
+    /// A numeric cast to a type that is not numeric: sigmastate's `NumericCastSerializer` casts
+    /// the target with `asNumType`, a `ClassCastException` (v6.0.7
+    /// `NumericCastSerializer.scala:20-24`)
+    #[error("a numeric cast to a non-numeric type: {0}")]
+    NumericCastTargetNotNumeric(String),
+    /// A node whose constructor requires a numeric operand got another type: the `require` of
+    /// `Upcast` or `Downcast` (v6.0.7 `trees.scala:398`, `:431`), or of `Negation` or
+    /// `BitInversion`, which admit NoType too (`:882`, `:900`), an `IllegalArgumentException`
+    #[error("a numeric operand expected: {0}")]
+    NumericOperandExpected(String),
+    /// A relation whose operands fail the deserializing builder's `check2`: a comparison of a
+    /// non-numeric operand, or two operands of different types after the builder's upcast
+    /// (v6.0.7 `SigmaBuilder.scala:286-313`, `:686-704`), a `ConstraintFailed`
+    #[error("constraint failed: {0}")]
+    ConstraintFailed(String),
+    /// Below tree version 3, a `ByIndex` index `upcastTo(SInt)` refuses: a non-numeric index,
+    /// or one wider than `Int` (v6.0.7 `ByIndexSerializer.scala:27-36`,
+    /// `syntax.scala:168-177`), an `AssertionError`
+    #[error("ByIndex index cannot be upcast to Int: {0}")]
+    IndexUpcastFailed(String),
+    /// A block item that is not a `ValDef`: sigmastate casts each item to `BlockItem` as it
+    /// reads it (v6.0.7 `BlockValueSerializer.scala:39`), a `ClassCastException`
+    #[error("a block item that is not a ValDef: {0}")]
+    BlockItemNotValDef(String),
+    /// A register id outside R0 to R9 in `ExtractRegisterAs` or `DeserializeRegister`:
+    /// sigmastate's `findRegisterByIndex(id).get` right after the id byte (v6.0.7
+    /// `ExtractRegisterAsSerializer.scala:28`, `DeserializeRegisterSerializer.scala:28`), a
+    /// `NoSuchElementException`
+    #[error("no register with id {0}")]
+    RegisterIdOutOfRange(i8),
+    /// From tree version 3, a `MethodCall` with no arguments: sigmastate asserts there are
+    /// some after reading them (v6.0.7 `MethodCallSerializer.scala:52-55`), an `AssertionError`
+    #[error("a MethodCall with no arguments in a tree of version 3 or later")]
+    MethodCallWithoutArguments,
+    /// A node whose constructor casts its input's type to `SOption` got another type:
+    /// `OptionGet` and `OptionGetOrElse` (v6.0.7 `transformers.scala:600-601`, `:625-626`), a
+    /// `ClassCastException`
+    #[error("an Option input expected: {0}")]
+    OptionInputExpected(String),
+    /// A `MapCollection` whose mapper is not a function: its constructor casts the mapper's
+    /// type to `SFunc` (v6.0.7 `transformers.scala:38`), a `ClassCastException`
+    #[error("a function expected: {0}")]
+    FunctionExpected(String),
+    /// Collection data whose element type is zero-width: `SUnit`, or a collection or tuple
+    /// built only from it. Its elements take no bytes, so its declared length escapes the
+    /// position limit. Rule 1020 `CheckZeroWidthCollection` (sigmastate 6.0.7
+    /// `CoreDataSerializer.scala:159-169`, `ValidationRules.scala:199-210`), a
+    /// `ValidationException`: a size-flagged tree degrades on it, and a box register or a
+    /// context-extension value, which no tree encloses, rejects
+    #[error("collection with zero-width element type {0} cannot be deserialized (rule 1020)")]
+    ZeroWidthCollection(String),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -263,7 +315,7 @@ impl SigmaParsingError {
     /// errors live in other variants and keep degrading (not listed here).
     /// Nesting deeper than `MaxTreeDepth` escapes too: the JVM's
     /// `DeserializeCallDepthExceeded` is a `SerializerException`. A type nested deeper
-    /// than `MaxTreeDepth` (the temporary `TypeDepthExceeded` bound) escapes as well, and
+    /// than `MaxTypeDepth` (`TypeDepthExceeded`, the same JVM exception) escapes as well, and
     /// so does a count above `MaxArrayLength` (`safeNewArray` throws a `RuntimeException`).
     /// A CTHRESHOLD outside its bounds and a bitwise operation on a non-numeric operand
     /// escape as well: both fail a `require`, an `IllegalArgumentException`. So does the
@@ -305,6 +357,15 @@ impl SigmaParsingError {
                 | SigmaParsingError::CthresholdOutOfBounds(_, _)
                 | SigmaParsingError::TreeVersionAboveActivated(_, _)
                 | SigmaParsingError::BitOpOperandsNotNumeric(_)
+                | SigmaParsingError::NumericCastTargetNotNumeric(_)
+                | SigmaParsingError::NumericOperandExpected(_)
+                | SigmaParsingError::ConstraintFailed(_)
+                | SigmaParsingError::IndexUpcastFailed(_)
+                | SigmaParsingError::BlockItemNotValDef(_)
+                | SigmaParsingError::RegisterIdOutOfRange(_)
+                | SigmaParsingError::MethodCallWithoutArguments
+                | SigmaParsingError::OptionInputExpected(_)
+                | SigmaParsingError::FunctionExpected(_)
                 | SigmaParsingError::UnsizedTreeValidationError(_)
                 | SigmaParsingError::DeserializeCallDepthExceeded(_)
                 | SigmaParsingError::TypeDepthExceeded(_)

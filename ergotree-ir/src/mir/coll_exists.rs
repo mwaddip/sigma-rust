@@ -70,10 +70,27 @@ impl SigmaSerializable for Exists {
         self.condition.sigma_serialize(w)
     }
 
+    /// sigmastate builds `Exists` with no check of its input or condition (v6.0.7
+    /// `transformers.scala:155`)
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
         let condition = Expr::sigma_parse(r)?;
-        Ok(Exists::new(input, condition)?)
+        Ok(Exists {
+            elem_tpe: parsed_elem_tpe(&input),
+            input: input.into(),
+            condition: condition.into(),
+        })
+    }
+}
+
+/// The element type of a collection node the parser builds over `input` without checking it:
+/// the collection's element type, `SAny` for a tuple (`STuple` is an `SCollection[SAny]`,
+/// `SType.scala:838-841`), NoType for anything else
+pub(crate) fn parsed_elem_tpe(input: &Expr) -> Arc<SType> {
+    match input.tpe() {
+        SType::SColl(elem_tpe) => elem_tpe,
+        SType::STuple(_) => SType::SAny.into(),
+        _ => SType::SNoType.into(),
     }
 }
 
@@ -132,5 +149,21 @@ mod tests {
             let expr: Expr = v.into();
             prop_assert_eq![sigma_serialize_roundtrip(&expr), expr];
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod parse_tests {
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::SigmaSerializable;
+
+    #[test]
+    fn exists_over_a_non_collection_parses() {
+        // SANTA `tree_parse_acceptance` #0: sigmaProp(Exists(Int 1, (x: Int) => true))
+        let bytes = base16::decode(b"00d1ae0402d90101040101").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)));
+        assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
     }
 }

@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::format;
 use ergo_chain_types::Header;
 use sigma_ser::ScorexSerializable;
 
@@ -36,6 +37,17 @@ use core::convert::TryInto;
 
 /// Used to serialize and parse `Literal` and `Value`.
 pub struct DataSerializer {}
+
+/// A type whose data takes no bytes: `SUnit`, a collection of such elements, or a tuple of
+/// such items (sigmastate 6.0.7 `CoreDataSerializer.isZeroWidth`, `CoreDataSerializer.scala:159-163`)
+fn is_zero_width(tpe: &SType) -> bool {
+    match tpe {
+        SType::SUnit => true,
+        SType::SColl(elem_tpe) => is_zero_width(elem_tpe),
+        SType::STuple(stuple::STuple { items }) => items.iter().all(is_zero_width),
+        _ => false,
+    }
+}
 
 impl DataSerializer {
     /// Serialize Literal without typecode serialized
@@ -111,6 +123,13 @@ impl DataSerializer {
                         .collect();
                     w.put_bits(maybe_bools?.as_slice())?;
                     w.add_put_chunk_cost(v.len());
+                }
+                // sigmastate refuses to write a collection of zero-width elements before its
+                // length (6.0.7 `CoreDataSerializer.scala:50-55`)
+                CollKind::WrappedColl { elem_tpe, items: _ } if is_zero_width(elem_tpe) => {
+                    return Err(SigmaSerializationError::NotSupported(format!(
+                        "collection with zero-width element type {elem_tpe:?} cannot be serialized"
+                    )))
                 }
                 CollKind::WrappedColl {
                     elem_tpe: _,
@@ -251,6 +270,13 @@ impl DataSerializer {
             }
             SColl(elem_type) => {
                 let len = r.get_u16()? as usize;
+                // Rule 1020, after the length and before any element (6.0.7
+                // `CoreDataSerializer.scala:136-138`, `:166-169`)
+                if is_zero_width(elem_type) {
+                    return Err(SigmaParsingError::ZeroWidthCollection(format!(
+                        "{elem_type:?}"
+                    )));
+                }
                 let elems = (0..len)
                     .map(|_| DataSerializer::sigma_parse(elem_type, r))
                     .collect::<Result<Arc<[_]>, SigmaParsingError>>()?;
@@ -338,6 +364,7 @@ mod depth_limit_tests {
     //! `MaxTreeDepth` = 110 per reader. A constant read on its own, as a segregated
     //! tree constant is, counts data levels only.
     use crate::mir::constant::Constant;
+    use crate::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
     use crate::serialization::{SigmaParsingError, SigmaSerializable};
     use alloc::vec::Vec;
 
@@ -368,23 +395,81 @@ mod depth_limit_tests {
         matches!(r, Err(SigmaParsingError::DeserializeCallDepthExceeded(111)))
     }
 
+    /// Parse `bytes` as a constant on a reader already `level` deep. A type nests at most
+    /// `MaxTypeDepth` (8) deep, so a collection alone cannot reach `MaxTreeDepth` (110) from
+    /// level 0: start near it instead.
+    fn parse_at_level(level: usize, bytes: &[u8]) -> Result<Constant, SigmaParsingError> {
+        let mut r = from_bytes(bytes);
+        r.set_level(level)?;
+        Constant::sigma_parse(&mut r)
+    }
+
     #[test]
     fn nested_coll_of_bytes_reaches_exactly_max_tree_depth() {
         // Coll[Byte] reads its bytes in bulk, so Coll^n[Byte] takes n levels.
-        assert!(Constant::sigma_parse_bytes(&coll_n_byte(110)).is_ok());
-        assert!(depth_exceeded(Constant::sigma_parse_bytes(&coll_n_byte(
-            111
-        ))));
+        assert!(parse_at_level(102, &coll_n_byte(8)).is_ok());
+        assert!(depth_exceeded(parse_at_level(102, &coll_n_byte(9))));
     }
 
     #[test]
     fn each_element_of_a_non_byte_coll_is_one_more_level() {
         // Coll[Int] reads each element as a data value: one level past the collection.
-        assert!(Constant::sigma_parse_bytes(&coll_n_int(109, true)).is_ok());
-        assert!(depth_exceeded(Constant::sigma_parse_bytes(&coll_n_int(
-            110, true
-        ))));
+        assert!(parse_at_level(101, &coll_n_int(8, true)).is_ok());
+        assert!(depth_exceeded(parse_at_level(101, &coll_n_int(9, true))));
         // An empty innermost Coll[Int] reads no element.
-        assert!(Constant::sigma_parse_bytes(&coll_n_int(110, false)).is_ok());
+        assert!(parse_at_level(101, &coll_n_int(9, false)).is_ok());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod zero_width_tests {
+    //! Rule 1020 `CheckZeroWidthCollection` (sigmastate 6.0.7): collection data whose
+    //! element type takes no bytes is refused, on the type and not on the count. Encodings
+    //! and verdicts from SANTA's measurement on sigma-state 6.0.7
+    //! (`sigma-rust-zero-width-collection-reply.md`).
+    use crate::mir::constant::{Constant, Literal};
+    use crate::mir::value::CollKind;
+    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+    use crate::types::stype::SType;
+
+    fn zero_width(bytes: &[u8]) -> bool {
+        matches!(
+            Constant::sigma_parse_bytes(bytes),
+            Err(SigmaParsingError::ZeroWidthCollection(_))
+        )
+    }
+
+    #[test]
+    fn a_collection_of_zero_width_elements_is_refused_whatever_its_length() {
+        assert!(zero_width(&[0x0c, 0x62, 0x03])); // Coll[Unit] of 3
+        assert!(zero_width(&[0x0c, 0x62, 0x00])); // Coll[Unit]()
+        assert!(zero_width(&[0x0c, 0x0c, 0x62, 0x01])); // Coll[Coll[Unit]]
+        assert!(zero_width(&[0x0c, 0x3c, 0x62, 0x62, 0x01])); // Coll[(Unit, Unit)]
+    }
+
+    #[test]
+    fn a_tuple_with_one_sized_item_and_a_bare_unit_are_not_zero_width() {
+        // Coll[(Unit, Int)](((), 1)) and Unit
+        assert!(Constant::sigma_parse_bytes(&[0x0c, 0x4c, 0x62, 0x01, 0x02]).is_ok());
+        assert_eq!(
+            Constant::sigma_parse_bytes(&[0x62]).unwrap(),
+            Constant {
+                tpe: SType::SUnit,
+                v: Literal::Unit
+            }
+        );
+    }
+
+    #[test]
+    fn a_collection_of_zero_width_elements_is_not_written() {
+        let c = Constant {
+            tpe: SType::SColl(SType::SUnit.into()),
+            v: Literal::Coll(CollKind::WrappedColl {
+                elem_tpe: SType::SUnit,
+                items: vec![Literal::Unit; 3].into(),
+            }),
+        };
+        assert!(c.sigma_serialize_bytes().is_err());
     }
 }

@@ -24,8 +24,7 @@ impl SigmaSerializable for PropertyCall {
         let type_id = TypeCode::sigma_parse(r)?;
         let method_id = MethodId::sigma_parse(r)?;
         let obj = Expr::sigma_parse(r)?;
-        let method =
-            SMethod::from_ids(type_id, method_id)?.specialize_for(obj.tpe(), Vec::new())?;
+        let method = SMethod::from_ids(type_id, method_id)?;
         // Reject a method whose required ErgoTree version exceeds the tree's, at
         // DESERIALIZE — the JVM gates this in `SMethod.fromIds`, so it fires
         // structurally over the whole tree (a dead `if` branch is still parsed,
@@ -38,7 +37,17 @@ impl SigmaSerializable for PropertyCall {
                 type_id.value(),
             ));
         }
-        Ok(PropertyCall::new(obj, method)?)
+        // `specializeFor` over the object's type, which returns the method as it is when the
+        // types do not unify (v6.0.7 `PropertyCallSerializer.scala:30-52`,
+        // `SMethod.scala:185-191`); sigmastate builds the call with no check of its own
+        let method = method
+            .clone()
+            .specialize_for(obj.tpe(), Vec::new())
+            .unwrap_or(method);
+        Ok(PropertyCall {
+            obj: obj.into(),
+            method,
+        })
     }
 }
 

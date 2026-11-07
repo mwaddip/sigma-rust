@@ -62,10 +62,14 @@ impl SigmaSerializable for Xor {
         self.right.sigma_serialize(w)
     }
 
+    /// sigmastate builds `Xor` with no check of its operands (v6.0.7 `trees.scala:1001`)
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let left = Expr::sigma_parse(r)?;
         let right = Expr::sigma_parse(r)?;
-        Ok(Xor::new(left, right)?)
+        Ok(Xor {
+            left: left.into(),
+            right: right.into(),
+        })
     }
 }
 
@@ -117,5 +121,21 @@ mod tests {
             let expr: Expr = v.into();
             prop_assert_eq![sigma_serialize_roundtrip(&expr), expr];
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod parse_tests {
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::SigmaSerializable;
+
+    #[test]
+    fn its_arguments_are_not_checked_at_parse() {
+        // sigmaProp(EQ(SizeOf(Xor(Int 1, Int 2)), 0))
+        let bytes = base16::decode(b"00d193b19b040204040400").unwrap();
+        let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)));
+        assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
     }
 }

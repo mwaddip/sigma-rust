@@ -71,10 +71,21 @@ impl SigmaSerializable for Map {
         self.mapper.sigma_serialize(w)
     }
 
+    /// sigmastate's `MapCollection` casts its mapper's type to a function as it is built, and
+    /// reads nothing of its input (v6.0.7 `transformers.scala:33-38`)
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
         let mapper = Expr::sigma_parse(r)?;
-        Ok(Map::new(input, mapper)?)
+        match mapper.tpe() {
+            SType::SFunc(mapper_sfunc) => Ok(Map {
+                input: input.into(),
+                mapper: mapper.into(),
+                mapper_sfunc,
+            }),
+            tpe => Err(SigmaParsingError::FunctionExpected(format!(
+                "a Map mapper of type {tpe:?}"
+            ))),
+        }
     }
 }
 

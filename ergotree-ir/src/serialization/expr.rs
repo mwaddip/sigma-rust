@@ -1,5 +1,6 @@
 use super::bin_op::bin_op_sigma_parse;
 use super::bin_op::bin_op_sigma_serialize;
+use super::check_build::check_build;
 use super::{op_code::OpCode, sigma_byte_writer::SigmaByteWrite};
 use crate::ergo_tree::ErgoTreeVersion;
 use crate::has_opcode::HasOpCode;
@@ -106,7 +107,7 @@ impl Expr {
             Ok(Expr::Const(constant))
         } else {
             let op_code = OpCode::parse(tag);
-            match op_code {
+            let expr = match op_code {
                 OpCode::APPEND => Ok(Append::sigma_parse(r)?.into()),
                 OpCode::FOLD => Ok(Fold::sigma_parse(r)?.into()),
                 ConstantPlaceholder::OP_CODE => {
@@ -140,7 +141,24 @@ impl Expr {
                 OpCode::PROPERTY_CALL => {
                     Ok(Expr::PropertyCall(PropertyCall::sigma_parse(r)?.into()))
                 }
-                OpCode::METHOD_CALL => Ok(Expr::MethodCall(MethodCall::sigma_parse(r)?.into())),
+                OpCode::METHOD_CALL => {
+                    let mc = MethodCall::sigma_parse(r)?;
+                    // A MethodCall with no arguments, which parses below tree version 3, has
+                    // PropertyCall as its companion and is written as one (v6.0.7
+                    // `values.scala:1351`). Only a method of version 3 has explicit type
+                    // arguments, so there are none to lose.
+                    if mc.args.is_empty() {
+                        Ok(Expr::PropertyCall(
+                            PropertyCall {
+                                obj: mc.obj,
+                                method: mc.method,
+                            }
+                            .into(),
+                        ))
+                    } else {
+                        Ok(Expr::MethodCall(mc.into()))
+                    }
+                }
                 OpCode::CONTEXT => Ok(Expr::Context),
                 OptionGet::OP_CODE => Ok(OptionGet::sigma_parse(r)?.into()),
                 OptionIsDefined::OP_CODE => Ok(OptionIsDefined::sigma_parse(r)?.into()),
@@ -224,7 +242,9 @@ impl Expr {
                     o.value(),
                     o.shift()
                 ))),
-            }
+            }?;
+            // sigmastate builds the node now, its bytes read (`check_build`'s module doc)
+            check_build(expr, r.tree_version())
         }
     }
 }

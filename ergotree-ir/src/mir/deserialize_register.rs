@@ -1,7 +1,6 @@
 //! Extract register of SELF box as `Coll[Byte]`, deserialize it into Value and inline into executing script.
 
 use alloc::boxed::Box;
-use alloc::string::ToString;
 
 use super::expr::Expr;
 use super::expr::InvalidArgumentError;
@@ -55,9 +54,11 @@ impl SigmaSerializable for DeserializeRegister {
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         r.set_deserialize(true);
-        let reg = RegisterId::try_from(r.get_u8()?).map_err(|_| {
-            InvalidArgumentError("DeserializeRegister: register id out of bounds".to_string())
-        })?;
+        // `findRegisterByIndex(id).get` right after the id byte (v6.0.7
+        // `DeserializeRegisterSerializer.scala:27-33`), a `NoSuchElementException`
+        let id = r.get_i8()?;
+        let reg =
+            RegisterId::try_from(id).map_err(|_| SigmaParsingError::RegisterIdOutOfRange(id))?;
         let tpe = SType::sigma_parse(r)?;
         let default = Option::<Box<Expr>>::sigma_parse(r)?;
         Ok(Self::new(reg, tpe, default)?)
@@ -122,6 +123,25 @@ mod tests {
         fn ser_roundtrip(v in any::<DeserializeRegister>()) {
             let expr: Expr = v.into();
             prop_assert_eq![sigma_serialize_roundtrip(&expr), expr];
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod register_id_tests {
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+
+    #[test]
+    fn a_register_id_outside_r0_to_r9_rejects_a_size_flagged_tree() {
+        // SANTA `tree_parse_acceptance` #41: DeserializeRegister(R10, SigmaProp) as the root,
+        // here size-flagged: the NoSuchElementException does not degrade
+        for hex in ["00d50a0800", "0804d50a0800"] {
+            assert!(matches!(
+                ErgoTree::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap()),
+                Err(SigmaParsingError::RegisterIdOutOfRange(10))
+            ));
         }
     }
 }

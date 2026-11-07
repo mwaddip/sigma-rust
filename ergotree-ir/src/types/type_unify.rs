@@ -13,17 +13,13 @@ fn unified_without_subst() -> Result<HashMap<STypeVar, SType>, TypeUnificationEr
 }
 
 /// Performs pairwise type unification making sure each type variable is equally
-/// substituted in all items.
+/// substituted in all items. The lists are paired up to the shorter one, as sigmastate's
+/// `unifyTypeLists` zips them (v6.0.7 `sigma/ast/package.scala:17-33`), so a method call
+/// with too many or too few arguments still specializes from the arguments it has.
 pub fn unify_many(
     items1: Vec<SType>,
     items2: Vec<SType>,
 ) -> Result<HashMap<STypeVar, SType>, TypeUnificationError> {
-    if items1.len() != items2.len() {
-        return Err(TypeUnificationError(format!(
-            "items lists are different sizes {:?} vs. {:?}",
-            items1, items2
-        )));
-    }
     let list_of_substitutions: Result<Vec<HashMap<STypeVar, SType>>, _> = items1
         .iter()
         .zip(items2)
@@ -65,7 +61,9 @@ pub fn unify_one(t1: &SType, t2: &SType) -> Result<HashMap<STypeVar, SType>, Typ
             unify_many(tuple1.items.clone().into(), tuple2.items.clone().into())
         }
         (SOption(elem_type1), SOption(elem_type2)) => unify_one(elem_type1, elem_type2),
-        (SFunc(sfunc1), SFunc(sfunc2)) => {
+        // the domains' lengths are compared here, since `unify_many` pairs up to the shorter
+        // list (v6.0.7 `sigma/ast/package.scala:52-53`)
+        (SFunc(sfunc1), SFunc(sfunc2)) if sfunc1.t_dom.len() == sfunc2.t_dom.len() => {
             unify_many(sfunc1.t_dom_plus_range(), sfunc2.t_dom_plus_range())
         }
         (SAny, _) => unified_without_subst(),
@@ -337,6 +335,21 @@ mod tests {
 
     #[test]
     fn unify_diff_size() {
+        // the lists pair up to the shorter one, as sigmastate's `unifyTypeLists` zips them
         assert!(unify_many(vec![SInt, SLong], vec![SLong]).is_err());
+        let t: SType = STypeVar::t().into();
+        assert_eq!(
+            unify_many(vec![t.clone(), SInt], vec![SLong]).unwrap(),
+            [(STypeVar::t(), SLong)].iter().cloned().collect()
+        );
+        assert_eq!(
+            unify_many(vec![SInt], vec![SInt, SLong]).unwrap(),
+            unified_without_subst().unwrap()
+        );
+        // function types unify only when their domains have the same length
+        check_error(
+            SFunc::new(vec![t.clone()], t).into(),
+            SFunc::new(vec![SInt, SInt], SInt).into(),
+        );
     }
 }

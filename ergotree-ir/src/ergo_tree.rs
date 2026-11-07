@@ -1271,8 +1271,8 @@ mod tests {
             SigmaParsingError::NonSerializableTypeCode(104),
             // nesting deeper than MaxTreeDepth (DeserializeCallDepthExceeded)
             SigmaParsingError::DeserializeCallDepthExceeded(111),
-            // a type nested deeper than MaxTreeDepth (the temporary type bound)
-            SigmaParsingError::TypeDepthExceeded(111),
+            // a type nested deeper than MaxTypeDepth
+            SigmaParsingError::TypeDepthExceeded(9),
         ];
         for e in &rejects {
             assert!(e.escapes_sized_tree_degrade(), "should reject: {e:?}");
@@ -1467,48 +1467,93 @@ mod depth_limit_tests {
 
     #[test]
     fn size_flagged_tree_with_a_too_deep_type_rejects_instead_of_degrading() {
-        // A constant of type Coll^111[Byte], an empty outer collection: its `Byte` is nested
-        // 111 deep, past the temporary type bound, which escapes the degrade as the value
-        // cap does.
-        let mut constant = vec![0x0c; 111];
+        // A constant of type Coll^10[Byte], an empty outer collection: its `Byte` is nested
+        // 9 deep, past `MaxTypeDepth` (8). The JVM's `DeserializeCallDepthExceeded` escapes
+        // the degrade as the value cap does.
+        let mut constant = vec![0x0c; 9];
         constant.extend([0x02, 0x00]);
         assert!(matches!(
             ErgoTree::sigma_parse_bytes(&tree_with_constant(&constant)),
-            Err(SigmaParsingError::TypeDepthExceeded(111))
+            Err(SigmaParsingError::TypeDepthExceeded(9))
         ));
     }
 
     #[test]
+    fn a_zero_width_collection_constant_degrades_a_size_flagged_tree() {
+        // Rule 1020 is a `ValidationException` inside `deserializeErgoTree`'s `try`: a
+        // size-flagged tree degrades with its bytes kept, an unsized one rejects (SANTA,
+        // sigma-state 6.0.7). Coll[Unit] of 3 and of 0, Coll[Coll[Unit]], Coll[(Unit, Unit)].
+        let constants: [&[u8]; 4] = [
+            &[0x0c, 0x62, 0x03],
+            &[0x0c, 0x62, 0x00],
+            &[0x0c, 0x0c, 0x62, 0x01],
+            &[0x0c, 0x3c, 0x62, 0x62, 0x01],
+        ];
+        for constant in constants {
+            let bytes = tree_with_constant(constant);
+            match ErgoTree::sigma_parse_bytes(&bytes).unwrap() {
+                ErgoTree::Unparsed {
+                    tree_bytes,
+                    error:
+                        ErgoTreeError::SigmaParsingError(SigmaParsingError::ZeroWidthCollection(_)),
+                } => assert_eq!(tree_bytes, bytes),
+                t => panic!("{constant:02x?}: {t:?}"),
+            }
+            let mut unsized_bytes = vec![0x10, 1];
+            unsized_bytes.extend_from_slice(constant);
+            unsized_bytes.extend([0x08, OpCode::TRIVIAL_PROP_TRUE.value()]);
+            assert!(
+                matches!(
+                    ErgoTree::sigma_parse_bytes(&unsized_bytes),
+                    Err(SigmaParsingError::UnsizedTreeValidationError(_))
+                ),
+                "{constant:02x?}"
+            );
+        }
+        // Coll[(Unit, Int)](((), 1)) is not zero-width, and neither is Unit
+        for constant in [&[0x0c, 0x4c, 0x62, 0x01, 0x02][..], &[0x62][..]] {
+            assert!(matches!(
+                ErgoTree::sigma_parse_bytes(&tree_with_constant(constant)),
+                Ok(ErgoTree::Parsed(_))
+            ));
+        }
+    }
+
+    #[test]
     fn size_flagged_tree_continues_from_the_outer_level() {
-        // At outer level 2 (a Box in an extension value), the constant reaches 2 + n.
-        let parse_at_level_2 = |n: usize| {
+        // At outer level l (a Box in an extension value is at 2), the constant reaches l + n.
+        // A type nests at most `MaxTypeDepth` (8) deep, so start near `MaxTreeDepth`.
+        let parse_at_level_102 = |n: usize| {
             let bytes = tree_with_constant(&coll_n_byte(n));
             let mut r = from_bytes(&bytes);
-            r.set_level(2).unwrap();
+            r.set_level(102).unwrap();
             let tree = ErgoTree::sigma_parse(&mut r);
             (tree, r.level())
         };
-        let (tree, level) = parse_at_level_2(108);
+        let (tree, level) = parse_at_level_102(8);
         assert!(matches!(tree, Ok(ErgoTree::Parsed(_))));
-        assert_eq!(level, 2, "a parsed tree releases every level it took");
-        assert!(depth_exceeded(parse_at_level_2(109).0));
+        assert_eq!(level, 102, "a parsed tree releases every level it took");
+        assert!(depth_exceeded(parse_at_level_102(9).0));
     }
 
     #[test]
     fn degraded_tree_leaves_its_levels_on_the_reader() {
-        // SANTA `Transaction.degraded_tree_depth_leak`: output 0's tree degrades at level
-        // 10, and output 1's R4 Coll^n[Byte] (a value level and n data levels) starts there.
+        // SANTA `Transaction.degraded_tree_depth_leak`: output 0's tree degrades 10 levels
+        // deeper than it started, and output 1's R4 Coll^n[Byte] (a value level and n data
+        // levels) starts there. A type nests at most `MaxTypeDepth` (8) deep, so the reader
+        // starts at level 90.
         let parse_tree_then_value = |n: usize| {
             let mut bytes = base16::decode(DEGRADING_TREE.as_bytes()).unwrap();
             bytes.extend(coll_n_byte(n));
             let mut r = from_bytes(&bytes);
+            r.set_level(90).unwrap();
             let tree = ErgoTree::sigma_parse(&mut r).unwrap();
             assert!(matches!(tree, ErgoTree::Unparsed { .. }));
-            assert_eq!(r.level(), 10);
+            assert_eq!(r.level(), 100);
             Expr::sigma_parse(&mut r)
         };
-        assert!(parse_tree_then_value(99).is_ok());
-        assert!(depth_exceeded(parse_tree_then_value(100)));
+        assert!(parse_tree_then_value(9).is_ok());
+        assert!(depth_exceeded(parse_tree_then_value(10)));
     }
 
     #[test]
@@ -1528,16 +1573,21 @@ mod depth_limit_tests {
 
     #[test]
     fn depth_error_escapes_nested_size_flagged_trees() {
-        // A Box constant whose size-flagged tree holds Coll^110[Byte] (110 levels on its
-        // own reader) inside another size-flagged tree: 1 + 110 rejects both trees
-        // instead of degrading either.
-        let inner = tree_with_constant(&coll_n_byte(110));
+        // A Box constant whose size-flagged tree holds Coll^8[Byte] (8 levels) inside another
+        // size-flagged tree, on a reader at level 102: 102 + 8 parses the inner tree alone,
+        // and 102 + 1 + 8 rejects both trees instead of degrading either.
+        let parse_at_level_102 = |bytes: &[u8]| {
+            let mut r = from_bytes(bytes);
+            r.set_level(102).unwrap();
+            ErgoTree::sigma_parse(&mut r)
+        };
+        let inner = tree_with_constant(&coll_n_byte(8));
         assert!(matches!(
-            ErgoTree::sigma_parse_bytes(&inner),
+            parse_at_level_102(&inner),
             Ok(ErgoTree::Parsed(_))
         ));
         let outer = tree_with_constant(&box_constant(&inner));
-        assert!(depth_exceeded(ErgoTree::sigma_parse_bytes(&outer)));
+        assert!(depth_exceeded(parse_at_level_102(&outer)));
     }
 }
 

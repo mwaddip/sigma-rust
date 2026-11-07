@@ -77,10 +77,16 @@ impl SigmaSerializable for Apply {
         self.args.sigma_serialize(w)
     }
 
+    /// sigmastate builds `Apply` with no check: its type is a lazy val, NoType for a func that
+    /// is neither a function nor a collection, and the parse reads it only where a later node
+    /// does (v6.0.7 `values.scala:1242-1251`)
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let func = Expr::sigma_parse(r)?;
         let args = Vec::<Expr>::sigma_parse(r)?;
-        Ok(Apply::new(func, args)?)
+        Ok(Apply {
+            func: Box::new(func),
+            args,
+        })
     }
 }
 
@@ -187,6 +193,50 @@ mod tests {
         fn ser_roundtrip(v in any::<Apply>()) {
             let expr: Expr = v.into();
             prop_assert_eq![sigma_serialize_roundtrip(&expr), expr];
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod parse_tests {
+    use crate::ergo_tree::{ErgoTree, ErgoTreeError};
+    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+    use crate::types::stype::SType;
+
+    fn tree(hex: &str) -> Result<ErgoTree, SigmaParsingError> {
+        ErgoTree::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap())
+    }
+
+    #[test]
+    fn apply_of_a_non_function_parses() {
+        // SANTA `tree_parse_acceptance` #5: sigmaProp(Apply(Int 1, [])); `tree_root_forms`
+        // #0: the root Apply(Coll(sigmaProp(true)), [0]), whose type is the element type
+        for hex in ["00d1da040200", "00da1401d3010400"] {
+            let bytes = base16::decode(hex.as_bytes()).unwrap();
+            let parsed = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+            assert!(matches!(parsed, ErgoTree::Parsed(_)), "{hex}");
+            assert_eq!(parsed.sigma_serialize_bytes().unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn apply_of_an_int_is_no_type() {
+        // `tree_root_forms` #1: the size-flagged root Apply(Int 0, [0]) is NoType, which fails
+        // rule 1001; and Negation admits a NoType input, so the root Negation of it builds
+        for hex in ["0806da04000104 00", "0807f0da0400010400"] {
+            let hex = hex.replace(' ', "");
+            assert!(
+                matches!(
+                    tree(&hex),
+                    Ok(ErgoTree::Unparsed {
+                        error: ErgoTreeError::RootTpeError(SType::SNoType),
+                        ..
+                    })
+                ),
+                "{hex}: {:?}",
+                tree(&hex)
+            );
         }
     }
 }

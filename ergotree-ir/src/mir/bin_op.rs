@@ -250,95 +250,94 @@ mod arbitrary {
         type Strategy = BoxedStrategy<Self>;
 
         fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
-            let numeric_binop = || -> BoxedStrategy<BinOp> {
+            let depth = args.depth;
+            let operand = move |tpe: SType| any_with::<Expr>(ArbExprParams { tpe, depth });
+            let numeric_tpe = || {
+                prop_oneof![
+                    Just(SType::SByte),
+                    Just(SType::SShort),
+                    Just(SType::SInt),
+                    Just(SType::SLong),
+                    Just(SType::SBigInt),
+                ]
+            };
+            let build = |(kind, left, right): (BinOpKind, Expr, Expr)| BinOp {
+                kind,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+            // Both operands of one type, as the deserializing builder's `check2(SameType)`
+            // requires of a relation, numeric for a comparison (`SigmaBuilder.scala:686-704`)
+            let relation = move || -> BoxedStrategy<BinOp> {
+                prop_oneof![
+                    (
+                        prop_oneof![Just(RelationOp::Eq), Just(RelationOp::NEq)],
+                        prop_oneof![numeric_tpe(), Just(SType::SBoolean)]
+                    ),
+                    (
+                        prop_oneof![
+                            Just(RelationOp::Gt),
+                            Just(RelationOp::Ge),
+                            Just(RelationOp::Lt),
+                            Just(RelationOp::Le)
+                        ],
+                        numeric_tpe()
+                    ),
+                ]
+                .prop_flat_map(move |(op, tpe)| {
+                    (
+                        Just(BinOpKind::from(op)),
+                        operand(tpe.clone()),
+                        operand(tpe),
+                    )
+                })
+                .prop_map(build)
+                .boxed()
+            };
+            // Both operands of the result's type: below tree version 3 the builder would
+            // upcast the narrower of two numeric types (`SigmaBuilder.scala:674-683`), and the
+            // tree would not come back as it was generated
+            let numeric_binop = move |tpe: SType| -> BoxedStrategy<BinOp> {
                 (
                     prop_oneof![
                         any::<ArithOp>().prop_map_into(),
                         any::<BitOp>().prop_map_into(),
                     ],
-                    any_with::<Expr>(args.clone()),
-                    any_with::<Expr>(args.clone()),
+                    operand(tpe.clone()),
+                    operand(tpe),
                 )
-                    .prop_map(|(kind, left, right)| BinOp {
-                        kind,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                    })
+                    .prop_map(build)
                     .boxed()
             };
 
             match args.tpe {
                 SType::SBoolean => prop_oneof![
-                    (
-                        any::<RelationOp>().prop_map_into(),
-                        any_with::<Expr>(ArbExprParams {
-                            tpe: SType::SAny,
-                            depth: args.depth,
-                        }),
-                        any_with::<Expr>(ArbExprParams {
-                            tpe: SType::SAny,
-                            depth: args.depth,
-                        }),
-                    ),
+                    relation(),
                     (
                         any::<LogicalOp>().prop_map_into(),
-                        any_with::<Expr>(ArbExprParams {
-                            tpe: SType::SBoolean,
-                            depth: args.depth,
-                        }),
-                        any_with::<Expr>(ArbExprParams {
-                            tpe: SType::SBoolean,
-                            depth: args.depth,
-                        }),
+                        operand(SType::SBoolean),
+                        operand(SType::SBoolean),
                     )
+                        .prop_map(build)
                 ]
-                .prop_map(|(kind, left, right)| BinOp {
-                    kind,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                })
                 .boxed(),
 
-                SType::SByte => numeric_binop(),
-                SType::SShort => numeric_binop(),
-                SType::SInt => numeric_binop(),
-                SType::SLong => numeric_binop(),
-                SType::SBigInt => numeric_binop(),
+                tpe @ (SType::SByte
+                | SType::SShort
+                | SType::SInt
+                | SType::SLong
+                | SType::SBigInt) => numeric_binop(tpe),
 
                 _ => prop_oneof![
+                    relation(),
                     (
-                        prop_oneof![
-                            any::<ArithOp>().prop_map_into(),
-                            any::<RelationOp>().prop_map_into(),
-                            any::<LogicalOp>().prop_map_into(),
-                        ],
-                        any_with::<Expr>(ArbExprParams {
-                            tpe: SType::SAny,
-                            depth: args.depth,
-                        }),
-                        any_with::<Expr>(ArbExprParams {
-                            tpe: SType::SAny,
-                            depth: args.depth,
-                        }),
-                    ),
-                    // A bitwise operation parses only with numeric operands
-                    (
-                        any::<BitOp>().prop_map_into(),
-                        any_with::<Expr>(ArbExprParams {
-                            tpe: SType::SInt,
-                            depth: args.depth,
-                        }),
-                        any_with::<Expr>(ArbExprParams {
-                            tpe: SType::SInt,
-                            depth: args.depth,
-                        }),
+                        any::<LogicalOp>().prop_map_into(),
+                        operand(SType::SAny),
+                        operand(SType::SAny),
                     )
+                        .prop_map(build),
+                    numeric_tpe().prop_flat_map(numeric_binop),
                 ]
-                .prop_map(|(kind, left, right)| BinOp {
-                    kind,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                })
                 .boxed(),
             }
         }
