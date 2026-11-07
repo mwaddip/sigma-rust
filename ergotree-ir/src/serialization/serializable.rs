@@ -94,11 +94,12 @@ pub enum SigmaParsingError {
     )]
     DeserializeCallDepthExceeded(usize),
     /// A type nested deeper than
-    /// [`MAX_TREE_DEPTH`](crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH). A
-    /// temporary bound, until a protocol-level limit is defined.
+    /// [`MAX_TYPE_DEPTH`](crate::serialization::types::MAX_TYPE_DEPTH): sigmastate's
+    /// `TypeSerializer` throws `DeserializeCallDepthExceeded` (v6.0.7
+    /// `TypeSerializer.scala:133-136`), a `SerializerException`
     #[error(
         "type nesting depth({0}) exceeds allowed maximum {max}",
-        max = crate::serialization::sigma_byte_reader::MAX_TREE_DEPTH
+        max = crate::serialization::types::MAX_TYPE_DEPTH
     )]
     TypeDepthExceeded(usize),
     /// A declared item count above [`MAX_ARRAY_LENGTH`]: sigmastate's `safeNewArray` refuses it
@@ -263,7 +264,7 @@ impl SigmaParsingError {
     /// errors live in other variants and keep degrading (not listed here).
     /// Nesting deeper than `MaxTreeDepth` escapes too: the JVM's
     /// `DeserializeCallDepthExceeded` is a `SerializerException`. A type nested deeper
-    /// than `MaxTreeDepth` (the temporary `TypeDepthExceeded` bound) escapes as well, and
+    /// than `MaxTypeDepth` (`TypeDepthExceeded`, the same JVM exception) escapes as well, and
     /// so does a count above `MaxArrayLength` (`safeNewArray` throws a `RuntimeException`).
     /// A CTHRESHOLD outside its bounds and a bitwise operation on a non-numeric operand
     /// escape as well: both fail a `require`, an `IllegalArgumentException`. So does the

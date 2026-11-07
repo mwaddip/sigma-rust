@@ -4,8 +4,7 @@ use super::SigmaSerializationError;
 use crate::ergo_tree::ErgoTreeVersion;
 use crate::serialization::SigmaSerializeResult;
 use crate::serialization::{
-    sigma_byte_reader::{SigmaByteRead, MAX_TREE_DEPTH},
-    SigmaParsingError, SigmaSerializable,
+    sigma_byte_reader::SigmaByteRead, SigmaParsingError, SigmaSerializable,
 };
 use crate::types::stuple;
 use crate::types::stype::SType;
@@ -177,6 +176,11 @@ impl SigmaSerializable for TypeCode {
     }
 }
 
+/// Maximum nesting depth of a parsed type descriptor: sigmastate 6.0.7's
+/// `SigmaConstants.MaxTypeDepth` (`SigmaConstants.scala:81-83`), which
+/// `TypeSerializer.MaxTypeDepth` reads (`TypeSerializer.scala:258-261`)
+pub const MAX_TYPE_DEPTH: usize = 8;
+
 impl SType {
     /// Parse type from byte stream. This function should be used instead of
     /// `sigma_parse` when type code is already read for look-ahead
@@ -191,13 +195,16 @@ impl SType {
     /// type nested in it (collection and option elements, tuple items, a function's
     /// domain, range and type parameters).
     ///
-    /// TEMPORARY BOUND, until a protocol-level limit is defined: a type nested deeper
-    /// than [`MAX_TREE_DEPTH`] fails with [`SigmaParsingError::TypeDepthExceeded`].
+    /// A type nested deeper than [`MAX_TYPE_DEPTH`] fails with
+    /// [`SigmaParsingError::TypeDepthExceeded`] before its code byte is read, as
+    /// sigmastate's `TypeSerializer.deserialize` throws `DeserializeCallDepthExceeded`
+    /// (v6.0.7 `TypeSerializer.scala:133-136`). An embeddable form such as
+    /// `Coll[Coll[Byte]]` (`0x1a`) is one code byte and does not recurse.
     fn parse_at_depth<R: SigmaByteRead>(
         r: &mut R,
         depth: usize,
     ) -> Result<Self, SigmaParsingError> {
-        if depth > MAX_TREE_DEPTH {
+        if depth > MAX_TYPE_DEPTH {
             return Err(SigmaParsingError::TypeDepthExceeded(depth));
         }
         let c = r.get_u8()?;
@@ -757,15 +764,29 @@ mod type_depth_tests {
     }
 
     #[test]
-    fn a_type_nested_max_tree_depth_deep_parses_and_one_deeper_fails() {
-        let expected = (0..MAX_TREE_DEPTH).fold(SType::SByte, |t, _| SType::SColl(t.into()));
+    fn a_type_nested_max_type_depth_deep_parses_and_one_deeper_fails() {
+        let expected = (0..MAX_TYPE_DEPTH).fold(SType::SByte, |t, _| SType::SColl(t.into()));
         assert_eq!(
-            SType::sigma_parse_bytes(&nested_colls(MAX_TREE_DEPTH)).unwrap(),
+            SType::sigma_parse_bytes(&nested_colls(MAX_TYPE_DEPTH)).unwrap(),
             expected
         );
         assert!(matches!(
-            SType::sigma_parse_bytes(&nested_colls(MAX_TREE_DEPTH + 1)),
-            Err(SigmaParsingError::TypeDepthExceeded(111))
+            SType::sigma_parse_bytes(&nested_colls(MAX_TYPE_DEPTH + 1)),
+            Err(SigmaParsingError::TypeDepthExceeded(9))
+        ));
+    }
+
+    #[test]
+    fn an_embeddable_form_does_not_recurse() {
+        // SANTA `register_depth_bound` (sigma-state 6.0.7): `Coll^10[Byte]` is `0c`x8 `1a`,
+        // since `Coll[Coll[Byte]]` is the one code byte `1a`, so its last read is at depth 8
+        // and it parses; `Coll^11[Byte]` reads `1a` at depth 9 and fails.
+        let coll_n = |n: usize| [vec![0x0c; n - 2], vec![0x1a]].concat();
+        let expected = (0..10).fold(SType::SByte, |t, _| SType::SColl(t.into()));
+        assert_eq!(SType::sigma_parse_bytes(&coll_n(10)).unwrap(), expected);
+        assert!(matches!(
+            SType::sigma_parse_bytes(&coll_n(11)),
+            Err(SigmaParsingError::TypeDepthExceeded(9))
         ));
     }
 
@@ -789,10 +810,10 @@ mod type_depth_tests {
         let parse = |bytes: Vec<u8>| {
             from_bytes(bytes).with_tree_version(ErgoTreeVersion::V3, SType::sigma_parse)
         };
-        assert!(parse(nested(MAX_TREE_DEPTH)).is_ok());
+        assert!(parse(nested(MAX_TYPE_DEPTH)).is_ok());
         assert!(matches!(
-            parse(nested(MAX_TREE_DEPTH + 1)),
-            Err(SigmaParsingError::TypeDepthExceeded(111))
+            parse(nested(MAX_TYPE_DEPTH + 1)),
+            Err(SigmaParsingError::TypeDepthExceeded(9))
         ));
     }
 }
