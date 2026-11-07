@@ -139,7 +139,9 @@ mod tests {
 
     #[test]
     fn eval_reg_wrong_type() {
-        // SInt, expected SColl(SByte)
+        // SInt, expected SColl(SByte): `eba.value.toArray` is a `ClassCastException`, which
+        // Kiama's `strategy` swallows (v6.0.7 `ErgoLikeInterpreter.scala:20-22`,
+        // `Rewriter.scala:180-191`), so the node stays, and evaluating it errors
         let reg_value: Constant = 1i32.into();
         let b = force_any_val::<ErgoBox>()
             .with_additional_registers(vec![reg_value].try_into().unwrap());
@@ -150,10 +152,11 @@ mod tests {
         }
         .into();
         let ctx = make_ctx_with_self_box(b);
-        assert!(matches!(
-            try_eval_with_deserialize::<Value>(&expr, &ctx),
-            Err(EvalError::SubstDeserializeError(_))
-        ));
+        let res = try_eval_with_deserialize::<Value>(&expr, &ctx);
+        assert!(
+            alloc::format!("{res:?}").contains("DeserializeRegister cannot be evaluated"),
+            "{res:?}"
+        );
     }
 
     #[test]

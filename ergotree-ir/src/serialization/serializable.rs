@@ -550,6 +550,129 @@ pub fn roundtrip_new_feature<T: SigmaSerializable + core::fmt::Debug + PartialEq
     }
 }
 
+/// The class of exception sigmastate 6.0.7 throws where sigma-rust raises a parse error. Two
+/// JVM handlers key on it: `deserializeErgoTree` degrades a size-flagged tree on a
+/// `ValidationException` only (`ErgoTreeSerializer.scala:141-205`), and the substitution at
+/// spend leaves a node where it is on a `ClassCastException` only, raised inside the rule
+/// (Kiama's `strategy`, `Rewriter.scala:180-191`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JvmFailure {
+    /// A validation rule's `ValidationException`
+    Validation,
+    /// A `ClassCastException`
+    ClassCast,
+    /// Any other exception, or a refusal sigma-rust makes where sigmastate builds the node
+    Other,
+}
+
+impl SigmaParsingError {
+    /// What sigmastate throws where this error is raised (v6.0.7). Every variant has its row,
+    /// so a new variant cannot be added without deciding it.
+    pub(crate) fn jvm_failure(&self) -> JvmFailure {
+        use JvmFailure::{ClassCast, Other, Validation};
+        use SigmaParsingError::*;
+        // rule 1014 `CheckPositionLimit`, through whichever reader channel tripped it
+        if self.is_position_limit_exceeded() {
+            return Validation;
+        }
+        match self {
+            // rule 1002 `CheckValidOpCode` (`ValueSerializer.scala:160-170`)
+            InvalidOpCode(_) | NotImplementedOpCode(_) => Validation,
+            // rules 1008 / 1018 `CheckPrimitiveTypeCode` / `CheckTypeCodeV6`
+            // (`TypeSerializer.scala:226-233`)
+            InvalidTypeCode(_) => Validation,
+            // rule 1019, a v6 type in a register or context extension before v6
+            // (`ErgoBoxCandidate.scala:234`, `ContextExtension.scala:62`)
+            V6TypeError => Validation,
+            // rule 1010 `CheckTypeWithMethods`
+            NotImplementedYet(_) => Validation,
+            // rules 1011 / 1016 `CheckAndGetMethod` (`methods.scala`)
+            UnknownMethodId(_, _) => Validation,
+            // rule 1009 `CheckSerializableTypeCode` (`CoreDataSerializer.scala:149-170`); the
+            // UnsignedBigInt-below-v3 site is a `SerializerException` on the JVM, but a tree
+            // never reaches it: the type parse refuses the type code first (`types.rs`)
+            NotSupported(_) => Validation,
+            // rule 1020 `CheckZeroWidthCollection` (`CoreDataSerializer.scala:168`)
+            ZeroWidthCollection(_) => Validation,
+            // rule 1012 `CheckHeaderSizeBit` for a missing size bit; the others are an
+            // `IllegalArgumentException` and an `IOException`
+            ErgoTreeHeaderError(e) => match e {
+                crate::ergo_tree::ErgoTreeHeaderError::InvalidSizeBit(_) => Validation,
+                crate::ergo_tree::ErgoTreeHeaderError::VersionError(_)
+                | crate::ergo_tree::ErgoTreeHeaderError::IoError(_) => Other,
+            },
+            // casts to a concrete class: `asInstanceOf[EvaluatedValue[_]]`
+            // (`ErgoBoxCandidate.scala:234`, `ContextExtension.scala:61`), the input's type to
+            // `SCollection` (`transformers.scala:62`, `:89`, `:254`) or `SOption` (`:600-601`,
+            // `:625-626`), a mapper's to `SFunc` (`:38`), a block item to `BlockItem`
+            // (`BlockValueSerializer.scala:39`), a cast target to `SNumericType`
+            // (`NumericCastSerializer.scala:20-24`), a `FunDef` type parameter to `STypeVar`
+            // (`ValDefSerializer.scala:41`), a `SelectField`'s input type to `STuple`
+            // (`transformers.scala:294`), and `Filter`'s type read, its input's cast to
+            // `SCollection` (`:121`)
+            UnevaluatedValue(_)
+            | CollectionInputExpected(_)
+            | OptionInputExpected(_)
+            | FunctionExpected(_)
+            | BlockItemNotValDef(_)
+            | NumericCastTargetNotNumeric(_)
+            | TypeParameterNotTypeVar(_)
+            | TupleInputExpected(_)
+            | TypeReadFailed(_) => ClassCast,
+            // the reader's other failures: an `IllegalArgumentException` for a malformed VLQ,
+            // an `IOException` at the end of the input
+            VlqEncode(_) | ScorexParsingError(_) | Io(_) | PositionLimitExceeded => Other,
+            // `SerializerException`s: the depth guards (`DeserializeCallDepthExceeded`), an
+            // unsized tree re-throwing a `ValidationException`
+            // (`ErgoTreeSerializer.scala:197-207`), type code 0 (`TypeSerializer.scala:138`),
+            // a data type with no serializer (`CoreDataSerializer.scala:149-151`), a version
+            // above the activated one (`VersionContext.scala:17-21`)
+            DeserializeCallDepthExceeded(_)
+            | TypeDepthExceeded(_)
+            | UnsizedTreeValidationError(_)
+            | InvalidTypePrefix
+            | NonSerializableTypeCode(_)
+            | TreeVersionAboveActivated(_, _) => Other,
+            // `IllegalArgumentException`s from `require`: `Cthreshold`
+            // (`SigmaBoolean.scala:223`), `BitOp` (`trees.scala:913`), the numeric nodes
+            // (`:398`, `:431`, `:882`, `:900`), an `SFunc` type parameter; and a negative
+            // `FunDef` count's `NegativeArraySizeException`
+            CthresholdOutOfBounds(_, _)
+            | BitOpOperandsNotNumeric(_)
+            | NumericOperandExpected(_)
+            | InvalidTypeParameter(_) => Other,
+            // the builder's `check2` throws `ConstraintFailed`, a `BuilderException`, not a
+            // `ValidationException` (`SigmaBuilder.scala:293-295`)
+            ConstraintFailed(_) => Other,
+            // `AssertionError`s: a collection item's type (`ConcreteCollectionSerializer.scala:37`),
+            // a `ByIndex` index's upcast (`syntax.scala:168-177`), a v3 call without arguments
+            // (`MethodCallSerializer.scala:58`)
+            CollectionItemTypeMismatch(_) | IndexUpcastFailed(_) | MethodCallWithoutArguments => {
+                Other
+            }
+            // `NoSuchElementException`, `IndexOutOfBoundsException`, `MatchError`,
+            // `ArithmeticException`, `NegativeArraySizeException`, `RuntimeException`
+            RegisterIdOutOfRange(_)
+            | ValDefIdNotFound(_)
+            | ConstantForPlaceholderNotFound(_)
+            | TooManyRegisters(_)
+            | InvalidSigmaBooleanOpCode(_)
+            | ExceedsIntMax(_, _)
+            | NegativeTupleSize(_)
+            | ArrayLengthExceeded(_)
+            | InvalidBigIntSize(_)
+            | TupleFieldOutOfBounds(_) => Other,
+            // mostly sigma-rust's own refusals where sigmastate builds the node (a strict
+            // `new()`, a tuple below 2 items, a bound with no JVM counterpart); the rest are
+            // `RuntimeException`s (`ContextExtension.scala:55`, `:60`, `ErgoBoxCandidate`'s
+            // digest lookup)
+            Misc(_) | ValueOutOfBounds(_) | InvalidArgument(_) | BoundedVecOutOfBounds(_) => Other,
+            // not raised on a parse path
+            TupleItemsOutOfBounds(_) | SerializationError(_) | InvalidRegisterValue(_) => Other,
+        }
+    }
+}
+
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
 #[allow(clippy::panic)]
@@ -569,5 +692,40 @@ mod tests {
         let mut r = SigmaByteReader::new(cursor, ConstantStore::empty());
         let result = Vec::<u32>::sigma_parse(&mut r);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn each_parse_error_maps_to_the_exception_sigmastate_throws() {
+        let s = String::new;
+        for e in [
+            SigmaParsingError::UnevaluatedValue(s()),
+            SigmaParsingError::CollectionInputExpected(s()),
+            SigmaParsingError::OptionInputExpected(s()),
+            SigmaParsingError::FunctionExpected(s()),
+            SigmaParsingError::BlockItemNotValDef(s()),
+            SigmaParsingError::NumericCastTargetNotNumeric(s()),
+            SigmaParsingError::TypeParameterNotTypeVar(s()),
+            SigmaParsingError::TupleInputExpected(s()),
+            SigmaParsingError::TypeReadFailed(s()),
+        ] {
+            assert_eq!(e.jvm_failure(), JvmFailure::ClassCast, "{e:?}");
+        }
+        for e in [
+            SigmaParsingError::ConstraintFailed(s()),
+            SigmaParsingError::NumericOperandExpected(s()),
+            SigmaParsingError::InvalidTypeParameter(s()),
+            SigmaParsingError::TupleFieldOutOfBounds(s()),
+            SigmaParsingError::ErgoTreeHeaderError(ErgoTreeHeaderError::IoError(s())),
+        ] {
+            assert_eq!(e.jvm_failure(), JvmFailure::Other, "{e:?}");
+        }
+        for e in [
+            SigmaParsingError::InvalidOpCode(0),
+            SigmaParsingError::ErgoTreeHeaderError(ErgoTreeHeaderError::InvalidSizeBit(0x0b)),
+            SigmaParsingError::PositionLimitExceeded,
+            SigmaParsingError::VlqEncode(vlq_encode::VlqEncodingError::PositionLimitExceeded),
+        ] {
+            assert_eq!(e.jvm_failure(), JvmFailure::Validation, "{e:?}");
+        }
     }
 }

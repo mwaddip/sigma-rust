@@ -487,8 +487,12 @@ impl Expr {
         })
     }
 
-    /// Rewrite expr, replacing [`DeserializeContext`] and [`DeserializeRegister`] nodes with their respective context extension/register values
-    // TODO: work on soft-fork for sigma-rust, in that case if deserializing expr fails with validation err, reduce_to_crypto should return true
+    /// Rewrite expr, replacing [`DeserializeContext`] and [`DeserializeRegister`] nodes with
+    /// the scripts their context variable or register holds, as sigmastate's
+    /// `applyDeserializeContextJITC` does (v6.0.7 `Interpreter.scala:149-157`): bottom-up, with
+    /// the rule tried on each node. A `ClassCastException` raised inside the rule leaves the
+    /// node where it is (Kiama's `strategy`, `Rewriter.scala:180-191`); it errors only if the
+    /// live path evaluates it. Any other failure fails the substitution.
     pub fn substitute_deserialize(self, ctx: &Context) -> Result<Self, SubstDeserializeError> {
         self.try_rewrite_bu(
             |expr| {
@@ -497,89 +501,14 @@ impl Expr {
                     Expr::DeserializeContext(_) | Expr::DeserializeRegister(_)
                 )
             },
-            |expr| {
-                let (tpe, parsed_expr): (&mut SType, Expr) = match expr {
-                    Expr::DeserializeContext(DeserializeContext { tpe, id }) => {
-                        let value = match ctx.extension.values.get(&*id) {
-                            Some(value) => value,
-                            // Absent context variable: leave the DeserializeContext
-                            // node unchanged, mirroring the JVM
-                            // `Interpreter.substDeserialize` `else None` (and the
-                            // DeserializeRegister branch below). A leftover node
-                            // errors only if the *live* reduction path evaluates it
-                            // (eval/expr.rs: "DeserializeContext cannot be
-                            // evaluated"); on a dead branch it is harmless, which is
-                            // how the JVM accepts testnet block 111,927.
-                            None => return Ok(()),
-                        };
-                        // Present but not a `Coll[Byte]`: leave the node
-                        // unchanged too, mirroring the JVM
-                        // `Interpreter.substDeserialize` inner `case _ => None`
-                        // (a non-SByteArray extension value is not substituted;
-                        // the leftover node errors only on the live eval path).
-                        // The type decides before the data is read (`eba.tpe ==
-                        // SByteArray`, then `eba.value`, `Interpreter.scala:114-115`).
-                        if value.tpe() != Some(SType::SColl(SType::SByte.into())) {
-                            return Ok(());
-                        }
-                        // For a `Coll[Byte]`, its constant form is its data as
-                        // the script reads it
-                        let vec = value.to_constant()?.try_extract_into::<Vec<u8>>()?;
-                        // Each actually-substituted node charges the JVM's
-                        // deserialization complexity — `scriptBytes.length ×
-                        // CostPerByteDeserialized(2)` block cost
-                        // (`Interpreter.deserializeMeasured`). Unlike the
-                        // per-tree-byte presence charge, this lands in the
-                        // reported cost pre-V6 too.
-                        ctx.add_jit_cost(vec.len() as u64 * 20)?;
-                        // sigmastate decodes inside the spend's `VersionContext`
-                        // (`Interpreter.scala:366`): a tree in the script is compared with
-                        // the context's activated version
-                        (
-                            tpe,
-                            sigma_byte_reader::from_bytes(&vec).with_versions(
-                                ctx.activated_script_version(),
-                                ctx.tree_version(),
-                                Expr::sigma_parse,
-                            )?,
-                        )
-                    }
-                    Expr::DeserializeRegister(DeserializeRegister { reg, tpe, default }) => {
-                        let expr = ctx
-                            .self_box
-                            .get_register(*reg)?
-                            .map(|constant| -> Result<_, SubstDeserializeError> {
-                                let bytes = constant.try_extract_into::<Vec<u8>>()?;
-                                // Same per-byte deserialization charge as the
-                                // context-var arm (`ErgoLikeInterpreter.
-                                // substDeserialize` → `deserializeMeasured`);
-                                // an absent register falling back to `default`
-                                // charges nothing.
-                                ctx.add_jit_cost(bytes.len() as u64 * 20)?;
-                                Ok(sigma_byte_reader::from_bytes(&bytes).with_versions(
-                                    ctx.activated_script_version(),
-                                    ctx.tree_version(),
-                                    Expr::sigma_parse,
-                                )?)
-                            })
-                            .transpose()?
-                            .or(default.as_deref().cloned());
-                        match expr {
-                            Some(expr) => (tpe, expr),
-                            None => return Ok(()), // When script in register is not found, and default is not defined, leave DeserializeRegisterNode unchanged, which will error on evaluation
-                        }
-                    }
-                    #[allow(clippy::unreachable)] // Rule is already checked in filter
-                    _ => unreachable!(),
-                };
-                if parsed_expr.tpe() != *tpe {
-                    return Err(SubstDeserializeError::ExprTpeError {
-                        expected: tpe.clone(),
-                        actual: parsed_expr.tpe(),
-                    });
+            |expr| match subst_deserialize(expr, ctx) {
+                Ok(Some(script)) => {
+                    *expr = script;
+                    Ok(())
                 }
-                *expr = parsed_expr;
-                Ok(())
+                Ok(None) => Ok(()),
+                Err(e) if e.is_class_cast() => Ok(()),
+                Err(e) => Err(e),
             },
         )
     }
@@ -793,6 +722,132 @@ impl From<BoundedVecOutOfBounds> for InvalidArgumentError {
     }
 }
 
+/// sigmastate's rule for one node (v6.0.7 `Interpreter.scala:110-127`,
+/// `ErgoLikeInterpreter.scala:17-38`): the script to put in its place, or `None` to leave it
+// TODO: soft fork. sigmastate runs the substitution inside `trySoftForkable`
+// (`Interpreter.scala:254-262`): a `ValidationException` under a soft-fork condition makes the
+// reduction true; sigma-rust has no such handling yet.
+fn subst_deserialize(expr: &Expr, ctx: &Context) -> Result<Option<Expr>, SubstDeserializeError> {
+    match expr {
+        Expr::DeserializeContext(DeserializeContext { tpe, id }) => {
+            let value = match ctx.extension.values.get(id) {
+                Some(value) => value,
+                // Absent context variable: leave the DeserializeContext node unchanged,
+                // mirroring the JVM `Interpreter.substDeserialize` `else None` (and the
+                // DeserializeRegister branch below). A leftover node errors only if the *live*
+                // reduction path evaluates it (eval/expr.rs: "DeserializeContext cannot be
+                // evaluated"); on a dead branch it is harmless, which is how the JVM accepts
+                // testnet block 111,927.
+                None => return Ok(None),
+            };
+            // Present but not a `Coll[Byte]`: leave the node unchanged too, mirroring the JVM
+            // `Interpreter.substDeserialize` inner `case _ => None` (a non-SByteArray extension
+            // value is not substituted; the leftover node errors only on the live eval path).
+            // The type decides before the data is read (`eba.tpe == SByteArray`, then
+            // `eba.value`, `Interpreter.scala:114-115`).
+            if value.tpe() != Some(SType::SColl(SType::SByte.into())) {
+                return Ok(None);
+            }
+            // For a `Coll[Byte]`, its constant form is its data as the script reads it
+            let bytes = value.to_constant()?.try_extract_into::<Vec<u8>>()?;
+            let script = deserialize_measured(&bytes, ctx)?;
+            // rule 1000 `CheckDeserializedScriptType` (`Interpreter.scala:119`)
+            check_script_tpe(&script, tpe)?;
+            Ok(Some(script))
+        }
+        Expr::DeserializeRegister(DeserializeRegister { reg, tpe, default }) => {
+            match register_script_bytes(*reg, ctx)? {
+                Some(bytes) => {
+                    let script = deserialize_measured(&bytes, ctx)?;
+                    // a mismatch is a `sys.error` (`:25-27`)
+                    check_script_tpe(&script, tpe)?;
+                    Ok(Some(script))
+                }
+                // An absent register substitutes the default (`.orElse(d.default)`, `:36`);
+                // with no default the node stays, and errors if it is evaluated
+                None => match default {
+                    Some(default) => {
+                        if default.tpe() != *tpe {
+                            return Err(SubstDeserializeError::ExprTpeError {
+                                expected: tpe.clone(),
+                                actual: default.tpe(),
+                            });
+                        }
+                        Ok(Some((**default).clone()))
+                    }
+                    None => Ok(None),
+                },
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// A register as `eba.value.toArray` reads it (v6.0.7 `ErgoLikeInterpreter.scala:19-22`): `None`
+/// for a register the box does not have, else the bytes of a `Coll[Byte]`. The value is read as
+/// a script reads it, its data (`EvaluatedValue::script_data`): a read that fails (an item that
+/// is not a value, an `AssertionError`; a pair's tuple expression in a collection, an
+/// `ArrayStoreException`) fails the spend. The arm matching an `EvaluatedValue[SByteArray]` is
+/// erased, so data that is not a byte array fails the cast of `toArray`'s result, a
+/// `ClassCastException`.
+fn register_script_bytes(
+    reg: RegisterId,
+    ctx: &Context,
+) -> Result<Option<Vec<u8>>, SubstDeserializeError> {
+    use crate::chain::ergo_box::RegisterValue;
+    use crate::mir::constant::Literal;
+    use crate::mir::value::{CollKind, NativeColl};
+    let data = match reg {
+        RegisterId::NonMandatoryRegisterId(id) => match ctx.self_box.additional_registers.get(id) {
+            None => return Ok(None),
+            Some(RegisterValue::Parsed(c)) => c.v.clone(),
+            Some(RegisterValue::ParsedExpr(e)) => e.value().script_data()?,
+            Some(RegisterValue::Invalid { error_msg, .. }) => {
+                return Err(RegisterValueError::Invalid(error_msg.clone()).into())
+            }
+        },
+        RegisterId::MandatoryRegisterId(_) => match ctx.self_box.get_register(reg)? {
+            Some(c) => c.v,
+            None => return Ok(None),
+        },
+    };
+    match data {
+        Literal::Coll(CollKind::NativeColl(NativeColl::CollByte(bytes))) => {
+            Ok(Some(bytes.iter().map(|b| *b as u8).collect()))
+        }
+        other => Err(SubstDeserializeError::RegisterNotBytes(format!(
+            "{other:?}"
+        ))),
+    }
+}
+
+/// `deserializeMeasured` (v6.0.7 `Interpreter.scala:99-107`): decodes the script, then charges
+/// `CostPerByteDeserialized`, 2 block cost (20 jit) per byte, so a decode that throws charges
+/// nothing. sigmastate decodes inside the spend's `VersionContext` (`Interpreter.scala:366`): a
+/// tree in the script is compared with the context's activated version.
+fn deserialize_measured(bytes: &[u8], ctx: &Context) -> Result<Expr, SubstDeserializeError> {
+    let script = sigma_byte_reader::from_bytes(bytes).with_versions(
+        ctx.activated_script_version(),
+        ctx.tree_version(),
+        Expr::sigma_parse,
+    )?;
+    ctx.add_jit_cost(bytes.len() as u64 * 20)?;
+    Ok(script)
+}
+
+/// The decoded script's type against the declared one; reading it can throw, a cast
+/// ([`Expr::try_tpe`])
+fn check_script_tpe(script: &Expr, tpe: &SType) -> Result<(), SubstDeserializeError> {
+    let actual = script.try_tpe()?;
+    if actual != *tpe {
+        return Err(SubstDeserializeError::ExprTpeError {
+            expected: tpe.clone(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub enum SubstDeserializeError {
@@ -810,6 +865,28 @@ pub enum SubstDeserializeError {
     ExprTpeError { expected: SType, actual: SType },
     #[error("Cost limit exceeded during deserialize substitution: {0}")]
     CostLimitExceeded(CostLimitExceeded),
+    #[error("a register that is not a Coll[Byte]: {0}")]
+    RegisterNotBytes(String),
+}
+
+impl SubstDeserializeError {
+    /// What sigmastate raises as a `ClassCastException` inside the substitution's rule, which
+    /// Kiama's `strategy` swallows (v6.0.7 `Rewriter.scala:180-191`): a decode or a type read
+    /// that casts ([`SigmaParsingError::jvm_failure`]), and a register read as bytes that is not
+    pub(crate) fn is_class_cast(&self) -> bool {
+        match self {
+            SubstDeserializeError::ExprParsingError(e) => {
+                e.jvm_failure() == crate::serialization::JvmFailure::ClassCast
+            }
+            SubstDeserializeError::RegisterNotBytes(_) => true,
+            SubstDeserializeError::TryExtractFromError(_)
+            | SubstDeserializeError::InvalidRegister(_)
+            | SubstDeserializeError::RegisterNotFound(_)
+            | SubstDeserializeError::RegisterValueError(_)
+            | SubstDeserializeError::ExprTpeError { .. }
+            | SubstDeserializeError::CostLimitExceeded(_) => false,
+        }
+    }
 }
 
 impl From<CostLimitExceeded> for SubstDeserializeError {
@@ -1146,6 +1223,165 @@ mod substitute_deserialize_tests {
                 expr.clone().substitute_deserialize(&ctx),
                 activated,
                 refused,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod substitution_rule_tests {
+    //! sigmastate's rule (v6.0.7 `Interpreter.scala:110-127`, `ErgoLikeInterpreter.scala:17-38`)
+    //! decodes, then charges (`deserializeMeasured`, `:99-107`), then checks the decoded
+    //! script's type. Kiama's `strategy` leaves the node where it is on a `ClassCastException`
+    //! raised inside the rule (`Rewriter.scala:180-191`), and only on that.
+    use super::type_read_tests::{bi, filter};
+    use super::*;
+    use crate::chain::context_extension::ContextExtension;
+    use crate::chain::ergo_box::ErgoBox;
+    use crate::chain::ergo_box::NonMandatoryRegisterId;
+    use crate::mir::option_get::OptionGet;
+    use crate::serialization::SigmaSerializable;
+    use alloc::boxed::Box;
+    use sigma_test_util::force_any_val;
+
+    fn register(tpe: SType, default: Option<Expr>) -> Expr {
+        DeserializeRegister {
+            reg: NonMandatoryRegisterId::R4.into(),
+            tpe,
+            default: default.map(Box::new),
+        }
+        .into()
+    }
+
+    fn context_var(tpe: SType) -> Expr {
+        DeserializeContext { tpe, id: 1 }.into()
+    }
+
+    /// Substitutes `expr` in a context whose R4 and context variable 1 both hold `value`,
+    /// returning the result and the cost it charged
+    fn substitute(expr: &Expr, value: Constant) -> (Result<Expr, SubstDeserializeError>, u64) {
+        let self_box = force_any_val::<ErgoBox>()
+            .with_additional_registers(vec![value.clone()].try_into().unwrap());
+        let extension = ContextExtension {
+            values: [(1u8, value.into())].into_iter().collect(),
+        };
+        let ctx = Context {
+            self_box: &self_box,
+            ..force_any_val::<Context>()
+        }
+        .with_extension(&extension);
+        let before = ctx.jit_cost_value();
+        let res = expr.clone().substitute_deserialize(&ctx);
+        (res, ctx.jit_cost_value() - before)
+    }
+
+    fn bytes(e: Expr) -> Constant {
+        e.sigma_serialize_bytes().unwrap().into()
+    }
+
+    #[test]
+    fn a_cast_in_the_decode_leaves_the_node_and_charges_nothing() {
+        // SANTA s3j, s16b: the script OptionGet(BI) throws as it is built, before the charge
+        let script = bytes(
+            OptionGet {
+                input: Box::new(bi()),
+            }
+            .into(),
+        );
+        for expr in [register(SType::SAny, None), context_var(SType::SAny)] {
+            assert_eq!(substitute(&expr, script.clone()), (Ok(expr.clone()), 0));
+        }
+    }
+
+    #[test]
+    fn a_cast_in_the_type_check_leaves_the_node_and_keeps_the_charge() {
+        // SANTA s3, s16: F(BI) decodes and is charged 20 jit per byte; its type read throws
+        let script = bytes(filter(bi()));
+        let len = script
+            .v
+            .clone()
+            .try_extract_into::<Vec<i8>>()
+            .unwrap()
+            .len() as u64;
+        for expr in [register(SType::SAny, None), context_var(SType::SAny)] {
+            assert_eq!(
+                substitute(&expr, script.clone()),
+                (Ok(expr.clone()), len * 20)
+            );
+        }
+    }
+
+    #[test]
+    fn a_register_that_is_not_bytes_leaves_the_node() {
+        // SANTA s15: `eba.value.toArray` on an Int is a cast, so the default is not reached
+        let expr = register(SType::SInt, Some(2i32.into()));
+        assert_eq!(substitute(&expr, 1i32.into()), (Ok(expr.clone()), 0));
+    }
+
+    /// Substitutes `expr` in a context whose R4 holds the register value `value`
+    fn substitute_register(expr: &Expr, value: Expr) -> Result<Expr, SubstDeserializeError> {
+        substitute_register_bytes(expr, &value.sigma_serialize_bytes().unwrap())
+    }
+
+    /// Substitutes `expr` in a context whose R4 holds the register value serialized as `value`
+    fn substitute_register_bytes(expr: &Expr, value: &[u8]) -> Result<Expr, SubstDeserializeError> {
+        let mut bytes = vec![1u8];
+        bytes.extend(value);
+        let registers =
+            crate::chain::ergo_box::NonMandatoryRegisters::sigma_parse_bytes(&bytes).unwrap();
+        let self_box = force_any_val::<ErgoBox>().with_additional_registers(registers);
+        let ctx = Context {
+            self_box: &self_box,
+            ..force_any_val::<Context>()
+        };
+        expr.clone().substitute_deserialize(&ctx)
+    }
+
+    #[test]
+    fn a_register_whose_data_read_fails_fails_the_spend() {
+        // R4 = Coll[(Int, Int)] holding the tuple expression (1, 2): `ConcreteCollection.value`
+        // stores its data, a collection, in an array of Tuple2, an `ArrayStoreException`
+        // (`values.scala:882-884`), which is no cast
+        use crate::mir::collection::Collection;
+        use crate::mir::tuple::Tuple;
+        use crate::types::stuple::STuple;
+        let pairs: Expr = Collection::Exprs {
+            elem_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt)),
+            items: vec![Tuple::new(vec![1i32.into(), 2i32.into()]).unwrap().into()],
+        }
+        .into();
+        let expr = register(SType::SInt, Some(2i32.into()));
+        assert!(matches!(
+            substitute_register(&expr, pairs),
+            Err(SubstDeserializeError::TryExtractFromError(_))
+        ));
+    }
+
+    #[test]
+    fn a_register_holding_a_tuple_leaves_the_node() {
+        // R4 = the 1-item tuple (Int 1): `Tuple.value` is a `Coll[Any]`, and reading it as bytes
+        // is a cast, so the node stays and the default is not reached (`values.scala:818-822`)
+        // the tuple opcode, 1 item, Int 1: sigma-rust's Tuple node holds 2 items at least, so
+        // written by hand
+        let one = base16::decode(b"86010402").unwrap();
+        let expr = register(SType::SInt, Some(2i32.into()));
+        assert_eq!(substitute_register_bytes(&expr, &one), Ok(expr.clone()));
+    }
+
+    #[test]
+    fn a_type_mismatch_still_fails_the_spend() {
+        // a decoded Int where a Long is declared: `sys.error` for a register, rule 1000 for a
+        // context variable; neither is a cast
+        let script = bytes(1i32.into());
+        for expr in [register(SType::SLong, None), context_var(SType::SLong)] {
+            assert!(
+                matches!(
+                    substitute(&expr, script.clone()).0,
+                    Err(SubstDeserializeError::ExprTpeError { .. })
+                ),
+                "{expr:?}"
             );
         }
     }

@@ -88,15 +88,22 @@ impl EvaluatedValue {
     pub fn to_script_value(&self) -> Result<ScriptValue, TryExtractFromError> {
         // `stypeToRType(v.tpe)`, then `v.value` (`ErgoLikeContext.scala:159-160`)
         let tpe = self.script_type()?;
-        let v = match self {
+        let v = self.script_data()?;
+        Ok(ScriptValue { tpe, v })
+    }
+
+    /// The value's data as a script reads it, sigmastate's `v.value`: a constant's data, a
+    /// tuple's or a collection's (`Tuple.value`, `ConcreteCollection.value`), which fails on an
+    /// item that is not a value or on a pair's tuple expression
+    pub(crate) fn script_data(&self) -> Result<Literal, TryExtractFromError> {
+        Ok(match self {
             EvaluatedValue::Constant(c) => c.v.clone(),
             EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => tuple_script_data(items)?,
             EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => collection_script_data(c)?,
             EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => {
                 Literal::GroupElement(generator().into())
             }
-        };
-        Ok(ScriptValue { tpe, v })
+        })
     }
 
     /// The type a script reads the value at (see [`ScriptValue::tpe`]), before its data is read:
