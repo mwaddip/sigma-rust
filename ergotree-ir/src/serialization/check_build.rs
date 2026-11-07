@@ -473,6 +473,210 @@ mod tests {
         }
     }
 
+    /// A size-flagged v3 tree of `root`
+    fn sized_v3(body: &[u8]) -> alloc::vec::Vec<u8> {
+        assert!(body.len() < 128);
+        let mut bytes = alloc::vec![0x0b, body.len() as u8];
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    #[test]
+    fn a_filter_is_built_without_reading_its_input_type() {
+        // sigmastate's `Filter` checks nothing when built (v6.0.7 `transformers.scala:117-121`):
+        // sigmaProp(SizeOf(F(BI)) > 0) parses and round-trips, F(BI) = Filter(ByIndex(Tuple(0,
+        // 0), 0), (i: Int) => true) over an input typed SAny. Reading F(BI)'s type throws, so
+        // sigmaProp(EQ(If(true, F(BI), F(BI)), F(BI))) rejects, size-flagged too: `If`'s
+        // constructor reads it (`trees.scala:1313`), a `ClassCastException`
+        use crate::mir::bin_op::{BinOp, RelationOp};
+        use crate::mir::bool_to_sigma::BoolToSigmaProp;
+        use crate::mir::coll_size::SizeOf;
+        use crate::mir::expr::type_read_tests::{bi, filter};
+        use crate::mir::expr::Expr;
+        use crate::mir::if_op::If;
+        use crate::serialization::SigmaSerializable;
+        use alloc::boxed::Box;
+        let root = |e: Expr| -> alloc::vec::Vec<u8> {
+            sized_v3(
+                &Expr::from(BoolToSigmaProp { input: Box::new(e) })
+                    .sigma_serialize_bytes()
+                    .unwrap(),
+            )
+        };
+        let gt: Expr = BinOp {
+            kind: RelationOp::Gt.into(),
+            left: Box::new(
+                SizeOf {
+                    input: Box::new(filter(bi())),
+                }
+                .into(),
+            ),
+            right: Box::new(0i32.into()),
+        }
+        .into();
+        let bytes = root(gt);
+        let parsed = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+        assert!(matches!(parsed, ErgoTree::Parsed(_)));
+        assert_eq!(parsed.sigma_serialize_bytes().unwrap(), bytes);
+        let eq: Expr = BinOp {
+            kind: RelationOp::Eq.into(),
+            left: Box::new(
+                If {
+                    condition: Box::new(Expr::Const(true.into())),
+                    true_branch: Box::new(filter(bi())),
+                    false_branch: Box::new(filter(bi())),
+                }
+                .into(),
+            ),
+            right: Box::new(filter(bi())),
+        }
+        .into();
+        assert!(matches!(
+            ErgoTree::sigma_parse_bytes(&root(eq)),
+            Err(SigmaParsingError::TypeReadFailed(_))
+        ));
+    }
+
+    #[test]
+    fn a_type_read_in_a_parse_arm_that_throws_rejects_the_tree() {
+        // Every read sigmastate makes while it parses, of a child whose type read throws
+        // (F(BI), see above), is a `ClassCastException`: a method call's argument and object
+        // types (`MethodCallSerializer.scala:91`, `:96`), a property call's object type
+        // (`PropertyCallSerializer.scala:47`), a ValDef's right-hand side
+        // (`ValDefSerializer.scala:48`), a Map's mapper (`transformers.scala:38`), a
+        // SelectField's input (`:294`), a collection item (`ConcreteCollectionSerializer.scala
+        // :38`), and the root's, for rule 1001 (`ErgoTreeSerializer.scala`)
+        use crate::mir::bin_op::{BinOp, RelationOp};
+        use crate::mir::block::BlockValue;
+        use crate::mir::bool_to_sigma::BoolToSigmaProp;
+        use crate::mir::coll_map::Map;
+        use crate::mir::coll_size::SizeOf;
+        use crate::mir::collection::Collection;
+        use crate::mir::expr::type_read_tests::{bi, filter};
+        use crate::mir::expr::Expr;
+        use crate::mir::method_call::MethodCall;
+        use crate::mir::property_call::PropertyCall;
+        use crate::mir::val_def::ValDef;
+        use crate::serialization::SigmaSerializable;
+        use crate::types::scoll;
+        use crate::types::sfunc::SFunc;
+        use crate::types::stype::SType;
+        use alloc::boxed::Box;
+        use alloc::vec;
+        let f = || filter(bi());
+        let ser = |e: Expr| e.sigma_serialize_bytes().unwrap();
+        // sigmaProp(EQ(SizeOf(e), Int 0))
+        let size_is_0 = |e: Expr| -> alloc::vec::Vec<u8> {
+            let eq: Expr = BinOp {
+                kind: RelationOp::Eq.into(),
+                left: Box::new(SizeOf { input: Box::new(e) }.into()),
+                right: Box::new(0i32.into()),
+            }
+            .into();
+            sized_v3(&ser(BoolToSigmaProp {
+                input: Box::new(eq),
+            }
+            .into()))
+        };
+        let index_of = |obj: Expr, elem: Expr| -> Expr {
+            MethodCall {
+                obj: Box::new(obj),
+                method: scoll::INDEX_OF_METHOD.clone(),
+                args: vec![elem, 0i32.into()],
+                explicit_type_args: Default::default(),
+            }
+            .into()
+        };
+        let index_of_is_0 = |e: Expr| -> alloc::vec::Vec<u8> {
+            let eq: Expr = BinOp {
+                kind: RelationOp::Eq.into(),
+                left: Box::new(e),
+                right: Box::new(0i32.into()),
+            }
+            .into();
+            sized_v3(&ser(BoolToSigmaProp {
+                input: Box::new(eq),
+            }
+            .into()))
+        };
+        let block: Expr = BlockValue {
+            items: vec![ValDef {
+                id: 1.into(),
+                rhs: Box::new(f()),
+                tpe_args: vec![],
+            }
+            .into()],
+            result: Box::new(Expr::Const(true.into())),
+        }
+        .into();
+        // sigmaProp(EQ(SelectField(F(BI), 1), Int 1)), written by hand: the node's type is
+        // private
+        let mut select = vec![0xd1, 0x93, 0x8c];
+        select.extend(ser(f()));
+        select.extend([0x01, 0x04, 0x02]);
+        let cases: [(&str, alloc::vec::Vec<u8>); 8] = [
+            (
+                "MethodCall object",
+                index_of_is_0(index_of(f(), 0i32.into())),
+            ),
+            (
+                "MethodCall argument",
+                index_of_is_0(index_of(vec![1i32].into(), f())),
+            ),
+            (
+                "PropertyCall object",
+                size_is_0(
+                    PropertyCall {
+                        obj: Box::new(f()),
+                        method: scoll::INDICES_METHOD.clone(),
+                    }
+                    .into(),
+                ),
+            ),
+            (
+                "ValDef",
+                sized_v3(&ser(BoolToSigmaProp {
+                    input: Box::new(block),
+                }
+                .into())),
+            ),
+            (
+                "Map mapper",
+                size_is_0(
+                    Map {
+                        input: Box::new(vec![1i32].into()),
+                        mapper: Box::new(f()),
+                        mapper_sfunc: SFunc::new(vec![SType::SInt], SType::SInt),
+                    }
+                    .into(),
+                ),
+            ),
+            ("SelectField", sized_v3(&select)),
+            (
+                "collection item",
+                size_is_0(
+                    Collection::Exprs {
+                        elem_tpe: SType::SInt,
+                        items: vec![f()],
+                    }
+                    .into(),
+                ),
+            ),
+            ("root", sized_v3(&ser(f()))),
+        ];
+        let wrong: alloc::vec::Vec<&str> = cases
+            .iter()
+            .filter(|(_, bytes)| {
+                !matches!(
+                    ErgoTree::sigma_parse_bytes(bytes),
+                    Err(SigmaParsingError::TypeReadFailed(_))
+                )
+            })
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(wrong.is_empty(), "not a TypeReadFailed: {wrong:?}");
+    }
+
     #[test]
     fn a_unary_node_is_built_without_reading_its_input_type() {
         // SANTA `tree_parse_acceptance` #1: LogicalNot(Int 1); #10: OptionIsDefined(Int 1);
