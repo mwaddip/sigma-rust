@@ -20,6 +20,16 @@ pub struct OptionGet {
 }
 
 impl OptionGet {
+    /// Rebuild this node with a new input, keeping the element type this one was built with.
+    /// See `ByIndex::with_children` for why the printer cannot go back through its strict
+    /// constructor.
+    pub(crate) fn with_children(&self, input: Expr) -> Self {
+        Self {
+            input: Box::new(input),
+            elem_tpe: self.elem_tpe.clone(),
+        }
+    }
+
     /// Type
     pub fn tpe(&self) -> SType {
         (*self.elem_tpe).clone()
