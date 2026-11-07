@@ -132,12 +132,12 @@ pub(crate) fn coll_sigma_parse<R: SigmaByteRead>(
     for _ in 0..items_count {
         let item = Expr::sigma_parse(r)?;
         // sigmastate asserts each item's type as it reads it, an `AssertionError` on a
-        // mismatch (v6.0.6 `ConcreteCollectionSerializer.scala:38`)
-        if item.tpe() != elem_tpe {
+        // mismatch, and the read itself can throw (v6.0.7 `ConcreteCollectionSerializer.scala:38`)
+        let item_tpe = item.try_tpe()?;
+        if item_tpe != elem_tpe {
             return Err(SigmaParsingError::CollectionItemTypeMismatch(format!(
                 "an item of type {:?} in a collection of {:?}",
-                item.tpe(),
-                elem_tpe
+                item_tpe, elem_tpe
             )));
         }
         items.push(item);

@@ -171,8 +171,13 @@ impl ErgoTree {
         // Real consensus ErgoTrees are always SigmaProp-rooted. `check_root_tpe`
         // is false only on the `arbitrary`-gated lenient test/conformance path
         // (`sigma_parse_bytes_lenient`), which evaluates arbitrary-typed roots.
-        if check_root_tpe && root.tpe() != SType::SSigmaProp {
-            return Err(ErgoTreeError::RootTpeError(root.tpe()));
+        if check_root_tpe {
+            // rule 1001 reads the root's type, a read that can throw: a `ClassCastException`,
+            // not the rule's `ValidationException`
+            let root_tpe = root.try_tpe()?;
+            if root_tpe != SType::SSigmaProp {
+                return Err(ErgoTreeError::RootTpeError(root_tpe));
+            }
         }
         r.set_constant_store(previous_store);
         Ok(ParsedErgoTree {
