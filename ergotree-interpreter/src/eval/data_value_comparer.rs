@@ -112,9 +112,10 @@ pub(crate) fn eq_with_cost<'ctx>(
             // DataValueComparer case 2 (bug 4).
             ctx.add_jit_cost(MATCH_TYPE_COST)?;
             let n = l_coll.len();
-            if n != r_coll.len() {
-                // Scala short-circuits on length mismatch without charging
-                // per-item or base cost (bug 5).
+            // Scala short-circuits on a length or item-type mismatch without charging
+            // per-item or base cost (bug 5; `DataValueComparer.scala:318-326`, `coll1.tItem !=
+            // coll2.tItem`). The item types decide even for two empty collections.
+            if n != r_coll.len() || l_coll.elem_tpe() != r_coll.elem_tpe() {
                 return Ok(false);
             }
             // Both JVM coll-eq paths short-circuit the *per-item cost* on the
@@ -621,5 +622,62 @@ mod tests {
         let before = ctx.jit_cost_value();
         assert!(!eq_with_cost(&outer_l, &outer_r, &ctx).unwrap());
         assert_eq!(ctx.jit_cost_value() - before, 31);
+    }
+
+    // sigmastate returns false for two collections whose item types differ, after its one
+    // `MatchType` charge and before any item (v6.0.7 `DataValueComparer.scala:318-326`)
+
+    fn empty_coll(elem_tpe: SType) -> Value<'static> {
+        Value::Coll(CollKind::WrappedColl {
+            elem_tpe,
+            items: Arc::from(vec![]),
+        })
+    }
+
+    fn int_pair() -> SType {
+        SType::STuple(ergotree_ir::types::stuple::STuple::pair(
+            SType::SInt,
+            SType::SInt,
+        ))
+    }
+
+    #[test]
+    fn empty_colls_of_different_tuple_item_types_are_unequal() {
+        let ctx = force_any_val::<Context>();
+        let before = ctx.jit_cost_value();
+        let long_pair = SType::STuple(ergotree_ir::types::stuple::STuple::pair(
+            SType::SLong,
+            SType::SLong,
+        ));
+        assert!(!eq_with_cost(&empty_coll(int_pair()), &empty_coll(long_pair), &ctx).unwrap());
+        assert_eq!(ctx.jit_cost_value() - before, MATCH_TYPE_COST);
+    }
+
+    #[test]
+    fn empty_colls_of_different_nested_item_types_are_unequal() {
+        let ctx = force_any_val::<Context>();
+        let before = ctx.jit_cost_value();
+        let ints = SType::SColl(Arc::new(SType::SInt));
+        let longs = SType::SColl(Arc::new(SType::SLong));
+        assert!(!eq_with_cost(&empty_coll(ints), &empty_coll(longs), &ctx).unwrap());
+        assert_eq!(ctx.jit_cost_value() - before, MATCH_TYPE_COST);
+    }
+
+    #[test]
+    fn equal_tuple_colls_stay_equal() {
+        let ctx = force_any_val::<Context>();
+        let before = ctx.jit_cost_value();
+        let pairs = || -> Value<'static> {
+            Value::Coll(CollKind::WrappedColl {
+                elem_tpe: int_pair(),
+                items: Arc::from(vec![
+                    Value::Tup([Value::Int(1), Value::Int(2)].into()),
+                    Value::Tup([Value::Int(3), Value::Int(4)].into()),
+                ]),
+            })
+        };
+        assert!(eq_with_cost(&pairs(), &pairs(), &ctx).unwrap());
+        // the cost on `368af3be`, before the item-type comparison
+        assert_eq!(ctx.jit_cost_value() - before, 35);
     }
 }
