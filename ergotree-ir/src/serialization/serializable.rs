@@ -527,9 +527,10 @@ impl SigmaParsingError {
             NotImplementedYet(_) => Validation,
             // rules 1011 / 1016 `CheckAndGetMethod` (`methods.scala`)
             UnknownMethodId(_, _) => Validation,
-            // rule 1009 `CheckSerializableTypeCode` (`CoreDataSerializer.scala:149-170`); the
-            // UnsignedBigInt-below-v3 site is a `SerializerException` on the JVM, but a tree
-            // never reaches it: the type parse refuses the type code first (`types.rs`)
+            // rule 1009 `CheckSerializableTypeCode` (`CoreDataSerializer.scala:149-170`). Two
+            // sites are a `SerializerException` on the JVM, and a tree reaches neither:
+            // UnsignedBigInt data below v3, whose type code the type parse refuses first
+            // (`types.rs`), and `NoType` data, which has no type code (`data.rs`)
             NotSupported(_) => Validation,
             // rule 1020 `CheckZeroWidthCollection` (`CoreDataSerializer.scala:168`)
             ZeroWidthCollection(_) => Validation,
@@ -593,7 +594,9 @@ impl SigmaParsingError {
                 Other
             }
             // `NoSuchElementException`, `IndexOutOfBoundsException`, `MatchError`,
-            // `ArithmeticException`, `NegativeArraySizeException`, `RuntimeException`
+            // `ArithmeticException`, `NegativeArraySizeException`, `RuntimeException`; the
+            // placeholder and `ValUse` lookups are `ConstantPlaceholderSerializer.scala:19` and
+            // `ValDefTypeStore.scala:11`
             RegisterIdOutOfRange(_)
             | ValDefIdNotFound(_)
             | ConstantForPlaceholderNotFound(_)
@@ -605,10 +608,10 @@ impl SigmaParsingError {
             | InvalidBigIntSize(_)
             | TupleFieldOutOfBounds(_) => Other,
             // no validation rule, and none is raised on a path from a tree's body: an input's
-            // context extension (`sys.error`, `ContextExtension.scala:55`, `:60`), a
-            // transaction output's token digest index (`sys.error`,
-            // `ErgoBoxCandidate.scala:210-211`), a P2SH address's tree, and conversions that
-            // cannot fail
+            // context extension (`SigmaSerializer.error`, a `SerializerException`,
+            // `ContextExtension.scala:55`, `:60`), a transaction output's token digest index
+            // (`sys.error`, `ErgoBoxCandidate.scala:210-211`), a P2SH address's tree, and
+            // conversions that cannot fail
             Misc(_) | ValueOutOfBounds(_) | InvalidArgument(_) | BoundedVecOutOfBounds(_) => Other,
             // not raised in this crate
             TupleItemsOutOfBounds(_) | SerializationError(_) | InvalidRegisterValue(_) => Other,

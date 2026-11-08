@@ -544,8 +544,8 @@ pub fn parse_box_with_indexed_digests<R: SigmaByteRead>(
     let tokens = if tokens.is_empty() {
         None
     } else {
-        // cannot fail: 1 to 255 tokens, a `u8` count of which none is `None` (`bounded_vec`
-        // has no constructor that says so)
+        // cannot fail: the count is a `u8` and not 0, so 1 to 255 tokens (`bounded_vec` has
+        // no infallible constructor to say so)
         Some(BoxTokens::from_vec(tokens)?)
     };
 
