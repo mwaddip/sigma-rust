@@ -13,7 +13,6 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
-use core::convert::TryInto;
 use hashbrown::HashMap;
 use thiserror::Error;
 
@@ -206,7 +205,8 @@ impl SigmaSerializable for NonMandatoryRegisters {
             value.check_v6_type()?;
             additional_regs.push(RegisterValue::from(value));
         }
-        Ok(additional_regs.try_into()?)
+        // at most `MAX_SIZE`: the seventh register failed above
+        Ok(NonMandatoryRegisters(additional_regs))
     }
 }
 

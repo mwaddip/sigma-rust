@@ -123,13 +123,17 @@ impl SigmaSerializable for Cthreshold {
             items.push(SigmaBoolean::sigma_parse(r)?);
         }
         // sigmastate's CTHRESHOLD requires 0 <= k <= n <= 255 once the children are read
-        // (`SigmaBoolean.scala:223`)
-        if items.len() > 255 || usize::from(k) > items.len() {
-            return Err(SigmaParsingError::CthresholdOutOfBounds(k, items.len()));
+        // (`SigmaBoolean.scala:223`): `n <= 255` is the children's own bound
+        let n = items.len();
+        let children: CthresholdItems<SigmaBoolean> = items
+            .try_into()
+            .map_err(|_| SigmaParsingError::CthresholdOutOfBounds(k, n))?;
+        if usize::from(k) > n {
+            return Err(SigmaParsingError::CthresholdOutOfBounds(k, n));
         }
         Ok(Cthreshold {
             k: k as u8,
-            children: items.try_into()?,
+            children,
         })
     }
 }
