@@ -99,6 +99,7 @@ pub mod sigma_or;
 pub mod sigma_prop_bytes;
 pub mod sigma_prop_is_proven;
 pub mod subst_const;
+pub mod tagged_variable;
 /// Perform a lookup of key in a tree
 pub mod tree_lookup;
 /// Tuple of elements

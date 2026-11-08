@@ -64,6 +64,7 @@ use crate::mir::sigma_or::SigmaOr;
 use crate::mir::sigma_prop_bytes::SigmaPropBytes;
 use crate::mir::sigma_prop_is_proven::SigmaPropIsProven;
 use crate::mir::subst_const::SubstConstants;
+use crate::mir::tagged_variable::TaggedVariable;
 use crate::mir::tree_lookup::TreeLookup;
 use crate::mir::tuple::Tuple;
 use crate::mir::upcast::Upcast;
@@ -179,6 +180,7 @@ impl Print for Expr {
             Expr::ModQ(v) => v.print(w),
             Expr::ModQArithOp(v) => v.print(w),
             Expr::SigmaPropIsProven(v) => v.print(w),
+            Expr::TaggedVariable(v) => v.print(w),
         }
     }
 }
@@ -1192,6 +1194,13 @@ impl Print for SigmaPropIsProven {
             input: Box::new(input),
         }
         .into())
+    }
+}
+
+impl Print for TaggedVariable {
+    fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
+        write!(w, "taggedVar[{}]({})", self.var_tpe, self.var_id)?;
+        Ok(self.clone().into())
     }
 }
 

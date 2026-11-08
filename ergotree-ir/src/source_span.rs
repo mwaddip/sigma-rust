@@ -216,6 +216,7 @@ impl Expr {
             Expr::ModQ(_) => SourceSpan::empty(),
             Expr::ModQArithOp(_) => SourceSpan::empty(),
             Expr::SigmaPropIsProven(_) => SourceSpan::empty(),
+            Expr::TaggedVariable(_) => SourceSpan::empty(),
         }
     }
 }

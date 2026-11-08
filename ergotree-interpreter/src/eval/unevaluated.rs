@@ -29,7 +29,9 @@ mod tests {
     use ergotree_ir::mir::mod_q::{ModQ, ModQArithOp, ModQArithOpKind};
     use ergotree_ir::mir::option_get::OptionGet;
     use ergotree_ir::mir::sigma_prop_is_proven::SigmaPropIsProven;
+    use ergotree_ir::mir::tagged_variable::TaggedVariable;
     use ergotree_ir::mir::unary_op::OneArgOpTryBuild;
+    use ergotree_ir::types::stype::SType;
 
     fn bin_op(kind: BinOpKind, left: Expr, right: Expr) -> Expr {
         BinOp {
@@ -133,5 +135,12 @@ mod tests {
         }
         .into();
         assert_not_evaluated(try_eval_out_wo_ctx::<bool>(&expr), "SigmaPropIsProven");
+    }
+
+    /// sigmastate defines no `eval` for `TaggedVariable` (`values.scala:455-461`)
+    #[test]
+    fn tagged_variable_does_not_evaluate() {
+        let expr: Expr = TaggedVariable::new(1, SType::SBoolean).into();
+        assert_not_evaluated(try_eval_out_wo_ctx::<bool>(&expr), "TaggedVariable");
     }
 }

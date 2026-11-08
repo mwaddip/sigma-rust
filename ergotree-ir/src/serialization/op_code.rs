@@ -38,6 +38,7 @@ impl OpCode {
     /// and the corresponding data.
     pub const LAST_CONSTANT_CODE: OpCode = OpCode(Self::LAST_DATA_TYPE.value() + 1);
 
+    pub const TAGGED_VARIABLE: OpCode = Self::new_op_code(1);
     pub const VAL_USE: OpCode = Self::new_op_code(2);
     pub const CONSTANT_PLACEHOLDER: OpCode = Self::new_op_code(3);
     pub const SUBST_CONSTANTS: OpCode = Self::new_op_code(4); // reserved 5 - 9 (5)

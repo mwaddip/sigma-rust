@@ -79,6 +79,7 @@ use super::sigma_or::SigmaOr;
 use super::sigma_prop_bytes::SigmaPropBytes;
 use super::sigma_prop_is_proven::SigmaPropIsProven;
 use super::subst_const::SubstConstants;
+use super::tagged_variable::TaggedVariable;
 use super::tree_lookup::TreeLookup;
 use super::tuple::Tuple;
 use super::upcast::Upcast;
@@ -247,6 +248,8 @@ pub enum Expr {
     ModQArithOp(ModQArithOp),
     /// Whether a `SigmaProp` is proven (parsed, never evaluated)
     SigmaPropIsProven(SigmaPropIsProven),
+    /// A context variable, `GetVar`'s predecessor (parsed, never evaluated)
+    TaggedVariable(TaggedVariable),
 }
 
 impl Expr {
@@ -322,6 +325,7 @@ impl Expr {
             Expr::ModQ(v) => v.tpe(),
             Expr::ModQArithOp(v) => v.tpe(),
             Expr::SigmaPropIsProven(v) => v.tpe(),
+            Expr::TaggedVariable(v) => v.tpe(),
         }
     }
 
@@ -617,6 +621,7 @@ impl Traversable for Expr {
             Expr::ModQ(op) => op.children(),
             Expr::ModQArithOp(op) => op.children(),
             Expr::SigmaPropIsProven(op) => op.children(),
+            Expr::TaggedVariable(op) => op.children(),
         }
     }
     fn children_mut<'a>(&'a mut self) -> Box<dyn Iterator<Item = &'a mut Expr> + 'a> {
@@ -690,6 +695,7 @@ impl Traversable for Expr {
             Expr::ModQ(op) => op.children_mut(),
             Expr::ModQArithOp(op) => op.children_mut(),
             Expr::SigmaPropIsProven(op) => op.children_mut(),
+            Expr::TaggedVariable(op) => op.children_mut(),
         }
     }
 }

@@ -120,6 +120,7 @@ impl Evaluable for Expr {
             Expr::ModQ(_) => Err(not_evaluated("ModQ")),
             Expr::ModQArithOp(_) => Err(not_evaluated("ModQArithOp")),
             Expr::SigmaPropIsProven(_) => Err(not_evaluated("SigmaPropIsProven")),
+            Expr::TaggedVariable(_) => Err(not_evaluated("TaggedVariable")),
         };
         res.enrich_err(self.span(), env)
     }
