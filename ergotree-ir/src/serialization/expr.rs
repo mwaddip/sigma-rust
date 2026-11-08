@@ -68,6 +68,7 @@ use crate::mir::select_field::SelectField;
 use crate::mir::sigma_and::SigmaAnd;
 use crate::mir::sigma_or::SigmaOr;
 use crate::mir::sigma_prop_bytes::SigmaPropBytes;
+use crate::mir::sigma_prop_is_proven::SigmaPropIsProven;
 use crate::mir::subst_const::SubstConstants;
 use crate::mir::tree_lookup::TreeLookup;
 use crate::mir::tuple::Tuple;
@@ -244,6 +245,7 @@ impl Expr {
                 TreeLookup::OP_CODE => Ok(TreeLookup::sigma_parse(r)?.into()),
                 CreateAvlTree::OP_CODE => Ok(CreateAvlTree::sigma_parse(r)?.into()),
                 ModQ::OP_CODE => Ok(ModQ::sigma_parse(r)?.into()),
+                SigmaPropIsProven::OP_CODE => Ok(SigmaPropIsProven::sigma_parse(r)?.into()),
                 OpCode::PLUS_MOD_Q => {
                     Ok(ModQArithOp::sigma_parse_operands(ModQArithOpKind::PlusModQ, r)?.into())
                 }
@@ -374,6 +376,7 @@ impl SigmaSerializable for Expr {
             Expr::TreeLookup(op) => op.sigma_serialize_w_opcode(w),
             Expr::CreateAvlTree(op) => op.sigma_serialize_w_opcode(w),
             Expr::ModQ(op) => op.sigma_serialize_w_opcode(w),
+            Expr::SigmaPropIsProven(op) => op.sigma_serialize_w_opcode(w),
             // `ModQArithOpSerializer.serialize`: the opcode, then the two operands
             Expr::ModQArithOp(op) => {
                 op.op_code().sigma_serialize(w)?;

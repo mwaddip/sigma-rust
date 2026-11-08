@@ -215,6 +215,7 @@ impl Expr {
             Expr::CreateAvlTree(_) => SourceSpan::empty(),
             Expr::ModQ(_) => SourceSpan::empty(),
             Expr::ModQArithOp(_) => SourceSpan::empty(),
+            Expr::SigmaPropIsProven(_) => SourceSpan::empty(),
         }
     }
 }

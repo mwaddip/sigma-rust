@@ -62,6 +62,7 @@ use crate::mir::select_field::SelectField;
 use crate::mir::sigma_and::SigmaAnd;
 use crate::mir::sigma_or::SigmaOr;
 use crate::mir::sigma_prop_bytes::SigmaPropBytes;
+use crate::mir::sigma_prop_is_proven::SigmaPropIsProven;
 use crate::mir::subst_const::SubstConstants;
 use crate::mir::tree_lookup::TreeLookup;
 use crate::mir::tuple::Tuple;
@@ -177,6 +178,7 @@ impl Print for Expr {
             Expr::CreateAvlTree(v) => v.print(w),
             Expr::ModQ(v) => v.print(w),
             Expr::ModQArithOp(v) => v.print(w),
+            Expr::SigmaPropIsProven(v) => v.print(w),
         }
     }
 }
@@ -1177,6 +1179,17 @@ impl Print for ModQArithOp {
             left: Box::new(left),
             right: Box::new(right),
             kind: self.kind,
+        }
+        .into())
+    }
+}
+
+impl Print for SigmaPropIsProven {
+    fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
+        let input = self.input.print(w)?;
+        write!(w, ".isProven")?;
+        Ok(SigmaPropIsProven {
+            input: Box::new(input),
         }
         .into())
     }

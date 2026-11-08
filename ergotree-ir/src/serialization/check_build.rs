@@ -230,6 +230,8 @@ fn check_constructor(expr: &Expr) -> Result<(), SigmaParsingError> {
         // (`transformers.scala:656`, `:336`)
         Expr::OptionIsDefined(op) => op.expr.input.try_tpe().map(|_| ()),
         Expr::SigmaPropBytes(op) => op.input.try_tpe().map(|_| ()),
+        // `SigmaPropIsProven`'s `val opType` reads its input's type (`transformers.scala:321-325`)
+        Expr::SigmaPropIsProven(op) => op.input.try_tpe().map(|_| ()),
         _ => Ok(()),
     }
 }

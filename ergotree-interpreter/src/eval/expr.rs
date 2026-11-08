@@ -119,6 +119,7 @@ impl Evaluable for Expr {
             Expr::CreateAvlTree(_) => Err(not_evaluated("CreateAvlTree")),
             Expr::ModQ(_) => Err(not_evaluated("ModQ")),
             Expr::ModQArithOp(_) => Err(not_evaluated("ModQArithOp")),
+            Expr::SigmaPropIsProven(_) => Err(not_evaluated("SigmaPropIsProven")),
         };
         res.enrich_err(self.span(), env)
     }

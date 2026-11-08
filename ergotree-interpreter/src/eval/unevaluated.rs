@@ -28,6 +28,7 @@ mod tests {
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::mod_q::{ModQ, ModQArithOp, ModQArithOpKind};
     use ergotree_ir::mir::option_get::OptionGet;
+    use ergotree_ir::mir::sigma_prop_is_proven::SigmaPropIsProven;
     use ergotree_ir::mir::unary_op::OneArgOpTryBuild;
 
     fn bin_op(kind: BinOpKind, left: Expr, right: Expr) -> Expr {
@@ -118,5 +119,19 @@ mod tests {
             .into();
             assert_not_evaluated(try_eval_out_wo_ctx::<BigInt256>(&expr), "ModQArithOp");
         }
+    }
+
+    /// sigmastate defines no `eval` for `SigmaPropIsProven` (`transformers.scala:321-329`)
+    #[test]
+    fn is_proven_does_not_evaluate() {
+        let true_prop: Expr = ergotree_ir::mir::bool_to_sigma::BoolToSigmaProp {
+            input: Expr::from(true).into(),
+        }
+        .into();
+        let expr: Expr = SigmaPropIsProven {
+            input: true_prop.into(),
+        }
+        .into();
+        assert_not_evaluated(try_eval_out_wo_ctx::<bool>(&expr), "SigmaPropIsProven");
     }
 }

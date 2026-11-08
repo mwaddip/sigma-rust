@@ -30,6 +30,7 @@ use super::negation::Negation;
 use super::option_get::OptionGet;
 use super::option_is_defined::OptionIsDefined;
 use super::sigma_prop_bytes::SigmaPropBytes;
+use super::sigma_prop_is_proven::SigmaPropIsProven;
 use alloc::boxed::Box;
 
 /// IR nodes with one input value(expr)
@@ -100,4 +101,5 @@ impl_one_arg_op_parse_build!(
     OptionGet,
     OptionIsDefined,
     SigmaPropBytes,
+    SigmaPropIsProven,
 );
