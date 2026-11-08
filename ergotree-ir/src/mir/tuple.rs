@@ -55,7 +55,7 @@ impl SigmaSerializable for Tuple {
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         Ok(Tuple {
-            items: tuple_items_sigma_parse(r)?.try_into()?,
+            items: tuple_items_sigma_parse(r)?,
         })
     }
 }
@@ -64,13 +64,11 @@ impl SigmaSerializable for Tuple {
 /// many values, and no arity check. Read the same way in a tree and in a register.
 pub(crate) fn tuple_items_sigma_parse<R: SigmaByteRead>(
     r: &mut R,
-) -> Result<Vec<Expr>, SigmaParsingError> {
+) -> Result<TupleItems<Expr>, SigmaParsingError> {
     let size = r.get_i8()?;
-    if size < 0 {
-        // `safeNewArray` throws a `NegativeArraySizeException`
-        return Err(SigmaParsingError::NegativeTupleSize(size));
-    }
-    (0..size).map(|_| Expr::sigma_parse(r)).collect()
+    // a negative size: `safeNewArray` throws a `NegativeArraySizeException`
+    let count = u8::try_from(size).map_err(|_| SigmaParsingError::NegativeTupleSize(size))?;
+    TupleItems::read_with(count, || Expr::sigma_parse(r))
 }
 
 impl_traversable_expr!(Tuple, arr items);

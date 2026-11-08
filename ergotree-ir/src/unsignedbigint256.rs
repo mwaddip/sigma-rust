@@ -334,6 +334,8 @@ impl SigmaSerializable for UnsignedBigInt {
         r.get_bytes_into(&mut buf[32 - size..])?;
         match UnsignedBigInt::from_be_slice(&buf) {
             Some(x) => Ok(x),
+            // cannot happen: 32 bytes always fit a `U256` (bnum's infallible `from_be_bytes`
+            // needs its `nightly` feature)
             None => Err(SigmaParsingError::ValueOutOfBounds("".into())),
         }
     }

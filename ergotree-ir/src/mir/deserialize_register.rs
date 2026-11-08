@@ -61,7 +61,7 @@ impl SigmaSerializable for DeserializeRegister {
             RegisterId::try_from(id).map_err(|_| SigmaParsingError::RegisterIdOutOfRange(id))?;
         let tpe = SType::sigma_parse(r)?;
         let default = Option::<Box<Expr>>::sigma_parse(r)?;
-        Ok(Self::new(reg, tpe, default)?)
+        Ok(Self { reg, tpe, default })
     }
 }
 
