@@ -41,9 +41,15 @@ impl STypeVar {
     /// byte-for-byte (see `jvm_lossy_utf8`) -- and stored canonicalized, rather than
     /// rejected. (`Result` is kept for API stability; this no longer errors.)
     pub fn new_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidArgumentError> {
-        Ok(Self {
-            name_bytes: jvm_lossy_utf8(&bytes),
-        })
+        Ok(Self::from_jvm_bytes(&bytes))
+    }
+
+    /// A type variable named by `bytes` as the JVM decodes them (`jvm_lossy_utf8`), which
+    /// cannot fail
+    pub(crate) fn from_jvm_bytes(bytes: &[u8]) -> Self {
+        Self {
+            name_bytes: jvm_lossy_utf8(bytes),
+        }
     }
 
     /// Returns text representation (e.g "T", etc.)
@@ -135,7 +141,7 @@ impl SigmaSerializable for STypeVar {
         let name_len = r.get_u8()?;
         let mut bytes = vec![0; name_len as usize];
         r.get_bytes_into(&mut bytes)?;
-        Ok(STypeVar::new_from_bytes(bytes)?)
+        Ok(STypeVar::from_jvm_bytes(&bytes))
     }
 }
 
