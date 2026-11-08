@@ -11,7 +11,6 @@ use crate::types::stype_param::STypeVar;
 
 use super::sigma_byte_reader::SigmaByteRead;
 use super::sigma_byte_writer::SigmaByteWrite;
-use super::types::TypeCode;
 use super::SigmaParsingError;
 use super::SigmaSerializable;
 use super::SigmaSerializationError;
@@ -74,10 +73,12 @@ impl SigmaSerializable for PropertyCall {
     }
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
-        let type_id = TypeCode::sigma_parse(r)?;
+        // the type id is a raw byte, looked up with the method once the object is read (v6.0.7
+        // `PropertyCallSerializer.scala:30-34`)
+        let type_id = r.get_u8()?;
         let method_id = MethodId::sigma_parse(r)?;
         let obj = Expr::sigma_parse(r)?;
-        let method = SMethod::from_ids(type_id, method_id)?;
+        let method = SMethod::from_type_byte(type_id, method_id)?;
         // Reject a method whose required ErgoTree version exceeds the tree's, at
         // DESERIALIZE — the JVM gates this in `SMethod.fromIds`, so it fires
         // structurally over the whole tree (a dead `if` branch is still parsed,
@@ -85,10 +86,7 @@ impl SigmaSerializable for PropertyCall {
         // (e.g. `Global.none[T]`) was missing it, so a v6 property in a pre-v3
         // tree was accepted.
         if r.tree_version() < method.method_raw.min_version {
-            return Err(SigmaParsingError::UnknownMethodId(
-                method_id,
-                type_id.value(),
-            ));
+            return Err(SigmaParsingError::UnknownMethodId(method_id, type_id));
         }
         // v6.0.7 `PropertyCallSerializer.scala:30-52`. A method with explicit type arguments
         // reads their types and substitutes them, and nothing else: the object's type is not
@@ -270,6 +268,34 @@ mod tests {
         assert_eq!(
             property_call(&printed).unwrap().explicit_type_args,
             t_is(SType::SInt)
+        );
+    }
+
+    #[test]
+    fn the_type_id_is_resolved_after_the_object_is_read() {
+        // sigmastate reads the type id as a raw byte, then the method id and the object, and
+        // only then looks it up in `SMethod.fromIds`, rule 1010 (v6.0.7
+        // `PropertyCallSerializer.scala:30-34`)
+        use crate::ergo_tree::ErgoTreeError;
+        // the input ends at the method id: no `ValidationException`, the tree rejects
+        let parsed = ErgoTree::sigma_parse_bytes(&hex("0902dbff"));
+        assert!(
+            matches!(parsed, Err(SigmaParsingError::Io(_))),
+            "{parsed:?}"
+        );
+        // the call complete: type id 0xff has no methods, rule 1010 degrades the tree
+        let parsed = ErgoTree::sigma_parse_bytes(&hex("0903dbff017f"));
+        assert!(
+            matches!(
+                parsed,
+                Ok(ErgoTree::Unparsed {
+                    error: ErgoTreeError::SigmaParsingError(SigmaParsingError::NotImplementedYet(
+                        _
+                    )),
+                    ..
+                })
+            ),
+            "{parsed:?}"
         );
     }
 }

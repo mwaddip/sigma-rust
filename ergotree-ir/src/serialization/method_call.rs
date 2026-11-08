@@ -10,7 +10,6 @@ use crate::types::smethod::SMethod;
 use super::property_call::{parse_explicit_type_args, serialize_explicit_type_args};
 use super::sigma_byte_reader::SigmaByteRead;
 use super::sigma_byte_writer::SigmaByteWrite;
-use super::types::TypeCode;
 use super::SigmaParsingError;
 use super::SigmaSerializable;
 use super::SigmaSerializeResult;
@@ -25,7 +24,9 @@ impl SigmaSerializable for MethodCall {
     }
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
-        let type_id = TypeCode::sigma_parse(r)?;
+        // the type id is a raw byte, looked up with the method once the call is read (v6.0.7
+        // `MethodCallSerializer.scala:47-56`)
+        let type_id = r.get_u8()?;
         let method_id = MethodId::sigma_parse(r)?;
         let obj = Expr::sigma_parse(r)?;
         let args = Vec::<Expr>::sigma_parse(r)?;
@@ -34,12 +35,9 @@ impl SigmaSerializable for MethodCall {
         if r.tree_version() >= ErgoTreeVersion::V3 && args.is_empty() {
             return Err(SigmaParsingError::MethodCallWithoutArguments);
         }
-        let method = SMethod::from_ids(type_id, method_id)?;
+        let method = SMethod::from_type_byte(type_id, method_id)?;
         if r.tree_version() < method.method_raw.min_version {
-            return Err(SigmaParsingError::UnknownMethodId(
-                method_id,
-                type_id.value(),
-            ));
+            return Err(SigmaParsingError::UnknownMethodId(method_id, type_id));
         }
         let explicit_type_args = parse_explicit_type_args(&method, r)?;
         // `getSpecializedMethodFor`: the explicit types, then `specializeFor` over the
@@ -289,5 +287,46 @@ mod tests {
         .unwrap()
         .into();
         roundtrip_new_feature(&mc, ErgoTreeVersion::V3);
+    }
+
+    #[test]
+    fn the_type_id_is_resolved_after_the_call_is_read() {
+        // sigmastate reads the type id as a raw byte and looks it up in `SMethod.fromIds`
+        // (rule 1010) only after the method id, the object, the arguments and the v3 args
+        // assert (v6.0.7 `MethodCallSerializer.scala:47-56`). A failure on the way is no
+        // `ValidationException` and rejects the tree; only a complete call degrades it.
+        use crate::ergo_tree::{ErgoTree, ErgoTreeError};
+        use crate::serialization::{SigmaParsingError, SigmaSerializable};
+        let parse = |tree_hex: &str| ErgoTree::sigma_parse_bytes(&hex(tree_hex));
+        // the input ends at the method id
+        let parsed = parse("0902dcff");
+        assert!(
+            matches!(parsed, Err(SigmaParsingError::Io(_))),
+            "{parsed:?}"
+        );
+        // v3, no arguments
+        assert_eq!(
+            parse("0b05dcff017f00"),
+            Err(SigmaParsingError::MethodCallWithoutArguments)
+        );
+        // the object is a constant of type `Any`, which has no data serializer
+        assert_eq!(
+            parse("0905dcff016100"),
+            Err(SigmaParsingError::NonSerializableTypeCode(0x61))
+        );
+        // v1, the call complete: type id 0xff has no methods, rule 1010
+        let parsed = parse("0905dcff017f00");
+        assert!(
+            matches!(
+                parsed,
+                Ok(ErgoTree::Unparsed {
+                    error: ErgoTreeError::SigmaParsingError(SigmaParsingError::NotImplementedYet(
+                        _
+                    )),
+                    ..
+                })
+            ),
+            "{parsed:?}"
+        );
     }
 }

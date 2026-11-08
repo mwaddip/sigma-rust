@@ -1,3 +1,4 @@
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -45,6 +46,21 @@ impl SMethod {
         SMethod {
             obj_type,
             method_raw,
+        }
+    }
+
+    /// [`Self::from_ids`] over a type id as sigmastate reads it, a raw byte. `SMethod.fromIds`
+    /// checks rule 1010 `CheckTypeWithMethods` first (v6.0.7 `SMethod.scala:344-349`), which a
+    /// byte that is no type code fails as a type code without methods does.
+    pub(crate) fn from_type_byte(
+        type_id: u8,
+        method_id: MethodId,
+    ) -> Result<Self, SigmaParsingError> {
+        match <TypeCode as num_traits::FromPrimitive>::from_u8(type_id) {
+            Some(type_code) => Self::from_ids(type_code, method_id),
+            None => Err(SigmaParsingError::NotImplementedYet(format!(
+                "cannot find STypeCompanion for type id {type_id}"
+            ))),
         }
     }
 
