@@ -533,8 +533,11 @@ impl SigmaParsingError {
             NotSupported(_) => Validation,
             // rule 1020 `CheckZeroWidthCollection` (`CoreDataSerializer.scala:168`)
             ZeroWidthCollection(_) => Validation,
-            // rule 1012 `CheckHeaderSizeBit` for a missing size bit; the others are an
-            // `IllegalArgumentException` and an `IOException`
+            // rule 1012 `CheckHeaderSizeBit` for a missing size bit. `IoError` is the end of
+            // input at the header byte, a `BufferUnderflowException`; it is never the position
+            // limit, as a tree's window starts at its header byte
+            // (`ErgoTreeSerializer.scala:144-145`). The header parse does not raise
+            // `VersionError`.
             ErgoTreeHeaderError(e) => match e {
                 crate::ergo_tree::ErgoTreeHeaderError::InvalidSizeBit(_) => Validation,
                 crate::ergo_tree::ErgoTreeHeaderError::VersionError(_)
@@ -601,12 +604,13 @@ impl SigmaParsingError {
             | ArrayLengthExceeded(_)
             | InvalidBigIntSize(_)
             | TupleFieldOutOfBounds(_) => Other,
-            // mostly sigma-rust's own refusals where sigmastate builds the node (a strict
-            // `new()`, a tuple below 2 items, a bound with no JVM counterpart); the rest are
-            // `RuntimeException`s (`ContextExtension.scala:55`, `:60`, `ErgoBoxCandidate`'s
-            // digest lookup)
+            // no validation rule, and none is raised on a path from a tree's body: an input's
+            // context extension (`sys.error`, `ContextExtension.scala:55`, `:60`), a
+            // transaction output's token digest index (`sys.error`,
+            // `ErgoBoxCandidate.scala:210-211`), a P2SH address's tree, and conversions that
+            // cannot fail
             Misc(_) | ValueOutOfBounds(_) | InvalidArgument(_) | BoundedVecOutOfBounds(_) => Other,
-            // not raised on a parse path
+            // not raised in this crate
             TupleItemsOutOfBounds(_) | SerializationError(_) | InvalidRegisterValue(_) => Other,
         }
     }

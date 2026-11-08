@@ -162,8 +162,8 @@ fn item_script_data(item: &Expr) -> Result<Literal, TryExtractFromError> {
 /// represents every tuple but a pair that way (`TupleData`, `package.scala:67`), which sigma-rust's
 /// tuple data stands for, so only a pair differs: a pair is a `Tuple2` in sigmastate, and a pair
 /// expression's data stays the collection, which the pair's type checks reject
-/// (`Value.checkType`). A tuple of fewer than two items has no tuple data here, so it keeps the
-/// collection too.
+/// (`Value.checkType`). A tuple of fewer than two items keeps the collection too, sigmastate's
+/// own form of it.
 fn tuple_script_data(items: &[Expr]) -> Result<Literal, TryExtractFromError> {
     let data = items
         .iter()

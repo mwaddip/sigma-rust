@@ -366,15 +366,7 @@ impl<'ctx> Value<'ctx> {
                     })
                 }
             },
-            Value::Tup(tup) => Value::Tup(
-                #[allow(clippy::unwrap_used)]
-                // The resulting tuple will be of the same length, so BoundedVec creation won't fail
-                tup.iter()
-                    .map(|v| v.to_static_shared(memo))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
-            ),
+            Value::Tup(tup) => Value::Tup(tup.mapped_ref(|v| v.to_static_shared(memo))),
             Value::Context => Value::Context,
             Value::String(s) => Value::String(s.clone()),
             Value::Header(h) => Value::Header(h.clone()),

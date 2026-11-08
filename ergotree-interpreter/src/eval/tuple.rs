@@ -17,8 +17,8 @@ impl Evaluable for Tuple {
         // (sigma `values.scala`: "in v5.0 version we support only tuples of 2
         // elements to be equivalent with v4.x"). The check is unconditional —
         // no version gate, and sigma-state 6.0.3 evaluates every height through
-        // it. sigma-rust models tuples as flat N-ary (`TupleItems =
-        // BoundedVec<2,255>`), so without this guard it accepts arity>=3 tuples
+        // it. sigma-rust models tuples as flat N-ary (`TupleItems`, 0 to 255
+        // items), so without this guard it accepts tuples of other arities
         // the JVM rejects — a consensus accept/reject divergence (sigma-rust
         // would accept a spend the JVM rejects). Mirror the JVM: reject non-pairs.
         if self.items.len() != 2 {
