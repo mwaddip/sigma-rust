@@ -175,7 +175,13 @@ pub(crate) fn eq_with_cost<'ctx>(
             eq_sigma_bool_with_cost(l.value(), r.value(), ctx)
         }
 
-        // String, Unit, Lambda, Context, Global, and any cross-type comparisons
+        // sigmastate dispatches on the left value and has no case for a closure: its last
+        // case throws (v6.0.7 `DataValueComparer.scala`, `equalDataValues`), before any cost
+        (Value::Lambda(_), _) => Err(EvalError::Misc(
+            "Cannot compare a function value: unknown type".into(),
+        )),
+
+        // String, Unit, Context, Global, and any cross-type comparisons
         // (which PartialEq returns false for anyway).
         _ => {
             ctx.add_jit_cost(EQ_PRIM_COST)?;
@@ -679,5 +685,59 @@ mod tests {
         assert!(eq_with_cost(&pairs(), &pairs(), &ctx).unwrap());
         // the cost on `368af3be`, before the item-type comparison
         assert_eq!(ctx.jit_cost_value() - before, 35);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn comparing_a_lambda_fails_as_in_sigmastate() {
+        use crate::eval::test_util::try_eval_out_wo_ctx;
+        use alloc::boxed::Box;
+        use ergotree_ir::mir::bin_op::{BinOp, RelationOp};
+        use ergotree_ir::mir::collection::Collection;
+        use ergotree_ir::mir::expr::Expr;
+        use ergotree_ir::mir::func_value::{FuncArg, FuncValue};
+        use ergotree_ir::mir::val_use::ValUse;
+        use ergotree_ir::types::sfunc::SFunc;
+        // sigmastate's `equalDataValues` dispatches on the left value and has no case for a
+        // closure: it ends in `sys.error("Cannot compare $l and $r: unknown type")` (v6.0.7
+        // `DataValueComparer.scala`, the last case). Rust compared the two structurally, which
+        // also walked every captured lambda once per path to it
+        let identity = || -> Expr {
+            FuncValue::new(
+                vec![FuncArg {
+                    idx: 1.into(),
+                    tpe: SType::SInt,
+                }],
+                ValUse {
+                    val_id: 1.into(),
+                    tpe: SType::SInt,
+                }
+                .into(),
+            )
+            .into()
+        };
+        let relation = |op: RelationOp, left: Expr, right: Expr| -> Expr {
+            BinOp {
+                kind: op.into(),
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+            .into()
+        };
+        let compare = |e: &Expr| try_eval_out_wo_ctx::<bool>(e);
+        assert!(compare(&relation(RelationOp::Eq, identity(), identity())).is_err());
+        assert!(compare(&relation(RelationOp::NEq, identity(), identity())).is_err());
+        // a collection compares its items the same way
+        let lambdas = || -> Expr {
+            Collection::new(
+                SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)),
+                vec![identity()],
+            )
+            .unwrap()
+            .into()
+        };
+        assert!(compare(&relation(RelationOp::Eq, lambdas(), lambdas())).is_err());
+        // a lambda on the right only: the left value's case decides, `l == r` for a number
+        assert!(!compare(&relation(RelationOp::Eq, 1i32.into(), identity())).unwrap());
     }
 }
