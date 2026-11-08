@@ -1,5 +1,3 @@
-use hashbrown::HashMap;
-
 use crate::ergo_tree::ErgoTreeVersion;
 
 use alloc::vec::Vec;
@@ -8,9 +6,8 @@ use crate::mir::expr::Expr;
 use crate::mir::method_call::MethodCall;
 use crate::types::smethod::MethodId;
 use crate::types::smethod::SMethod;
-use crate::types::stype::SType;
-use crate::types::stype_param::STypeVar;
 
+use super::property_call::{parse_explicit_type_args, serialize_explicit_type_args};
 use super::sigma_byte_reader::SigmaByteRead;
 use super::sigma_byte_writer::SigmaByteWrite;
 use super::types::TypeCode;
@@ -24,12 +21,7 @@ impl SigmaSerializable for MethodCall {
         self.method.method_id().sigma_serialize(w)?;
         self.obj.sigma_serialize(w)?;
         self.args.sigma_serialize(w)?;
-        for type_arg in &self.method.method_raw.explicit_type_args {
-            // Should not fail as existence of explicit type args is checked in constructor
-            let tpe = &self.explicit_type_args[type_arg];
-            tpe.sigma_serialize(w)?;
-        }
-        Ok(())
+        serialize_explicit_type_args(&self.method, &self.explicit_type_args, w)
     }
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
@@ -49,14 +41,7 @@ impl SigmaSerializable for MethodCall {
                 type_id.value(),
             ));
         }
-        let explicit_type_args = method
-            .method_raw
-            .explicit_type_args
-            .iter()
-            .cloned()
-            .zip(core::iter::from_fn(|| Some(SType::sigma_parse(r))))
-            .map(|(tpe, res)| -> Result<(STypeVar, SType), SigmaParsingError> { Ok((tpe, res?)) })
-            .collect::<Result<HashMap<STypeVar, SType>, _>>()?;
+        let explicit_type_args = parse_explicit_type_args(&method, r)?;
         // `getSpecializedMethodFor`: the explicit types, then `specializeFor` over the
         // arguments' types and the object's, which returns the method as it is when they do
         // not unify (v6.0.7 `MethodCallSerializer.scala:77-97`, `SMethod.scala:185-191`).
@@ -88,14 +73,176 @@ impl SigmaSerializable for MethodCall {
 mod tests {
     use alloc::vec;
 
+    use crate::chain::ergo_box::ErgoBox;
     use crate::ergo_tree::ErgoTreeVersion;
     use crate::mir::constant::Constant;
     use crate::mir::expr::Expr;
     use crate::mir::method_call::MethodCall;
+    use crate::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
     use crate::serialization::{roundtrip_new_feature, sigma_serialize_roundtrip};
     use crate::types::stype::SType;
     use crate::types::stype_param::STypeVar;
     use crate::types::{scoll, sglobal};
+    use hashbrown::HashMap;
+
+    fn t_is(tpe: SType) -> HashMap<STypeVar, SType> {
+        core::iter::once((STypeVar::t(), tpe)).collect()
+    }
+
+    fn hex(s: &str) -> alloc::vec::Vec<u8> {
+        base16::decode(s.as_bytes()).unwrap()
+    }
+
+    fn method_call(e: &Expr) -> Option<&MethodCall> {
+        match e {
+            Expr::MethodCall(mc) => Some(mc.expr()),
+            _ => None,
+        }
+    }
+
+    /// `tree_hex` parses as a tree (not a degraded one) and is written back unchanged: an
+    /// unparsed tree round-trips its bytes too, so the bytes alone prove nothing
+    fn assert_parsed_tree_round_trips(tree_hex: &str) {
+        use crate::ergo_tree::ErgoTree;
+        use crate::serialization::SigmaSerializable;
+        let tree = ErgoTree::sigma_parse_bytes(&hex(tree_hex)).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)), "{tree_hex}: {tree:?}");
+        assert_eq!(
+            base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
+            tree_hex
+        );
+    }
+
+    #[test]
+    fn with_type_args_builds_some_from_its_generic_method() {
+        use crate::serialization::SigmaSerializable;
+        // `some`'s type variable is in its domain, so the arguments are checked against the
+        // domain with the explicit types substituted
+        let mc = MethodCall::with_type_args(
+            Expr::Global,
+            sglobal::SOME_METHOD.clone(),
+            vec![5i32.into()],
+            t_is(SType::SInt),
+        )
+        .unwrap();
+        assert_eq!(mc.tpe(), SType::SOption(SType::SInt.into()));
+        let expr: Expr = mc.into();
+        assert_eq!(
+            base16::encode_lower(&expr.sigma_serialize_bytes().unwrap()),
+            "dc6a09dd01040a04"
+        );
+    }
+
+    #[test]
+    fn a_method_call_without_arguments_is_written_as_a_property_call() {
+        use crate::mir::property_call::PropertyCall;
+        use crate::serialization::SigmaSerializable;
+        use crate::types::snumeric;
+        // sigmastate's MethodCall is written with PropertyCall's opcode and layout when it has
+        // no arguments (v6.0.7 `values.scala:1351`); from tree version 3 a MethodCall without
+        // arguments is refused (`MethodCallSerializer.scala:52-55`)
+        let none: Expr = MethodCall::with_type_args(
+            Expr::Global,
+            sglobal::NONE_METHOD.clone(),
+            vec![],
+            t_is(SType::SInt),
+        )
+        .unwrap()
+        .into();
+        assert_eq!(
+            base16::encode_lower(&none.sigma_serialize_bytes().unwrap()),
+            "db6a0add04"
+        );
+        let to_bytes = snumeric::sint::METHODS
+            .iter()
+            .find(|m| m.method_id() == snumeric::TO_BYTES_METHOD_ID)
+            .unwrap()
+            .clone();
+        let obj = Expr::Const(1i32.into());
+        let mc: Expr = MethodCall::new(obj.clone(), to_bytes.clone(), vec![])
+            .unwrap()
+            .into();
+        let pc: Expr = PropertyCall::new(obj, to_bytes).unwrap().into();
+        assert_eq!(
+            mc.sigma_serialize_bytes().unwrap(),
+            pc.sigma_serialize_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_missing_explicit_type_is_an_error() {
+        use crate::mir::property_call::PropertyCall;
+        use crate::serialization::SigmaSerializable;
+        use alloc::boxed::Box;
+        // the fields are public, so a literal can skip the constructors' checks
+        let mc: Expr = MethodCall {
+            obj: Box::new(Expr::Global),
+            method: sglobal::SOME_METHOD.clone(),
+            args: vec![5i32.into()],
+            explicit_type_args: HashMap::new(),
+        }
+        .into();
+        assert!(mc.sigma_serialize_bytes().is_err());
+        let pc: Expr = PropertyCall {
+            obj: Box::new(Expr::Global),
+            method: sglobal::NONE_METHOD.clone(),
+            explicit_type_args: HashMap::new(),
+        }
+        .into();
+        assert!(pc.sigma_serialize_bytes().is_err());
+    }
+
+    #[test]
+    fn the_other_four_explicit_type_methods_round_trip_unchanged() {
+        // SANTA `vectors/wire/v6/authored/ErgoTree.explicit_type_args.json`: deserializeTo (a
+        // type byte mid-body, before the EQ's second operand), fromBigEndianBytes, getReg,
+        // getVarFromInput (one type after two arguments)
+        for tree_hex in [
+            "1b15020e0401020304040ed193dc6a04dd017300047301",
+            "1b15020e0401020304040ed193dc6a05dd017300047301",
+            "1b0d010408d1e6dc6313a701730004",
+            "1b110203000201d1e6dc650cfe027300730104",
+        ] {
+            assert_parsed_tree_round_trips(tree_hex);
+        }
+    }
+
+    #[test]
+    fn some_reads_and_writes_its_explicit_type() {
+        use crate::ergo_tree::ErgoTree;
+        use crate::serialization::SigmaSerializable;
+        // SANTA `vectors/wire/v6/authored/{ErgoTree,Box}.explicit_type_args.json`, `some`: the
+        // type follows the arguments (v6.0.7 `MethodCallSerializer.scala:29-32`)
+        assert_parsed_tree_round_trips("1b0d01040ad1e6dc6a09dd01730004");
+        let box_hex = "c0843d1b0d01040ad1e6dc6a09dd01730004010000a66b4e70ff8bf3d9dc7c600e4980ededaaeeaadfba7e47e84ec865211f4ae2a000";
+        let b = ErgoBox::sigma_parse_bytes(&hex(box_hex)).unwrap();
+        assert!(
+            matches!(b.ergo_tree, ErgoTree::Parsed(_)),
+            "{:?}",
+            b.ergo_tree
+        );
+        assert_eq!(
+            base16::encode_lower(&b.sigma_serialize_bytes().unwrap()),
+            box_hex
+        );
+    }
+
+    #[test]
+    fn an_explicit_type_wins_over_an_argument_of_another_type() {
+        use crate::serialization::SigmaSerializable;
+        // Global.some[Int](5L): the explicit type is substituted first, then `specializeFor`
+        // keeps the method when Long does not unify with Int (`MethodCallSerializer.scala:77-97`)
+        let expr = from_bytes(hex("dc6a09dd01050a04"))
+            .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
+            .unwrap();
+        let mc = method_call(&expr).unwrap();
+        assert_eq!(mc.tpe(), SType::SOption(SType::SInt.into()));
+        assert_eq!(mc.explicit_type_args, t_is(SType::SInt));
+        assert_eq!(
+            base16::encode_lower(&expr.sigma_serialize_bytes().unwrap()),
+            "dc6a09dd01050a04"
+        );
+    }
 
     #[test]
     fn from_tree_version_3_a_method_call_needs_arguments() {

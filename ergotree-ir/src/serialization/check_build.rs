@@ -657,6 +657,7 @@ mod tests {
                     PropertyCall {
                         obj: Box::new(f()),
                         method: scoll::INDICES_METHOD.clone(),
+                        explicit_type_args: Default::default(),
                     }
                     .into(),
                 ),

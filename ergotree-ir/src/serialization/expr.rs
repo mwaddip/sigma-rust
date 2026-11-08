@@ -145,13 +145,13 @@ impl Expr {
                     let mc = MethodCall::sigma_parse(r)?;
                     // A MethodCall with no arguments, which parses below tree version 3, has
                     // PropertyCall as its companion and is written as one (v6.0.7
-                    // `values.scala:1351`). Only a method of version 3 has explicit type
-                    // arguments, so there are none to lose.
+                    // `values.scala:1351`)
                     if mc.args.is_empty() {
                         Ok(Expr::PropertyCall(
                             PropertyCall {
                                 obj: mc.obj,
                                 method: mc.method,
+                                explicit_type_args: mc.explicit_type_args,
                             }
                             .into(),
                         ))
@@ -277,6 +277,18 @@ impl SigmaSerializable for Expr {
             Expr::ByteArrayToBigInt(s) => s.expr().sigma_serialize_w_opcode(w),
             Expr::LongToByteArray(s) => s.sigma_serialize_w_opcode(w),
             Expr::GlobalVars(op) => op.op_code().sigma_serialize(w),
+            // sigmastate writes a MethodCall without arguments as a PropertyCall, its companion
+            // then (v6.0.7 `values.scala:1351`)
+            Expr::MethodCall(mc) if mc.expr().args.is_empty() => {
+                let mc = mc.expr();
+                OpCode::PROPERTY_CALL.sigma_serialize(w)?;
+                super::property_call::serialize_property_call_body(
+                    &mc.method,
+                    &mc.obj,
+                    &mc.explicit_type_args,
+                    w,
+                )
+            }
             Expr::MethodCall(mc) => mc.expr().sigma_serialize_w_opcode(w),
             Expr::PropertyCall(pc) => pc.expr().sigma_serialize_w_opcode(w),
             Expr::Global => OpCode::GLOBAL.sigma_serialize(w),

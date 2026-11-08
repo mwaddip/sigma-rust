@@ -94,7 +94,7 @@ pub enum SigmaParsingError {
     )]
     DeserializeCallDepthExceeded(usize),
     /// A type nested deeper than
-    /// [`MAX_TYPE_DEPTH`](crate::serialization::types::MAX_TYPE_DEPTH): sigmastate's
+    /// `MAX_TYPE_DEPTH`: sigmastate's
     /// `TypeSerializer` throws `DeserializeCallDepthExceeded` (v6.0.7
     /// `TypeSerializer.scala:133-136`), a `SerializerException`
     #[error(

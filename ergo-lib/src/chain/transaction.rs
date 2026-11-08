@@ -1002,4 +1002,26 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn explicit_type_args_transactions_round_trip() {
+        // SANTA `vectors/wire/v6/authored/Transaction.explicit_type_args.json`, `none` and `some`
+        for tx_hex in [
+            "0147623256f4e5b1cb9a35db412d50d1d358dee0dc41424024bac40bba7f5573ef0000000001c0843d1b0800d1e6db6a0add04010000",
+            "0147623256f4e5b1cb9a35db412d50d1d358dee0dc41424024bac40bba7f5573ef0000000001c0843d1b0d01040ad1e6dc6a09dd01730004010000",
+        ] {
+            let tx = Transaction::sigma_parse_bytes(&base16::decode(tx_hex.as_bytes()).unwrap())
+                .unwrap();
+            let output = tx.outputs.iter().next().unwrap();
+            assert!(
+                matches!(output.ergo_tree, ErgoTree::Parsed(_)),
+                "{tx_hex}: {:?}",
+                output.ergo_tree
+            );
+            assert_eq!(
+                base16::encode_lower(&tx.sigma_serialize_bytes().unwrap()),
+                tx_hex
+            );
+        }
+    }
 }

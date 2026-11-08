@@ -203,7 +203,8 @@ lazy_static! {
             t_range:SType::SOption(SType::STypeVar(STypeVar::t()).into()).into(),
             tpe_params: vec![],
         },
-        explicit_type_args: vec![],
+        // `Seq(tT)`: the type is written after the argument (v6.0.7 `methods.scala:1986-1987`)
+        explicit_type_args: vec![STypeVar::t()],
         min_version: ErgoTreeVersion::V3
     };
     /// GLOBAL.some

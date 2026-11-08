@@ -433,22 +433,80 @@ mod tests {
     {
         let type_args = std::iter::once((STypeVar::t(), tpe.clone())).collect();
         match value {
-            Some(v) => MethodCall::new(
+            Some(v) => MethodCall::with_type_args(
                 Expr::Global,
-                sglobal::SOME_METHOD.clone().with_concrete_types(&type_args),
+                sglobal::SOME_METHOD.clone(),
                 vec![Expr::Const(v.into())],
-            )
-            .unwrap()
-            .into(),
-            None => MethodCall::with_type_args(
-                Expr::Global,
-                sglobal::NONE_METHOD.clone().with_concrete_types(&type_args),
-                vec![],
                 type_args,
             )
             .unwrap()
             .into(),
+            None => {
+                PropertyCall::with_type_args(Expr::Global, sglobal::NONE_METHOD.clone(), type_args)
+                    .unwrap()
+                    .into()
+            }
         }
+    }
+
+    #[test]
+    fn some_and_none_survive_a_v3_round_trip() {
+        use ergotree_ir::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
+        use ergotree_ir::serialization::SigmaSerializable;
+        // written, read back at tree version 3 and the read-back evaluated: the path of a tree a
+        // wallet builds
+        let ctx = force_any_val::<Context>();
+        let read_back = |e: &Expr, hex: &str| -> Expr {
+            let bytes = e.sigma_serialize_bytes().unwrap();
+            assert_eq!(base16::encode_lower(&bytes), hex);
+            from_bytes(&bytes)
+                .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
+                .unwrap()
+        };
+        let some = read_back(
+            &create_some_none_method_call(Some(5i32), SType::SInt),
+            "dc6a09dd01040a04",
+        );
+        assert_eq!(
+            try_eval_out_with_version::<Option<i32>>(&some, &ctx, 3, 3).unwrap(),
+            Some(5)
+        );
+        let none = read_back(
+            &create_some_none_method_call::<i64>(None, SType::SLong),
+            "db6a0add05",
+        );
+        assert_eq!(
+            try_eval_out_with_version::<Option<i64>>(&none, &ctx, 3, 3).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn none_built_as_a_method_call_survives_a_v3_round_trip() {
+        use ergotree_ir::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
+        use ergotree_ir::serialization::SigmaSerializable;
+        // a MethodCall with no arguments is written as a PropertyCall, which tree version 3
+        // reads; a MethodCall without arguments it refuses. The read-back is evaluated
+        let ctx = force_any_val::<Context>();
+        let type_args = std::iter::once((STypeVar::t(), SType::SLong)).collect();
+        let none: Expr = MethodCall::with_type_args(
+            Expr::Global,
+            sglobal::NONE_METHOD.clone(),
+            vec![],
+            type_args,
+        )
+        .unwrap()
+        .into();
+        let bytes = none.sigma_serialize_bytes().unwrap();
+        assert_eq!(base16::encode_lower(&bytes), "db6a0add05");
+        let read_back = from_bytes(&bytes)
+            .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
+            .unwrap();
+        assert!(matches!(read_back, Expr::PropertyCall(_)), "{read_back:?}");
+        assert_eq!(
+            try_eval_out_with_version::<Option<i64>>(&read_back, &ctx, 3, 3).unwrap(),
+            None
+        );
     }
 
     fn pow_hit(k: u32, msg: &[u8], nonce: &[u8], h: &[u8], big_n: u32) -> UnsignedBigInt {

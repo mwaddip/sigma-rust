@@ -57,7 +57,7 @@ impl Filter {
     /// Type: the input's, as sigmastate's `def tpe = input.tpe` cast to `SCollection` (v6.0.7
     /// `transformers.scala:121`), which a tuple passes as a collection of SAny
     /// (`SType.scala:838-841`). NoType for any other input, where sigmastate's read throws;
-    /// [`Expr::try_tpe`] fails there.
+    /// `Expr::try_tpe` fails there.
     pub fn tpe(&self) -> SType {
         match self.input.tpe() {
             tpe @ (SType::SColl(_) | SType::STuple(_)) => tpe,
@@ -77,7 +77,7 @@ impl SigmaSerializable for Filter {
     }
 
     /// sigmastate's `Filter` checks nothing when it is built (v6.0.7 `transformers.scala:117-121`):
-    /// its type casts the input's on every read, a throw [`Expr::try_tpe`] reproduces where
+    /// its type casts the input's on every read, a throw `Expr::try_tpe` reproduces where
     /// sigmastate reads it
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
         let input = Expr::sigma_parse(r)?;
