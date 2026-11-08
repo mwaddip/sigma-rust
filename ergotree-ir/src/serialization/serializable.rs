@@ -321,77 +321,16 @@ impl SigmaParsingError {
         }
     }
 
-    /// True if a size-flagged `ErgoTree` carrying a constant whose body fails
-    /// with this error must REJECT (escape the soft-fork degrade) instead of
-    /// degrading to `Unparsed`. Mirrors sigma-state
-    /// `ErgoTreeSerializer.deserializeErgoTree`, which wraps as `UnparsedErgoTree`
-    /// ONLY a soft-forkable `ValidationException`: a hard wire-structure failure
-    /// (invalid EC point, EOF/truncation, VLQ overflow → the JVM's
-    /// `IllegalArgumentException` / `IOException`) escapes and rejects. The one
-    /// soft-forkable case in these wire channels is position-limit (rule 1014),
-    /// which is excluded so it still degrades. Soft-forkable type/opcode/method
-    /// errors live in other variants and keep degrading (not listed here).
-    /// Nesting deeper than `MaxTreeDepth` escapes too: the JVM's
-    /// `DeserializeCallDepthExceeded` is a `SerializerException`. A type nested deeper
-    /// than `MaxTypeDepth` (`TypeDepthExceeded`, the same JVM exception) escapes as well, and
-    /// so does a count above `MaxArrayLength` (`safeNewArray` throws a `RuntimeException`).
-    /// A CTHRESHOLD outside its bounds and a bitwise operation on a non-numeric operand
-    /// escape as well: both fail a `require`, an `IllegalArgumentException`. So does the
-    /// failure of an unsized tree nested in this one, which the JVM turns into a
-    /// `SerializerException`. A placeholder past the tree's constants and a `ValUse` with no
-    /// `ValDef` escape too: their store lookups throw (`ConstantPlaceholderSerializer.scala:19`,
-    /// `ValDefTypeStore.scala:11`). So do type code 0 (`InvalidTypePrefix`) and a type
-    /// parameter that is not a type variable, and malformed data: an unknown SigmaBoolean
-    /// opcode, a bad BigInt size and a `getUIntExact` value above `Int.MaxValue`, and a Box
-    /// constant's register that holds no value, or a seventh register. So does an `Append` or
-    /// `Slice` whose input is not a collection (`transformers.scala:62`, `:89`), and a concrete
-    /// collection's item of another type than the declared one (an `AssertionError`). So does
-    /// a tree whose version is above the activated script version: the `VersionContext`'s
-    /// `IllegalArgumentException` is rethrown as a `SerializerException`
-    /// (`ErgoTreeSerializer.scala:191-193`).
+    /// True if a size-flagged `ErgoTree` whose body fails with this error must reject (escape
+    /// the soft-fork degrade) instead of degrading to `Unparsed`. sigmastate's
+    /// `deserializeErgoTree` keeps a size-flagged tree as `UnparsedErgoTree` on one exception
+    /// class, the `ValidationException` a failed validation rule throws, and turns it into a
+    /// `SerializerException` for an unsized tree; every other exception propagates and rejects
+    /// the tree (v6.0.7 `ErgoTreeSerializer.scala:196-209`). So this error escapes unless
+    /// sigmastate fails at its site through a validation rule; `jvm_failure()` holds that class
+    /// for every variant. Whether the rule is soft-forkable does not enter into it.
     pub fn escapes_sized_tree_degrade(&self) -> bool {
-        if self.is_position_limit_exceeded() {
-            return false;
-        }
-        matches!(
-            self,
-            SigmaParsingError::NonSerializableTypeCode(_)
-                | SigmaParsingError::ScorexParsingError(_)
-                | SigmaParsingError::Io(_)
-                | SigmaParsingError::VlqEncode(_)
-                | SigmaParsingError::ConstantForPlaceholderNotFound(_)
-                | SigmaParsingError::ValDefIdNotFound(_)
-                | SigmaParsingError::InvalidTypePrefix
-                | SigmaParsingError::InvalidTypeParameter(_)
-                | SigmaParsingError::TypeParameterNotTypeVar(_)
-                | SigmaParsingError::TypeReadFailed(_)
-                | SigmaParsingError::TupleInputExpected(_)
-                | SigmaParsingError::TupleFieldOutOfBounds(_)
-                | SigmaParsingError::InvalidSigmaBooleanOpCode(_)
-                | SigmaParsingError::InvalidBigIntSize(_)
-                | SigmaParsingError::ExceedsIntMax(_, _)
-                | SigmaParsingError::UnevaluatedValue(_)
-                | SigmaParsingError::NegativeTupleSize(_)
-                | SigmaParsingError::TooManyRegisters(_)
-                | SigmaParsingError::CollectionInputExpected(_)
-                | SigmaParsingError::CollectionItemTypeMismatch(_)
-                | SigmaParsingError::ArrayLengthExceeded(_)
-                | SigmaParsingError::CthresholdOutOfBounds(_, _)
-                | SigmaParsingError::TreeVersionAboveActivated(_, _)
-                | SigmaParsingError::BitOpOperandsNotNumeric(_)
-                | SigmaParsingError::NumericCastTargetNotNumeric(_)
-                | SigmaParsingError::NumericOperandExpected(_)
-                | SigmaParsingError::ConstraintFailed(_)
-                | SigmaParsingError::IndexUpcastFailed(_)
-                | SigmaParsingError::BlockItemNotValDef(_)
-                | SigmaParsingError::RegisterIdOutOfRange(_)
-                | SigmaParsingError::MethodCallWithoutArguments
-                | SigmaParsingError::OptionInputExpected(_)
-                | SigmaParsingError::FunctionExpected(_)
-                | SigmaParsingError::UnsizedTreeValidationError(_)
-                | SigmaParsingError::DeserializeCallDepthExceeded(_)
-                | SigmaParsingError::TypeDepthExceeded(_)
-        )
+        self.jvm_failure() != JvmFailure::Validation
     }
 }
 

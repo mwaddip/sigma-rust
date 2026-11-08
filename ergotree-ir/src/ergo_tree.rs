@@ -235,10 +235,11 @@ impl ErgoTree {
                 tree_size,
             ) {
                 (Ok(parsed_tree), _) => Ok(parsed_tree.into()),
-                // An unsized tree cannot degrade (`:204-207`). A hard error rejects it as
-                // it is; one that would degrade a size-flagged tree, a root that is not a
-                // `SigmaProp` included, becomes sigmastate's `SerializerException`, which a
-                // size-flagged tree around this one does not degrade on either.
+                // An unsized tree cannot degrade (`:204-207`). An error that is no
+                // `ValidationException` rejects it as it is; a `ValidationException`, a root
+                // that is not a `SigmaProp` included (rule 1001), becomes sigmastate's
+                // `SerializerException`, which a size-flagged tree around this one does not
+                // degrade on either.
                 (Err(ErgoTreeError::SigmaParsingError(e)), None)
                     if e.escapes_sized_tree_degrade() =>
                 {
@@ -248,17 +249,12 @@ impl ErgoTree {
                     error,
                 ))),
                 (Err(error), Some(tree_size)) => {
-                    // Mirror sigma-state `ErgoTreeSerializer.deserializeErgoTree`:
-                    // the size-flagged `UnparsedErgoTree` fallback wraps ONLY a
-                    // soft-forkable `ValidationException`. A HARD wire-structure
-                    // failure escapes the fallback and REJECTS instead of
-                    // degrading to `Unparsed`: a non-soft-forkable data type code
-                    // (rule 1009 `CheckSerializableTypeCode` does not fire), an
-                    // invalid EC point, EOF/truncation, a VLQ overflow, or nesting
-                    // deeper than `MaxTreeDepth` — the JVM's `SerializerException` /
-                    // `IllegalArgumentException` / `IOException`. Position-limit (rule
-                    // 1014) is the one soft-forkable wire error and still degrades. See
-                    // `SigmaParsingError::escapes_sized_tree_degrade`.
+                    // sigmastate keeps a size-flagged tree as `UnparsedErgoTree` on a
+                    // `ValidationException` only (`:196-203`); any other failure propagates
+                    // and rejects (`SigmaParsingError::escapes_sized_tree_degrade`). The one
+                    // failure here that is not a `SigmaParsingError`, a root that is not a
+                    // `SigmaProp`, is rule 1001 (`CheckDeserializedScriptIsSigmaProp`) and
+                    // degrades.
                     if let ErgoTreeError::SigmaParsingError(e) = &error {
                         if e.escapes_sized_tree_degrade() {
                             return Err(e.clone());
@@ -1241,12 +1237,16 @@ mod tests {
     }
 
     #[test]
-    fn sized_tree_degrade_gate_escapes_hard_errors_but_degrades_position_limit() {
-        // The gate policy (`SigmaParsingError::escapes_sized_tree_degrade`): hard
-        // wire-structure failures REJECT (escape == true), matching the JVM's
-        // non-`ValidationException` exceptions; position-limit (rule 1014) is the one
-        // soft-forkable wire error and DEGRADES (escape == false), in every channel it
-        // can arrive through (top-level, nested in `VlqEncode` / `ScorexParsingError`).
+    fn sized_tree_degrade_gate_degrades_on_a_validation_exception_only() {
+        // The gate policy (`SigmaParsingError::escapes_sized_tree_degrade`): a size-flagged
+        // tree degrades on a failed validation rule, the JVM's `ValidationException`, and
+        // rejects on anything else (escape == true). Position-limit (rule 1014) degrades in
+        // every channel it can arrive through (top-level, nested in `VlqEncode` /
+        // `ScorexParsingError`).
+        use crate::chain::ergo_box::RegisterValueError;
+        use crate::mir::expr::InvalidArgumentError;
+        use crate::types::smethod::MethodId;
+        use bounded_vec::BoundedVecOutOfBounds;
         use sigma_ser::vlq_encode::VlqEncodingError;
         use sigma_ser::ScorexParsingError;
         let degrades = [
@@ -1256,28 +1256,57 @@ mod tests {
             SigmaParsingError::ScorexParsingError(ScorexParsingError::VlqEncode(
                 VlqEncodingError::PositionLimitExceeded,
             )),
-            // soft-forkable type/opcode errors keep degrading (behavior unchanged)
+            // the other rule sites
             SigmaParsingError::NotSupported("SOption data"),
             SigmaParsingError::InvalidOpCode(0xff),
+            SigmaParsingError::NotImplementedOpCode("253".to_string()),
+            SigmaParsingError::InvalidTypeCode(0x63),
+            SigmaParsingError::NotImplementedYet("no methods".to_string()),
+            SigmaParsingError::UnknownMethodId(MethodId(1), 4),
+            SigmaParsingError::V6TypeError,
+            SigmaParsingError::ZeroWidthCollection("SUnit".to_string()),
+            SigmaParsingError::ErgoTreeHeaderError(ErgoTreeHeaderError::InvalidSizeBit(1)),
         ];
         for e in &degrades {
             assert!(!e.escapes_sized_tree_degrade(), "should degrade: {e:?}");
         }
         let rejects = [
-            // invalid EC point (this finding)
+            // invalid EC point
             SigmaParsingError::ScorexParsingError(ScorexParsingError::Misc(
                 "failed to parse PK from bytes".to_string(),
             )),
-            // EOF / truncation (the sibling over-accept this fix also closes)
+            // EOF / truncation
             SigmaParsingError::Io("unexpected end of file".to_string()),
             // VLQ overflow
             SigmaParsingError::VlqEncode(VlqEncodingError::VlqDecodingFailed),
-            // non-soft-forkable data type code (rule 1009, prior round)
+            // non-soft-forkable data type code (rule 1009 does not fire)
             SigmaParsingError::NonSerializableTypeCode(104),
             // nesting deeper than MaxTreeDepth (DeserializeCallDepthExceeded)
             SigmaParsingError::DeserializeCallDepthExceeded(111),
             // a type nested deeper than MaxTypeDepth
             SigmaParsingError::TypeDepthExceeded(9),
+            // no validation rule, though the old allow-list let them degrade
+            SigmaParsingError::Misc("a failure".to_string()),
+            SigmaParsingError::ValueOutOfBounds("an index".to_string()),
+            SigmaParsingError::InvalidArgument(InvalidArgumentError("a check".to_string())),
+            SigmaParsingError::BoundedVecOutOfBounds(BoundedVecOutOfBounds::UpperBoundError {
+                upper_bound: 255,
+                got: 256,
+            }),
+            SigmaParsingError::TupleItemsOutOfBounds(256),
+            SigmaParsingError::SerializationError(SigmaSerializationError::NotSupported(
+                "a write".to_string(),
+            )),
+            SigmaParsingError::InvalidRegisterValue(RegisterValueError::Invalid(
+                "a register".to_string(),
+            )),
+            // the end of input at a nested tree's header byte
+            SigmaParsingError::ErgoTreeHeaderError(ErgoTreeHeaderError::IoError(
+                "unexpected end of file".to_string(),
+            )),
+            SigmaParsingError::ErgoTreeHeaderError(ErgoTreeHeaderError::VersionError(
+                ErgoTreeVersionError::InvalidVersion(8),
+            )),
         ];
         for e in &rejects {
             assert!(e.escapes_sized_tree_degrade(), "should reject: {e:?}");
@@ -2104,6 +2133,42 @@ mod nested_tree_tests {
         let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
         assert!(matches!(tree, ErgoTree::Parsed(_)));
         assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn input_ending_at_a_nested_tree_header_rejects_the_outer_tree() {
+        // SANTA `header_eof` #2, #3: a Box constant of value 1, then the end of input where
+        // its tree's header byte belongs. The JVM's `getByte` reads past the end, a
+        // `BufferUnderflowException`, no `ValidationException`, so the outer tree rejects.
+        for bytes in [[0x09, 0x02, 0x63, 0x01], [0x0b, 0x02, 0x63, 0x01]] {
+            let parsed = ErgoTree::sigma_parse_bytes(&bytes);
+            assert!(
+                matches!(
+                    parsed,
+                    Err(SigmaParsingError::ErgoTreeHeaderError(
+                        ErgoTreeHeaderError::IoError(_)
+                    ))
+                ),
+                "{bytes:02x?}: {parsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_ending_inside_a_nested_unsized_tree_rejects_as_raised() {
+        // sized v1 tree > Box (value 1) > unsized v0 tree > Box (value 1) > the end of input
+        // at its header: no `ValidationException` anywhere, so the unsized tree passes the
+        // failure on as it is rather than as `UnsizedTreeValidationError`
+        let parsed = ErgoTree::sigma_parse_bytes(&[0x09, 0x05, 0x63, 0x01, 0x00, 0x63, 0x01]);
+        assert!(
+            matches!(
+                parsed,
+                Err(SigmaParsingError::ErgoTreeHeaderError(
+                    ErgoTreeHeaderError::IoError(_)
+                ))
+            ),
+            "{parsed:?}"
+        );
     }
 }
 
