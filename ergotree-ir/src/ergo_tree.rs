@@ -2775,3 +2775,61 @@ mod activated_version_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod small_tuple_tests {
+    //! SANTA's measured cases (6.0.7), each at tree version 0 and size-flagged at 3; nothing
+    //! degrades
+    use super::*;
+
+    fn parse(hex: &str) -> Result<ErgoTree, SigmaParsingError> {
+        ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap())
+    }
+
+    #[test]
+    fn small_tuple_expressions_parse_and_are_written_back() {
+        // `sigmaProp(Tuple(1)._1 == 1)` and `sigmaProp(Tuple() == Tuple())` (cases 3, 4): a tuple
+        // expression writes no type
+        for hex in [
+            "00d1938c86010402010402",
+            "0b0ad1938c86010402010402",
+            "00d19386008600",
+            "0b06d19386008600",
+        ] {
+            let tree = parse(hex).unwrap();
+            assert!(matches!(tree, ErgoTree::Parsed(_)), "{hex}");
+            assert_eq!(
+                base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
+                hex
+            );
+        }
+    }
+
+    #[test]
+    fn small_tuple_types_parse_and_are_not_written() {
+        // `sigmaProp(c._1 == 1)` with `c: (Int)` and `sigmaProp(c == c)` with `c: ()` (cases 1, 2)
+        for hex in [
+            "00d1938c60010402010402",
+            "0b0ad1938c60010402010402",
+            "00d19360006000",
+            "0b06d19360006000",
+        ] {
+            let tree = parse(hex).unwrap();
+            assert!(matches!(tree, ErgoTree::Parsed(_)), "{hex}");
+            assert!(tree.sigma_serialize_bytes().is_err(), "{hex}");
+        }
+    }
+
+    #[test]
+    fn selecting_a_field_of_an_empty_tuple_is_refused() {
+        // `c._1` with `c: ()`: sigmastate's `input.tpe.items(0)` throws at parse
+        // (`transformers.scala:294`), an `IndexOutOfBoundsException`, which does not degrade
+        for hex in ["00d1938c6000010402", "0b08d1938c6000010402"] {
+            assert!(
+                matches!(parse(hex), Err(SigmaParsingError::TupleFieldOutOfBounds(_))),
+                "{hex}"
+            );
+        }
+    }
+}

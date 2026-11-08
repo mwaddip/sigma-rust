@@ -133,7 +133,7 @@ pub(crate) static GET_VAR_FROM_INPUT_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, arg
         .context_extension(input_idx)
         .and_then(|extension| extension.values.get(&var_id));
     let var = match var {
-        Some(var) if var.script_type()?.as_ref() == Some(&**output_tpe) => var,
+        Some(var) if var.script_type()? == **output_tpe => var,
         _ => return Ok(Value::Opt(None)),
     };
     Ok(Value::Opt(Some(Box::new(var.to_script_value()?.v.into()))))

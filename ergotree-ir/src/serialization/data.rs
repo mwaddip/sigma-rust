@@ -33,7 +33,6 @@ use num_traits::Zero;
 use super::sigma_byte_writer::SigmaByteWrite;
 use super::types::TypeCode;
 use alloc::sync::Arc;
-use core::convert::TryInto;
 
 /// Used to serialize and parse `Literal` and `Value`.
 pub struct DataSerializer {}
@@ -286,14 +285,9 @@ impl DataSerializer {
                 })
             }
             STuple(stuple::STuple { items: types }) => {
-                let mut items = Vec::new();
-                types.iter().try_for_each(|tpe| {
-                    DataSerializer::sigma_parse(tpe, r).map(|v| items.push(v))
-                })?;
-                // we get the tuple item value for each tuple item type,
-                // since items types quantity has checked bounds, we can be sure that items count
-                // is correct
-                Literal::Tup(items.try_into()?)
+                // an item's data for each item type, any count (v6.0.7
+                // `CoreDataSerializer.scala:139-144`)
+                Literal::Tup(types.try_mapped_ref(|tpe| DataSerializer::sigma_parse(tpe, r))?)
             }
             SUnsignedBigInt => {
                 return Err(SigmaParsingError::NotSupported(
@@ -471,5 +465,48 @@ mod zero_width_tests {
             }),
         };
         assert!(c.sigma_serialize_bytes().is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod small_tuple_constant_tests {
+    use crate::mir::constant::Constant;
+    use crate::mir::constant::Literal;
+    use crate::serialization::SigmaParsingError;
+    use crate::serialization::SigmaSerializable;
+    use crate::types::stuple::STuple;
+    use crate::types::stuple::TupleItems;
+    use crate::types::stype::SType;
+    use alloc::vec;
+
+    #[test]
+    fn small_tuple_constants_parse() {
+        // their data reads item by item (v6.0.7 `CoreDataSerializer.scala:139-144`); their type
+        // cannot be written back (SANTA cases 1, 2, 6a)
+        let one = Constant::sigma_parse_bytes(&[0x60, 0x01, 0x04, 0x02]).unwrap();
+        assert_eq!(
+            one.tpe,
+            SType::STuple(STuple {
+                items: TupleItems::try_from(vec![SType::SInt]).unwrap()
+            })
+        );
+        assert_eq!(
+            one.v,
+            Literal::Tup(TupleItems::try_from(vec![Literal::Int(1)]).unwrap())
+        );
+        let empty = Constant::sigma_parse_bytes(&[0x60, 0x00]).unwrap();
+        assert_eq!(empty.v, Literal::Tup(TupleItems::try_from(vec![]).unwrap()));
+        assert!(one.sigma_serialize_bytes().is_err());
+        assert!(empty.sigma_serialize_bytes().is_err());
+    }
+
+    #[test]
+    fn a_collection_of_empty_tuples_is_rule_1020() {
+        // `Coll[()]` of 5: an empty tuple is zero-width (`CoreDataSerializer.scala:162`)
+        assert!(matches!(
+            Constant::sigma_parse_bytes(&[0x0c, 0x60, 0x00, 0x05]),
+            Err(SigmaParsingError::ZeroWidthCollection(_))
+        ));
     }
 }

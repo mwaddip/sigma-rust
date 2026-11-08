@@ -63,14 +63,12 @@ impl UnsignedTransaction {
         data_inputs: Option<TxIoVec<DataInput>>,
         output_candidates: TxIoVec<ErgoBoxCandidate>,
     ) -> Result<UnsignedTransaction, SigmaSerializationError> {
-        #[allow(clippy::unwrap_used)] // box serialization cannot fail
+        // an output whose box sigmastate cannot write, a 0/1-item tuple type in its tree or a
+        // register (v6.0.7 `TypeSerializer.scala:94-95`), has no id
         let outputs = output_candidates
-            .iter()
-            .enumerate()
-            .map(|(idx, b)| ErgoBox::from_box_candidate(b, TxId::zero(), idx as u16).unwrap())
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
+            .clone()
+            .enumerated()
+            .try_mapped_ref(|(idx, b)| ErgoBox::from_box_candidate(b, TxId::zero(), *idx as u16))?;
 
         let tx_to_sign = UnsignedTransaction {
             tx_id: TxId::zero(),
@@ -168,6 +166,37 @@ mod tests {
             prop_assert!(!v.bytes_to_sign().unwrap().is_empty());
         }
 
+    }
+
+    #[test]
+    fn an_output_the_jvm_cannot_write_is_an_error_not_a_panic() {
+        // an output whose tree or register holds a 0/1-item tuple type has no id: sigmastate
+        // cannot write its type (v6.0.7 `TypeSerializer.scala:94-95`), so building the transaction
+        // fails, here as an error (it reaches this through `UnsignedTransactionJson`, the EIP-12
+        // path)
+        use ergotree_ir::chain::context_extension::ContextExtension;
+        use ergotree_ir::chain::ergo_box::box_value::BoxValue;
+        use ergotree_ir::chain::ergo_box::{BoxId, NonMandatoryRegisters, RegisterValue};
+        use ergotree_ir::ergo_tree::ErgoTree;
+        use ergotree_ir::serialization::SigmaSerializable;
+        let output = |tree: &str, registers: Vec<RegisterValue>| ErgoBoxCandidate {
+            value: BoxValue::SAFE_USER_MIN,
+            ergo_tree: ErgoTree::sigma_parse_bytes(&base16::decode(tree).unwrap()).unwrap(),
+            tokens: None,
+            additional_registers: NonMandatoryRegisters::try_from(registers).unwrap(),
+            creation_height: 1,
+        };
+        for output in [
+            output("00d1938c60010402010402", vec![]),
+            output("0b0ad1938c60010402010402", vec![]),
+            output(
+                "0008d3",
+                vec![RegisterValue::sigma_parse_bytes(&[0x60, 0x01, 0x04, 0x02])],
+            ),
+        ] {
+            let input = UnsignedInput::new(BoxId::zero(), ContextExtension::empty());
+            assert!(UnsignedTransaction::new_from_vec(vec![input], vec![], vec![output]).is_err());
+        }
     }
 
     #[cfg(feature = "json")]

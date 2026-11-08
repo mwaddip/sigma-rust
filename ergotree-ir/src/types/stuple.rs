@@ -9,13 +9,15 @@ use bounded_vec::BoundedVecOutOfBounds;
 use super::stype::SType;
 use super::stype_param::STypeVar;
 
-/// A tuple's items, [`TupleItems::MIN_LEN`] to [`TupleItems::MAX_LEN`] of them
+/// A tuple's items, 0 to [`TupleItems::MAX_LEN`] of them. sigmastate reads a tuple type or a
+/// tuple expression of any size up to its count byte (v6.0.7 `TypeSerializer.scala:192-198`,
+/// `TupleSerializer.scala:27-36`); it only refuses to write a tuple type of fewer than 2 items
+/// (`TypeSerializer.scala:94-95`), and to evaluate a tuple expression of other than 2
+/// (`values.scala:826-827`).
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct TupleItems<T>(Vec<T>);
 
 impl<T> TupleItems<T> {
-    /// The fewest items a tuple holds
-    pub const MIN_LEN: usize = 2;
     /// The most items a tuple holds: a tuple type's item count is one unsigned byte
     /// (sigmastate 6.0.7 `TypeSerializer.scala:192-198`)
     pub const MAX_LEN: usize = 255;
@@ -91,12 +93,7 @@ impl<T> TryFrom<Vec<T>> for TupleItems<T> {
     type Error = BoundedVecOutOfBounds;
 
     fn try_from(items: Vec<T>) -> Result<Self, Self::Error> {
-        if items.len() < Self::MIN_LEN {
-            Err(BoundedVecOutOfBounds::LowerBoundError {
-                lower_bound: Self::MIN_LEN,
-                got: items.len(),
-            })
-        } else if items.len() > Self::MAX_LEN {
+        if items.len() > Self::MAX_LEN {
             Err(BoundedVecOutOfBounds::UpperBoundError {
                 upper_bound: Self::MAX_LEN,
                 got: items.len(),
@@ -210,18 +207,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tuple_items_hold_two_to_255() {
-        assert_eq!(TupleItems::<i32>::MIN_LEN, 2);
+    fn tuple_items_hold_zero_to_255() {
+        // sigmastate reads a tuple type of 0 to 255 items (v6.0.7 `TypeSerializer.scala:192-198`)
         assert_eq!(TupleItems::<i32>::MAX_LEN, 255);
-        assert!(TupleItems::try_from(vec![1; 2]).is_ok());
+        assert!(TupleItems::<i32>::try_from(vec![]).is_ok());
+        assert!(TupleItems::try_from(vec![1]).is_ok());
         assert!(TupleItems::try_from(vec![1; 255]).is_ok());
-        assert_eq!(
-            TupleItems::try_from(vec![1]),
-            Err(BoundedVecOutOfBounds::LowerBoundError {
-                lower_bound: 2,
-                got: 1
-            })
-        );
         assert_eq!(
             TupleItems::try_from(vec![1; 256]),
             Err(BoundedVecOutOfBounds::UpperBoundError {

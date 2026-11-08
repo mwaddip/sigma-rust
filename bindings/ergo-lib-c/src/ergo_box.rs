@@ -27,7 +27,7 @@ use ergo_lib_c_core::{
 };
 use paste::paste;
 
-use crate::{ErrorPtr, ReturnOption};
+use crate::{ErrorPtr, ReturnNum, ReturnOption};
 use std::{
     ffi::{CStr, CString},
     os::raw::c_char,
@@ -341,11 +341,22 @@ pub unsafe extern "C" fn ergo_lib_ergo_box_to_json_eip12(
     Error::c_api_from(res)
 }
 
-/// Calculate serialized box size(in bytes)
+/// Calculate serialized box size(in bytes). Fails for a box that cannot be written, such as a box
+/// read from bytes whose tree or register holds a tuple type of fewer than two items.
 #[no_mangle]
-pub unsafe extern "C" fn ergo_lib_ergo_box_bytes_size(ergo_box_ptr: ConstErgoBoxPtr) -> usize {
-    #[allow(clippy::unwrap_used)]
-    ergo_box_bytes_size(ergo_box_ptr).unwrap()
+pub unsafe extern "C" fn ergo_lib_ergo_box_bytes_size(
+    ergo_box_ptr: ConstErgoBoxPtr,
+) -> ReturnNum<usize> {
+    match ergo_box_bytes_size(ergo_box_ptr) {
+        Ok(value) => ReturnNum {
+            value,
+            error: std::ptr::null_mut(),
+        },
+        Err(e) => ReturnNum {
+            value: 0, // not valid when the error is set
+            error: Error::c_api_from(Err(e)),
+        },
+    }
 }
 
 /// Drop `ErgoBox`
@@ -398,3 +409,36 @@ pub unsafe extern "C" fn ergo_lib_ergo_box_assets_data_delete(ptr: ErgoBoxAssets
 
 make_collection!(ErgoBoxAssetsDataList, ErgoBoxAssetsData);
 make_ffi_eq!(ErgoBoxAssetsData);
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::constant::{
+        ergo_lib_constant_delete, ergo_lib_constant_from_base16, ergo_lib_constant_to_ergo_box,
+    };
+    use ergo_lib_c_core::constant::ConstantPtr;
+
+    #[test]
+    fn the_size_of_a_box_that_cannot_be_written_is_an_error() {
+        // a `Box` constant read from bytes keeps the box as read; its tree holds a `(Int)`
+        // constant, which sigmastate reads and cannot write (v6.0.7 `TypeSerializer.scala:94-95`)
+        let hex = CString::new(format!(
+            "63c0843d{}000000{}00",
+            "00d1938c60010402010402",
+            "00".repeat(32)
+        ))
+        .unwrap();
+        unsafe {
+            let mut constant: ConstantPtr = std::ptr::null_mut();
+            assert!(ergo_lib_constant_from_base16(hex.as_ptr(), &mut constant).is_null());
+            let mut ergo_box: ErgoBoxPtr = std::ptr::null_mut();
+            assert!(ergo_lib_constant_to_ergo_box(constant, &mut ergo_box).is_null());
+            let size = ergo_lib_ergo_box_bytes_size(ergo_box);
+            assert!(!size.error.is_null());
+            crate::ergo_lib_delete_error(size.error);
+            ergo_lib_ergo_box_delete(ergo_box);
+            ergo_lib_constant_delete(constant);
+        }
+    }
+}

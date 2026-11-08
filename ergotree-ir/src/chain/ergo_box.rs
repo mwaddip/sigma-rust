@@ -249,9 +249,13 @@ impl ErgoBox {
         Ok(match id {
             RegisterId::MandatoryRegisterId(id) => match id {
                 MandatoryRegisterId::R0 => Some(self.value.into()),
-                // chance of box script is not serializable are tiny comparing to returning Result
-                #[allow(clippy::unwrap_used)]
-                MandatoryRegisterId::R1 => Some(self.script_bytes().unwrap().into()),
+                // the tree is written again, which fails for one sigmastate reads and cannot
+                // write (a 0/1-item tuple type, v6.0.7 `TypeSerializer.scala:94-95`)
+                MandatoryRegisterId::R1 => Some(
+                    self.script_bytes()
+                        .map_err(|e| RegisterValueError::Invalid(e.to_string()))?
+                        .into(),
+                ),
                 MandatoryRegisterId::R2 => Some(self.tokens_raw().into()),
                 MandatoryRegisterId::R3 => Some(self.creation_info().into()),
             },
@@ -1116,5 +1120,96 @@ mod default_context_tests {
             b.box_id(),
             BoxId::from(Digest32::from(*blake2b256_hash(&at_v3)))
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod small_tuple_tests {
+    use super::*;
+
+    fn tree() -> ErgoTree {
+        ErgoTree::sigma_parse_bytes(&[0x00, 0x08, 0xd3]).unwrap()
+    }
+
+    fn with_r4(register: &str) -> Result<ErgoBox, SigmaSerializationError> {
+        let regs = NonMandatoryRegisters::try_from(vec![RegisterValue::sigma_parse_bytes(
+            &base16::decode(register).unwrap(),
+        )])
+        .unwrap();
+        ErgoBox::new(
+            BoxValue::SAFE_USER_MIN,
+            tree(),
+            None,
+            regs,
+            0,
+            TxId::zero(),
+            0,
+        )
+    }
+
+    #[test]
+    fn an_output_with_a_small_tuple_register_has_no_id() {
+        // sigmastate cannot write a `(Int)` constant's type (SANTA case 6a); it writes a tuple
+        // expression holding a 1-item tuple as it read it (case 6b)
+        assert!(with_r4("60010402").is_err());
+        assert!(with_r4("8602860104020402").is_ok());
+    }
+
+    #[test]
+    fn r1_of_a_wire_box_whose_tree_cannot_be_written_is_an_error() {
+        // a box read off the wire keeps its bytes, so its tree need not be writable. R1 writes the
+        // tree again here, so reading it fails, as an error. (sigmastate returns the tree's own
+        // bytes, `ErgoTree.scala:123-126`: the R1 output-bytes class, out of this change's scope.)
+        let bytes = ErgoBox::new(
+            BoxValue::SAFE_USER_MIN,
+            tree(),
+            None,
+            NonMandatoryRegisters::empty(),
+            0,
+            TxId::zero(),
+            0,
+        )
+        .unwrap()
+        .sigma_serialize_bytes()
+        .unwrap();
+        let at = bytes
+            .windows(3)
+            .position(|w| w == [0x00, 0x08, 0xd3])
+            .unwrap();
+        for small in [
+            "00d1938c60010402010402",
+            "0b0ad1938c60010402010402",
+            "00d19360006000",
+        ] {
+            let mut wire = bytes[..at].to_vec();
+            wire.extend(base16::decode(small).unwrap());
+            wire.extend(&bytes[at + 3..]);
+            let b = ErgoBox::sigma_parse_bytes(&wire).unwrap();
+            assert!(b.get_register(RegisterId::R1).is_err(), "{small}");
+        }
+    }
+
+    #[test]
+    fn a_wire_box_with_a_small_tuple_register_keeps_its_id() {
+        // a box read off the wire keeps its bytes and hashes them (`ErgoBox.scala:87-89`), whether
+        // or not it can be written again: the box with a `(1, 2)` register, then that register's
+        // bytes swapped for a `(Int)` constant's
+        let bytes = with_r4("580204").unwrap().sigma_serialize_bytes().unwrap();
+        let at = bytes
+            .windows(4)
+            .position(|w| w == [0x01, 0x58, 0x02, 0x04])
+            .unwrap();
+        let mut wire = bytes[..at].to_vec();
+        wire.extend([0x01, 0x60, 0x01, 0x04, 0x02]);
+        wire.extend(&bytes[at + 4..]);
+        let b = ErgoBox::sigma_parse_bytes(&wire).unwrap();
+        assert_eq!(
+            b.box_id(),
+            BoxId::from(Digest32::from(*blake2b256_hash(&wire)))
+        );
+        assert!(b.sigma_serialize_bytes().is_err());
+        #[cfg(feature = "json")]
+        assert!(serde_json::to_string(&b).is_err());
     }
 }

@@ -1225,3 +1225,17 @@ impl Print for CreateAvlTree {
         .into())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod small_tuple_tests {
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::SigmaSerializable;
+
+    #[test]
+    fn an_empty_tuple_prints() {
+        let tree = ErgoTree::sigma_parse_bytes(&base16::decode("00d19386008600").unwrap()).unwrap();
+        let (_, text) = tree.proposition().unwrap().pretty_print().unwrap();
+        assert!(text.contains("()"), "{text}");
+    }
+}

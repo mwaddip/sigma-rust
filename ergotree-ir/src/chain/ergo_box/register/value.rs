@@ -8,6 +8,7 @@ use crate::chain::evaluated_value::EvaluatedValue;
 use crate::mir::constant::Constant;
 use crate::mir::constant::TryExtractFromError;
 use crate::serialization::SigmaSerializable;
+use crate::serialization::SigmaSerializationError;
 
 /// Register value (either a value or bytes if it's unparseable)
 #[derive(PartialEq, Eq, Debug, Clone, From)]
@@ -61,8 +62,7 @@ pub enum RegisterValueError {
     /// Invalid register value
     #[error("Invalid register value: {0}")]
     Invalid(String),
-    /// A value with no constant form: an item that is not a value, or a tuple of fewer than two
-    /// items
+    /// A value with no constant form: an item that is not a value
     #[error("Unexpected register value: {0}")]
     UnexpectedRegisterValue(String),
 }
@@ -84,16 +84,17 @@ impl RegisterValue {
         }
     }
 
-    /// Return a seraialized bytes of the register value
-    #[allow(clippy::unwrap_used)] // it could only fail on OOM, etc.
-    pub fn sigma_serialize_bytes(&self) -> Vec<u8> {
+    /// The register value's bytes: a parsed value as written, an unparsed one as read. Fails for
+    /// a value sigmastate reads and cannot write, a constant whose type is a tuple of fewer than
+    /// two items (v6.0.7 `TypeSerializer.scala:94-95`).
+    pub fn sigma_serialize_bytes(&self) -> Result<Vec<u8>, SigmaSerializationError> {
         match self {
-            RegisterValue::Parsed(c) => c.sigma_serialize_bytes().unwrap(),
-            RegisterValue::ParsedExpr(e) => e.value.sigma_serialize_bytes().unwrap(),
+            RegisterValue::Parsed(c) => c.sigma_serialize_bytes(),
+            RegisterValue::ParsedExpr(e) => e.value.sigma_serialize_bytes(),
             RegisterValue::Invalid {
                 bytes,
                 error_msg: _,
-            } => bytes.clone(),
+            } => Ok(bytes.clone()),
         }
     }
 
@@ -157,9 +158,26 @@ mod tests {
             "should be accessible as Constant"
         );
         assert_eq!(
-            reg_value.sigma_serialize_bytes(),
+            reg_value.sigma_serialize_bytes().unwrap(),
             tuple_expr_bytes,
             "preserve tuple expr on serialization"
         );
+    }
+
+    #[test]
+    fn a_nested_small_tuple_register_parses() {
+        // SANTA case 6b: sigmastate reads and writes it as is; it used to be `Invalid` here
+        let bytes = base16::decode("8602860104020402").unwrap();
+        let reg = RegisterValue::sigma_parse_bytes(&bytes);
+        assert!(matches!(reg, RegisterValue::ParsedExpr(_)), "{reg:?}");
+        assert_eq!(reg.sigma_serialize_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_small_tuple_constant_register_is_not_written() {
+        // SANTA case 6a: read, but its type cannot be written; an error, not a panic
+        let reg = RegisterValue::sigma_parse_bytes(&[0x60, 0x01, 0x04, 0x02]);
+        assert!(matches!(reg, RegisterValue::Parsed(_)), "{reg:?}");
+        assert!(reg.sigma_serialize_bytes().is_err());
     }
 }
