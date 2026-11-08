@@ -574,6 +574,39 @@ mod tests {
     }
 
     #[test]
+    fn a_transaction_whose_output_tree_holds_a_small_tuple_type_does_not_build() {
+        // SANTA cases 1 and 2 as an output's tree, at v0 and size-flagged at v3: ergo fails
+        // building the transaction id, where it writes the tree again (`ErgoTransaction.scala:68`,
+        // `ErgoBoxCandidate.scala:142`). A size-flagged tree used to degrade here and keep its
+        // bytes, so the transaction built.
+        for tree in [
+            "00d1938c60010402010402",
+            "0b0ad1938c60010402010402",
+            "00d19360006000",
+            "0b06d19360006000",
+        ] {
+            let output = ErgoBoxCandidate {
+                value: BoxValue::SAFE_USER_MIN,
+                ergo_tree: ErgoTree::sigma_parse_bytes(&base16::decode(tree).unwrap()).unwrap(),
+                tokens: None,
+                additional_registers: NonMandatoryRegisters::empty(),
+                creation_height: 0,
+            };
+            let input = Input::new(
+                BoxId::zero(),
+                ProverResult {
+                    proof: ProofBytes::Empty,
+                    extension: ContextExtension::empty(),
+                },
+            );
+            assert!(
+                Transaction::new_from_vec(vec![input], vec![], vec![output]).is_err(),
+                "{tree}"
+            );
+        }
+    }
+
+    #[test]
     fn a_transaction_with_a_small_tuple_output_does_not_build() {
         // ergo builds a transaction's id as it reads it (`ErgoTransaction.scala:68`), by writing
         // its outputs, and sigmastate cannot write a `(Int)` constant's type: SANTA measured the
