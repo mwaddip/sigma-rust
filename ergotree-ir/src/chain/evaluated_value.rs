@@ -326,7 +326,7 @@ impl SigmaSerializable for EvaluatedValue {
         let tag = r.get_u8()?;
         let value = if tag == OpCode::TUPLE.value() {
             Ok(EvaluatedValue::Expr(EvaluatedExpr::Tuple(
-                tuple_items_sigma_parse(r)?.try_into()?,
+                tuple_items_sigma_parse(r)?,
             )))
         } else {
             Self::from_expr(Expr::parse_tagged(r, tag)?)

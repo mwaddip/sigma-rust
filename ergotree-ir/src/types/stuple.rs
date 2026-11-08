@@ -57,6 +57,18 @@ impl<T> TupleItems<T> {
         self.0
     }
 
+    /// Reads `count` items with `read_item`, in order, stopping at the first error. A `u8`
+    /// count is at most [`Self::MAX_LEN`], so the items always fit and there is no bounds error.
+    pub(crate) fn read_with<E>(
+        count: u8,
+        mut read_item: impl FnMut() -> Result<T, E>,
+    ) -> Result<Self, E> {
+        (0..count)
+            .map(|_| read_item())
+            .collect::<Result<_, _>>()
+            .map(TupleItems)
+    }
+
     /// Each item mapped by `f`
     pub fn mapped<F: FnMut(T) -> N, N>(self, f: F) -> TupleItems<N> {
         TupleItems(self.0.into_iter().map(f).collect())
@@ -88,6 +100,9 @@ impl<T> TupleItems<T> {
             .map(TupleItems)
     }
 }
+
+// `TupleItems::read_with` takes a `u8` count because every such count fits
+const _: () = assert!(TupleItems::<()>::MAX_LEN >= u8::MAX as usize);
 
 impl<T> TryFrom<Vec<T>> for TupleItems<T> {
     type Error = BoundedVecOutOfBounds;
@@ -224,5 +239,37 @@ mod tests {
             TupleItems::from([1, 2]).mapped(|x| x * 10).as_slice(),
             [10, 20]
         );
+    }
+
+    #[test]
+    fn read_with_reads_count_items_and_stops_at_the_first_error() {
+        let mut calls = 0u8;
+        let empty = TupleItems::<u8>::read_with(0, || -> Result<u8, ()> {
+            calls += 1;
+            Ok(calls)
+        });
+        assert_eq!(empty, Ok(TupleItems(vec![])));
+        assert_eq!(calls, 0);
+
+        let mut next = 0u8;
+        let full = TupleItems::read_with(255, || -> Result<u8, ()> {
+            let item = next;
+            next = next.wrapping_add(1);
+            Ok(item)
+        })
+        .unwrap();
+        assert_eq!(full.as_slice(), (0..=254).collect::<Vec<u8>>().as_slice());
+
+        let mut calls = 0u8;
+        let failed = TupleItems::<u8>::read_with(5, || {
+            calls += 1;
+            if calls == 3 {
+                Err("the third item")
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(failed, Err("the third item"));
+        assert_eq!(calls, 3);
     }
 }

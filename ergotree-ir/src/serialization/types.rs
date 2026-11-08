@@ -279,11 +279,11 @@ impl SType {
             Ok(match TypeCode::parse(c)? {
                 TypeCode::TUPLE => {
                     let len = r.get_u8()?;
-                    let mut items = Vec::with_capacity(len as usize);
-                    for _ in 0..len {
-                        items.push(SType::parse_at_depth(r, nested)?);
-                    }
-                    STuple(stuple::STuple::try_from(items)?)
+                    STuple(stuple::STuple {
+                        items: stuple::TupleItems::read_with(len, || {
+                            SType::parse_at_depth(r, nested)
+                        })?,
+                    })
                 }
                 TypeCode::SANY => SAny,
                 TypeCode::SUNIT => SUnit,
