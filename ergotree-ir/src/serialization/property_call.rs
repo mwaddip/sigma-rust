@@ -53,12 +53,24 @@ pub(crate) fn serialize_explicit_type_args<W: SigmaByteWrite>(
     Ok(())
 }
 
+/// A PropertyCall's bytes after its opcode: type code, method id, object, explicit types
+/// (`PropertyCallSerializer.scala:20-28`). sigmastate writes any MethodCall without arguments
+/// this way (`values.scala:1351`)
+pub(crate) fn serialize_property_call_body<W: SigmaByteWrite>(
+    method: &SMethod,
+    obj: &Expr,
+    type_args: &HashMap<STypeVar, SType>,
+    w: &mut W,
+) -> SigmaSerializeResult {
+    method.obj_type.type_code().sigma_serialize(w)?;
+    method.method_id().sigma_serialize(w)?;
+    obj.sigma_serialize(w)?;
+    serialize_explicit_type_args(method, type_args, w)
+}
+
 impl SigmaSerializable for PropertyCall {
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
-        self.method.obj_type.type_code().sigma_serialize(w)?;
-        self.method.method_id().sigma_serialize(w)?;
-        self.obj.sigma_serialize(w)?;
-        serialize_explicit_type_args(&self.method, &self.explicit_type_args, w)
+        serialize_property_call_body(&self.method, &self.obj, &self.explicit_type_args, w)
     }
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
