@@ -514,6 +514,12 @@ impl SigmaSerializable for SType {
                         "NoType has no serialized form".into(),
                     )),
                 },
+                // sigmastate reads such a type and cannot write it: `sys.error("Invalid Tuple type
+                // with less than 2 items")` (v6.0.7 `TypeSerializer.scala:94-95`)
+                [] | [_] => Err(SigmaSerializationError::NotSupported(format!(
+                    "a tuple type of {} items has no serialized form",
+                    items.len()
+                ))),
                 [t1, t2, t3] => {
                     TypeCode::TUPLE_PAIR2.sigma_serialize(w)?;
                     t1.sigma_serialize(w)?;
@@ -814,6 +820,65 @@ mod type_depth_tests {
         assert!(matches!(
             parse(nested(MAX_TYPE_DEPTH + 1)),
             Err(SigmaParsingError::TypeDepthExceeded(9))
+        ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod small_tuple_tests {
+    //! sigmastate reads a tuple type of any size (v6.0.7 `TypeSerializer.scala:192-198`) and
+    //! refuses to write one of fewer than 2 items (`:94-95`)
+    use crate::serialization::SigmaSerializable;
+    use crate::serialization::SigmaSerializationError;
+    use crate::types::stuple::STuple;
+    use crate::types::stuple::TupleItems;
+    use crate::types::stype::SType;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn tuple(items: Vec<SType>) -> SType {
+        SType::STuple(STuple {
+            items: TupleItems::try_from(items).unwrap(),
+        })
+    }
+
+    #[test]
+    fn small_tuple_types_parse() {
+        assert_eq!(
+            SType::sigma_parse_bytes(&[0x60, 0x00]).unwrap(),
+            tuple(vec![])
+        );
+        assert_eq!(
+            SType::sigma_parse_bytes(&[0x60, 0x01, 0x04]).unwrap(),
+            tuple(vec![SType::SInt])
+        );
+    }
+
+    #[test]
+    fn small_tuple_types_are_not_written() {
+        for t in [tuple(vec![]), tuple(vec![SType::SInt])] {
+            assert!(
+                matches!(
+                    t.sigma_serialize_bytes(),
+                    Err(SigmaSerializationError::NotSupported(_))
+                ),
+                "{t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nested_small_tuple_type_is_not_written() {
+        // `((Int), Int)`, read through the pair code `4c` (SANTA's `4c600104`)
+        let t = SType::STuple(STuple::pair(tuple(vec![SType::SInt]), SType::SInt));
+        assert_eq!(
+            SType::sigma_parse_bytes(&[0x4c, 0x60, 0x01, 0x04]).unwrap(),
+            t
+        );
+        assert!(matches!(
+            t.sigma_serialize_bytes(),
+            Err(SigmaSerializationError::NotSupported(_))
         ));
     }
 }

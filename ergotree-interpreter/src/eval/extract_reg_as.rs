@@ -31,7 +31,7 @@ impl Evaluable for ExtractRegisterAs {
             ))
         })?;
         match get_register_script_value(&ir_box, id)? {
-            Some(value) if value.tpe.as_ref() == Some(&*self.elem_tpe) => {
+            Some(value) if value.tpe == *self.elem_tpe => {
                 Ok(Value::Opt(Some(Box::new(value.v.into()))))
             }
             Some(value) => Err(EvalError::UnexpectedValue(format!(

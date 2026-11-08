@@ -13,6 +13,7 @@ use crate::mir::constant::Literal;
 use crate::mir::constant::TryExtractFromError;
 use crate::mir::expr::Expr;
 use crate::mir::global_vars::GlobalVars;
+use crate::mir::tuple::tuple_items_sigma_parse;
 use crate::mir::value::CollKind;
 use crate::serialization::op_code::OpCode;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
@@ -22,6 +23,7 @@ use crate::serialization::SigmaSerializable;
 use crate::serialization::SigmaSerializationError;
 use crate::serialization::SigmaSerializeResult;
 use crate::types::stuple::STuple;
+use crate::types::stuple::TupleItems;
 use crate::types::stype::SType;
 
 /// A register or context-extension value: what sigmastate's `getValue` reads there and casts
@@ -41,7 +43,7 @@ pub enum EvaluatedValue {
 pub enum EvaluatedExpr {
     /// A `Tuple` of 0 to 127 items: its size is a signed byte, and nothing checks its arity
     /// (`TupleSerializer.scala:27-36`)
-    Tuple(Vec<Expr>),
+    Tuple(TupleItems<Expr>),
     /// A `ConcreteCollection`
     Collection(Collection),
     /// `GroupGenerator`
@@ -60,25 +62,22 @@ impl<T: Into<Constant>> From<T> for EvaluatedValue {
 /// `CBox.scala:83-92`)
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct ScriptValue {
-    /// The type a script reads the value at: `None` for a tuple of fewer than two items, which no
-    /// script type here can name
-    pub tpe: Option<SType>,
+    /// The type a script reads the value at
+    pub tpe: SType,
     /// The data
     pub v: Literal,
 }
 
 impl EvaluatedValue {
-    /// sigmastate's `v.tpe`: `None` for a tuple of fewer than two items
-    pub fn tpe(&self) -> Option<SType> {
+    /// sigmastate's `v.tpe`
+    pub fn tpe(&self) -> SType {
         match self {
-            EvaluatedValue::Constant(c) => Some(c.tpe.clone()),
-            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => {
-                STuple::try_from(items.iter().map(Expr::tpe).collect::<Vec<_>>())
-                    .ok()
-                    .map(SType::STuple)
-            }
-            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => Some(c.tpe()),
-            EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => Some(SType::SGroupElement),
+            EvaluatedValue::Constant(c) => c.tpe.clone(),
+            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => SType::STuple(STuple {
+                items: items.mapped_ref(Expr::tpe),
+            }),
+            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => c.tpe(),
+            EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => SType::SGroupElement,
         }
     }
 
@@ -98,7 +97,9 @@ impl EvaluatedValue {
     pub(crate) fn script_data(&self) -> Result<Literal, TryExtractFromError> {
         Ok(match self {
             EvaluatedValue::Constant(c) => c.v.clone(),
-            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => tuple_script_data(items)?,
+            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => {
+                tuple_script_data(items.as_slice())?
+            }
             EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => collection_script_data(c)?,
             EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => {
                 Literal::GroupElement(generator().into())
@@ -108,7 +109,7 @@ impl EvaluatedValue {
 
     /// The type a script reads the value at (see [`ScriptValue::tpe`]), before its data is read:
     /// sigmastate's `stypeToRType(v.tpe)`, which fails for a type with no runtime form
-    pub fn script_type(&self) -> Result<Option<SType>, TryExtractFromError> {
+    pub fn script_type(&self) -> Result<SType, TryExtractFromError> {
         let has_runtime_type = match self {
             EvaluatedValue::Constant(c) => has_runtime_type(&c.tpe),
             EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => {
@@ -222,9 +223,8 @@ impl EvaluatedValue {
 
     /// The value's data as a constant, as a wallet reads it: a tuple's items as a tuple
     /// constant, a collection's items as a collection constant, the generator as a group
-    /// element. Fails when an item is not a value itself, and for a tuple of fewer than two
-    /// items, which has no type here. A script does not see this form: sigmastate hands it a
-    /// tuple expression's data as a collection (`values.scala:818-822`).
+    /// element. Fails when an item is not a value itself. A script does not see this form:
+    /// sigmastate hands it a tuple expression's data as a collection (`values.scala:818-822`).
     pub fn to_constant(&self) -> Result<Constant, TryExtractFromError> {
         match self {
             EvaluatedValue::Constant(c) => Ok(c.clone()),
@@ -238,7 +238,7 @@ impl EvaluatedValue {
     fn from_expr(expr: Expr) -> Result<Self, SigmaParsingError> {
         match expr {
             Expr::Const(c) => Ok(EvaluatedValue::Constant(c)),
-            Expr::Tuple(t) => Ok(EvaluatedValue::Expr(EvaluatedExpr::Tuple(t.items.to_vec()))),
+            Expr::Tuple(t) => Ok(EvaluatedValue::Expr(EvaluatedExpr::Tuple(t.items))),
             Expr::Collection(c) => Ok(EvaluatedValue::Expr(EvaluatedExpr::Collection(c))),
             Expr::GlobalVars(GlobalVars::GroupGenerator) => {
                 Ok(EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator))
@@ -252,30 +252,20 @@ impl EvaluatedValue {
 fn item_constant(item: &Expr) -> Result<Constant, TryExtractFromError> {
     match item {
         Expr::Const(c) => Ok(c.clone()),
-        Expr::Tuple(t) => tuple_constant(t.items.as_slice()),
+        Expr::Tuple(t) => tuple_constant(&t.items),
         Expr::Collection(c) => collection_constant(c),
         Expr::GlobalVars(GlobalVars::GroupGenerator) => Ok(generator().into()),
         other => Err(TryExtractFromError(format!("{other:?} is not a value"))),
     }
 }
 
-fn tuple_constant(items: &[Expr]) -> Result<Constant, TryExtractFromError> {
-    let no_type = || TryExtractFromError(format!("a tuple of {} items has no type", items.len()));
-    let constants = items
-        .iter()
-        .map(item_constant)
-        .collect::<Result<Vec<_>, _>>()?;
-    let tpe = STuple::try_from(constants.iter().map(|c| c.tpe.clone()).collect::<Vec<_>>())
-        .map_err(|_| no_type())?;
-    let v = constants
-        .into_iter()
-        .map(|c| c.v)
-        .collect::<Vec<_>>()
-        .try_into()
-        .map_err(|_| no_type())?;
+fn tuple_constant(items: &TupleItems<Expr>) -> Result<Constant, TryExtractFromError> {
+    let constants = items.try_mapped_ref(item_constant)?;
     Ok(Constant {
-        tpe: SType::STuple(tpe),
-        v: Literal::Tup(v),
+        tpe: SType::STuple(STuple {
+            items: constants.mapped_ref(|c| c.tpe.clone()),
+        }),
+        v: Literal::Tup(constants.mapped(|c| c.v)),
     })
 }
 
@@ -293,17 +283,6 @@ fn collection_constant(coll: &Collection) -> Result<Constant, TryExtractFromErro
             })
         }
     }
-}
-
-/// `TupleSerializer.parse` (v6.0.6 `TupleSerializer.scala:27-36`): a signed-byte size, as
-/// many values, and no arity check
-fn tuple_items_sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Vec<Expr>, SigmaParsingError> {
-    let size = r.get_i8()?;
-    if size < 0 {
-        // `safeNewArray` throws a `NegativeArraySizeException`
-        return Err(SigmaParsingError::NegativeTupleSize(size));
-    }
-    (0..size).map(|_| Expr::sigma_parse(r)).collect()
 }
 
 impl SigmaSerializable for EvaluatedValue {
@@ -347,7 +326,7 @@ impl SigmaSerializable for EvaluatedValue {
         let tag = r.get_u8()?;
         let value = if tag == OpCode::TUPLE.value() {
             Ok(EvaluatedValue::Expr(EvaluatedExpr::Tuple(
-                tuple_items_sigma_parse(r)?,
+                tuple_items_sigma_parse(r)?.try_into()?,
             )))
         } else {
             Self::from_expr(Expr::parse_tagged(r, tag)?)
@@ -469,7 +448,7 @@ mod tests {
     fn a_tuple_of_more_than_127_items_is_not_written() {
         // its size byte would read back as negative
         let items: Vec<Expr> = core::iter::repeat_n(Expr::Const(1i32.into()), 128).collect();
-        let tuple = EvaluatedValue::Expr(EvaluatedExpr::Tuple(items));
+        let tuple = EvaluatedValue::Expr(EvaluatedExpr::Tuple(items.try_into().unwrap()));
         assert!(tuple.sigma_serialize_bytes().is_err());
     }
 
@@ -494,8 +473,8 @@ mod tests {
     #[test]
     fn to_constant_reads_a_value_whose_items_are_values() {
         // each value against the constant encoding of the same data: true, the pair (1, 2),
-        // `Coll[Int](1, 2)`, `Coll(true, false)`, the generator, and a `Coll[(Int, Int)]` whose
-        // one item is the tuple expression (1, 2)
+        // `Coll[Int](1, 2)`, `Coll(true, false)`, the generator, a `Coll[(Int, Int)]` whose
+        // one item is the tuple expression (1, 2), and tuples of 1 and 0 items
         for (hex, constant_hex) in [
             ("7f", "0101"),
             ("860204020404", "580204"),
@@ -506,6 +485,8 @@ mod tests {
                 "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
             ),
             ("830158860204020404", "0c58010204"),
+            ("86010402", "60010402"),
+            ("8600", "6000"),
         ] {
             assert_eq!(
                 parse(hex).unwrap().to_constant().unwrap(),
@@ -513,10 +494,8 @@ mod tests {
                 "{hex}"
             );
         }
-        // an item that is no value, and tuples of 1 and 0 items, which have no type here
-        for hex in ["86020402a3", "86010402", "8600"] {
-            assert!(parse(hex).unwrap().to_constant().is_err(), "{hex}");
-        }
+        // an item that is no value
+        assert!(parse("86020402a3").unwrap().to_constant().is_err());
     }
 }
 
@@ -545,10 +524,7 @@ mod script_value_tests {
             let c = Constant::sigma_parse_bytes(&base16::decode(constant_hex).unwrap()).unwrap();
             assert_eq!(
                 parse(hex).to_script_value().unwrap(),
-                ScriptValue {
-                    tpe: Some(c.tpe),
-                    v: c.v
-                },
+                ScriptValue { tpe: c.tpe, v: c.v },
                 "{hex}"
             );
         }
@@ -561,7 +537,7 @@ mod script_value_tests {
         let sv = parse("860204020404").to_script_value().unwrap();
         assert_eq!(
             sv.tpe,
-            Some(SType::STuple(STuple::pair(SType::SInt, SType::SInt)))
+            SType::STuple(STuple::pair(SType::SInt, SType::SInt))
         );
         assert_eq!(
             sv.v,
@@ -575,14 +551,27 @@ mod script_value_tests {
     #[test]
     fn a_tuple_of_any_size_converts() {
         // `stypeToRType` builds a tuple type of any arity (`Evaluation.scala:37-48`): 1 and 0
-        // items convert with no type here, and 3 items (SANTA V7) at their tuple type
-        for hex in ["86010402", "8600"] {
-            assert_eq!(parse(hex).to_script_value().unwrap().tpe, None, "{hex}");
+        // items convert at their tuple type, as 3 items (SANTA V7) do
+        for (hex, items) in [("86010402", vec![SType::SInt]), ("8600", vec![])] {
+            assert_eq!(
+                parse(hex).to_script_value().unwrap().tpe,
+                SType::STuple(STuple {
+                    items: items.try_into().unwrap()
+                }),
+                "{hex}"
+            );
         }
         assert!(matches!(
             parse("8603040204040406").to_script_value().unwrap().tpe,
-            Some(SType::STuple(t)) if t.items.len() == 3
+            SType::STuple(t) if t.items.len() == 3
         ));
+        // a wallet reads a 1-item tuple as a constant of its tuple type
+        assert_eq!(
+            parse("86010402").to_constant().unwrap().tpe,
+            SType::STuple(STuple {
+                items: vec![SType::SInt].try_into().unwrap()
+            })
+        );
     }
 
     #[test]
@@ -628,7 +617,9 @@ mod v6_type_read_tests {
 
     #[test]
     fn rule_1019_reads_each_tuple_item_type_then_checks_it() {
-        let tuple = |items| EvaluatedValue::Expr(EvaluatedExpr::Tuple(items));
+        let tuple = |items: Vec<Expr>| {
+            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items.try_into().unwrap()))
+        };
         assert!(matches!(
             tuple(vec![filter(bi()), option_constant()]).check_v6_type(),
             Err(SigmaParsingError::TypeReadFailed(_))

@@ -784,7 +784,7 @@ fn subst_deserialize(expr: &Expr, ctx: &Context) -> Result<Option<Expr>, SubstDe
             // value is not substituted; the leftover node errors only on the live eval path).
             // The type decides before the data is read (`eba.tpe == SByteArray`, then
             // `eba.value`, `Interpreter.scala:114-115`).
-            if value.tpe() != Some(SType::SColl(SType::SByte.into())) {
+            if value.tpe() != SType::SColl(SType::SByte.into()) {
                 return Ok(None);
             }
             // For a `Coll[Byte]`, its constant form is its data as the script reads it

@@ -54,15 +54,23 @@ impl SigmaSerializable for Tuple {
     }
 
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
-        let items_count = r.get_u8()?;
-        let mut items = Vec::with_capacity(items_count as usize);
-        for _ in 0..items_count {
-            items.push(Expr::sigma_parse(r)?);
-        }
         Ok(Tuple {
-            items: items.try_into()?,
+            items: tuple_items_sigma_parse(r)?.try_into()?,
         })
     }
+}
+
+/// `TupleSerializer.parse` (v6.0.7 `TupleSerializer.scala:27-36`): a signed-byte size, as
+/// many values, and no arity check. Read the same way in a tree and in a register.
+pub(crate) fn tuple_items_sigma_parse<R: SigmaByteRead>(
+    r: &mut R,
+) -> Result<Vec<Expr>, SigmaParsingError> {
+    let size = r.get_i8()?;
+    if size < 0 {
+        // `safeNewArray` throws a `NegativeArraySizeException`
+        return Err(SigmaParsingError::NegativeTupleSize(size));
+    }
+    (0..size).map(|_| Expr::sigma_parse(r)).collect()
 }
 
 impl_traversable_expr!(Tuple, arr items);
@@ -108,5 +116,41 @@ mod tests {
             prop_assert_eq![sigma_serialize_roundtrip(&expr), expr];
         }
 
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod size_tests {
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::SigmaParsingError;
+    use crate::serialization::SigmaSerializable;
+    use alloc::format;
+
+    #[test]
+    fn a_script_tuple_of_128_items_is_refused() {
+        // `sigmaProp(Tuple(1, ..., 1)._1 == 1)` with 128 items: sigmastate reads the size as a
+        // signed byte, and `safeNewArray(-128)` throws `NegativeArraySizeException`, at both
+        // versions, without a degrade (SANTA case 5b)
+        let body = format!("d1938c8680{}010402", "0402".repeat(128));
+        for hex in [format!("00{body}"), format!("0b8802{body}")] {
+            let res = ErgoTree::sigma_parse_bytes(&base16::decode(&hex).unwrap());
+            assert!(
+                matches!(res, Err(SigmaParsingError::NegativeTupleSize(-128))),
+                "{res:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_script_tuple_of_127_items_parses() {
+        // the largest size a signed byte holds (SANTA case 5a): parsed and written back as is
+        let body = format!("d1938c867f{}010402", "0402".repeat(127));
+        for hex in [format!("00{body}"), format!("0b8602{body}")] {
+            let bytes = base16::decode(&hex).unwrap();
+            let tree = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+            assert!(matches!(tree, ErgoTree::Parsed(_)), "{hex}");
+            assert_eq!(tree.sigma_serialize_bytes().unwrap(), bytes);
+        }
     }
 }

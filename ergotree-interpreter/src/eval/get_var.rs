@@ -18,7 +18,7 @@ impl Evaluable for GetVar {
             Some(value) => value,
         };
         let script_value = value.to_script_value()?;
-        if script_value.tpe.as_ref() == Some(&self.var_tpe) {
+        if script_value.tpe == self.var_tpe {
             Ok(Some(script_value.v).into())
         } else {
             Err(TryExtractFromError(format!(

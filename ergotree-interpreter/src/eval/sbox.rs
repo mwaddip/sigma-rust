@@ -57,7 +57,7 @@ pub(crate) fn get_register_script_value(
                 Some(value) => {
                     let c = value.as_constant().map_err(|e| unreadable(id, Some(e)))?;
                     Ok(Some(ScriptValue {
-                        tpe: Some(c.tpe.clone()),
+                        tpe: c.tpe.clone(),
                         v: c.v.clone(),
                     }))
                 }
@@ -67,10 +67,7 @@ pub(crate) fn get_register_script_value(
         RegisterId::MandatoryRegisterId(_) => Ok(ergo_box
             .get_register(id)
             .map_err(|e| unreadable(id, Some(e)))?
-            .map(|c| ScriptValue {
-                tpe: Some(c.tpe),
-                v: c.v,
-            })),
+            .map(|c| ScriptValue { tpe: c.tpe, v: c.v })),
     }
 }
 
@@ -107,7 +104,7 @@ pub(crate) static GET_REG_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
         unreachable!()
     };
     match reg_val_opt {
-        Some(value) if value.tpe.as_ref() == Some(&**expected_type) => {
+        Some(value) if value.tpe == **expected_type => {
             Ok(Value::Opt(Some(Box::new(value.v.into()))))
         }
         Some(value) => Err(EvalError::UnexpectedValue(format!(
