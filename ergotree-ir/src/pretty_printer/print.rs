@@ -50,6 +50,7 @@ use crate::mir::if_op::If;
 use crate::mir::logical_not::LogicalNot;
 use crate::mir::long_to_byte_array::LongToByteArray;
 use crate::mir::method_call::MethodCall;
+use crate::mir::mod_q::{ModQ, ModQArithOp, ModQArithOpKind};
 use crate::mir::multiply_group::MultiplyGroup;
 use crate::mir::negation::Negation;
 use crate::mir::option_get::OptionGet;
@@ -174,6 +175,8 @@ impl Print for Expr {
             Expr::XorOf(v) => v.print(w),
             Expr::TreeLookup(v) => v.expr().print(w),
             Expr::CreateAvlTree(v) => v.print(w),
+            Expr::ModQ(v) => v.print(w),
+            Expr::ModQArithOp(v) => v.print(w),
         }
     }
 }
@@ -1144,6 +1147,36 @@ impl Print for TreeLookup {
                 proof: Box::new(proof),
             },
             source_span: SourceSpan { offset, length },
+        }
+        .into())
+    }
+}
+
+impl Print for ModQ {
+    fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
+        let input = self.input.print(w)?;
+        write!(w, ".modQ")?;
+        Ok(ModQ {
+            input: Box::new(input),
+        }
+        .into())
+    }
+}
+
+impl Print for ModQArithOp {
+    fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
+        let name = match self.kind {
+            ModQArithOpKind::PlusModQ => "plusModQ",
+            ModQArithOpKind::MinusModQ => "minusModQ",
+        };
+        let left = self.left.print(w)?;
+        write!(w, ".{name}(")?;
+        let right = self.right.print(w)?;
+        write!(w, ")")?;
+        Ok(ModQArithOp {
+            left: Box::new(left),
+            right: Box::new(right),
+            kind: self.kind,
         }
         .into())
     }

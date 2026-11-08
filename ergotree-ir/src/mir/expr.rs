@@ -65,6 +65,7 @@ use super::if_op::If;
 use super::logical_not::LogicalNot;
 use super::long_to_byte_array::LongToByteArray;
 use super::method_call::MethodCall;
+use super::mod_q::{ModQ, ModQArithOp};
 use super::multiply_group::MultiplyGroup;
 use super::negation::Negation;
 use super::option_get::OptionGet;
@@ -239,6 +240,10 @@ pub enum Expr {
     TreeLookup(Spanned<TreeLookup>),
     /// Create an AVL tree
     CreateAvlTree(CreateAvlTree),
+    /// A `BigInt` modulo the group order (parsed, never evaluated)
+    ModQ(ModQ),
+    /// `PlusModQ` / `MinusModQ` (parsed, never evaluated)
+    ModQArithOp(ModQArithOp),
 }
 
 impl Expr {
@@ -311,6 +316,8 @@ impl Expr {
             Expr::ExtractBytesWithNoRef(v) => v.tpe(),
             Expr::TreeLookup(v) => v.expr().tpe(),
             Expr::CreateAvlTree(v) => v.tpe(),
+            Expr::ModQ(v) => v.tpe(),
+            Expr::ModQArithOp(v) => v.tpe(),
         }
     }
 
@@ -603,6 +610,8 @@ impl Traversable for Expr {
             Expr::ExtractBytesWithNoRef(op) => op.children(),
             Expr::TreeLookup(op) => op.children(),
             Expr::CreateAvlTree(op) => op.children(),
+            Expr::ModQ(op) => op.children(),
+            Expr::ModQArithOp(op) => op.children(),
         }
     }
     fn children_mut<'a>(&'a mut self) -> Box<dyn Iterator<Item = &'a mut Expr> + 'a> {
@@ -673,6 +682,8 @@ impl Traversable for Expr {
             Expr::ExtractBytesWithNoRef(op) => op.children_mut(),
             Expr::TreeLookup(op) => op.children_mut(),
             Expr::CreateAvlTree(op) => op.children_mut(),
+            Expr::ModQ(op) => op.children_mut(),
+            Expr::ModQArithOp(op) => op.children_mut(),
         }
     }
 }

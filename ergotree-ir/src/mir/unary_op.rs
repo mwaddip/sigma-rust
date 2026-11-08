@@ -25,6 +25,7 @@ use super::extract_id::ExtractId;
 use super::extract_script_bytes::ExtractScriptBytes;
 use super::logical_not::LogicalNot;
 use super::long_to_byte_array::LongToByteArray;
+use super::mod_q::ModQ;
 use super::negation::Negation;
 use super::option_get::OptionGet;
 use super::option_is_defined::OptionIsDefined;
@@ -94,6 +95,7 @@ impl_one_arg_op_parse_build!(
     ExtractScriptBytes,
     LogicalNot,
     LongToByteArray,
+    ModQ,
     Negation,
     OptionGet,
     OptionIsDefined,

@@ -56,6 +56,7 @@ use crate::mir::if_op::If;
 use crate::mir::logical_not::LogicalNot;
 use crate::mir::long_to_byte_array::LongToByteArray;
 use crate::mir::method_call::MethodCall;
+use crate::mir::mod_q::{ModQ, ModQArithOp, ModQArithOpKind};
 use crate::mir::multiply_group::MultiplyGroup;
 use crate::mir::negation::Negation;
 use crate::mir::option_get::OptionGet;
@@ -242,6 +243,13 @@ impl Expr {
                 XorOf::OP_CODE => Ok(XorOf::sigma_parse(r)?.into()),
                 TreeLookup::OP_CODE => Ok(TreeLookup::sigma_parse(r)?.into()),
                 CreateAvlTree::OP_CODE => Ok(CreateAvlTree::sigma_parse(r)?.into()),
+                ModQ::OP_CODE => Ok(ModQ::sigma_parse(r)?.into()),
+                OpCode::PLUS_MOD_Q => {
+                    Ok(ModQArithOp::sigma_parse_operands(ModQArithOpKind::PlusModQ, r)?.into())
+                }
+                OpCode::MINUS_MOD_Q => {
+                    Ok(ModQArithOp::sigma_parse_operands(ModQArithOpKind::MinusModQ, r)?.into())
+                }
                 o => Err(SigmaParsingError::NotImplementedOpCode(format!(
                     "{0}(shift {1})",
                     o.value(),
@@ -365,6 +373,13 @@ impl SigmaSerializable for Expr {
             Expr::ExtractBytesWithNoRef(op) => op.sigma_serialize_w_opcode(w),
             Expr::TreeLookup(op) => op.sigma_serialize_w_opcode(w),
             Expr::CreateAvlTree(op) => op.sigma_serialize_w_opcode(w),
+            Expr::ModQ(op) => op.sigma_serialize_w_opcode(w),
+            // `ModQArithOpSerializer.serialize`: the opcode, then the two operands
+            Expr::ModQArithOp(op) => {
+                op.op_code().sigma_serialize(w)?;
+                op.left.sigma_serialize(w)?;
+                op.right.sigma_serialize(w)
+            }
         }
     }
 

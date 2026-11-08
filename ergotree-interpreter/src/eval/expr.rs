@@ -117,6 +117,8 @@ impl Evaluable for Expr {
             Expr::ExtractBytesWithNoRef(op) => op.eval(env, ctx),
             Expr::TreeLookup(op) => op.eval(env, ctx),
             Expr::CreateAvlTree(_) => Err(not_evaluated("CreateAvlTree")),
+            Expr::ModQ(_) => Err(not_evaluated("ModQ")),
+            Expr::ModQArithOp(_) => Err(not_evaluated("ModQArithOp")),
         };
         res.enrich_err(self.span(), env)
     }

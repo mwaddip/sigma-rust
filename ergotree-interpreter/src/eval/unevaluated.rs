@@ -19,12 +19,14 @@ mod tests {
     use crate::eval::test_util::try_eval_out_wo_ctx;
     use alloc::string::ToString;
     use alloc::vec;
+    use ergotree_ir::bigint256::BigInt256;
     use ergotree_ir::mir::avl_tree_data::AvlTreeData;
     use ergotree_ir::mir::bin_op::{BinOp, BinOpKind, BitOp, LogicalOp, RelationOp};
     use ergotree_ir::mir::bit_inversion::BitInversion;
     use ergotree_ir::mir::constant::Constant;
     use ergotree_ir::mir::create_avl_tree::CreateAvlTree;
     use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::mod_q::{ModQ, ModQArithOp, ModQArithOpKind};
     use ergotree_ir::mir::option_get::OptionGet;
     use ergotree_ir::mir::unary_op::OneArgOpTryBuild;
 
@@ -96,5 +98,25 @@ mod tests {
         let eq = bin_op(RelationOp::Eq.into(), bit_or, 3i32.into());
         let expr = bin_op(LogicalOp::And.into(), false.into(), eq);
         assert!(!try_eval_out_wo_ctx::<bool>(&expr).unwrap());
+    }
+
+    /// sigmastate defines no `eval` for `ModQ` and `ModQArithOp` (`trees.scala:954-975`)
+    #[test]
+    fn mod_q_family_does_not_evaluate() {
+        let one = || Expr::from(BigInt256::from(1i64));
+        let expr: Expr = ModQ {
+            input: one().into(),
+        }
+        .into();
+        assert_not_evaluated(try_eval_out_wo_ctx::<BigInt256>(&expr), "ModQ");
+        for kind in [ModQArithOpKind::PlusModQ, ModQArithOpKind::MinusModQ] {
+            let expr: Expr = ModQArithOp {
+                left: one().into(),
+                right: one().into(),
+                kind,
+            }
+            .into();
+            assert_not_evaluated(try_eval_out_wo_ctx::<BigInt256>(&expr), "ModQArithOp");
+        }
     }
 }
