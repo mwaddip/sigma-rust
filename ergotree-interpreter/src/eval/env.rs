@@ -1,22 +1,31 @@
 use core::fmt::Display;
-use hashbrown::HashMap;
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use ergotree_ir::mir::val_def::ValId;
+use ergotree_ir::mir::value::bindings_to_static;
+use ergotree_ir::mir::value::Bindings;
 use ergotree_ir::mir::value::Value;
 
-/// Environment for the interpreter
+/// Environment for the interpreter. Copy-on-write: a lambda captures it by sharing its bindings
+/// (`FuncValue.eval` closes over the JVM's immutable `DataEnv`), and a later change copies them
+/// first, so a captured environment never changes
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Env<'ctx> {
-    store: HashMap<ValId, Value<'ctx>>,
+    store: Bindings<'ctx>,
 }
 
 impl<'ctx> Env<'ctx> {
     /// Empty environment
     pub fn empty() -> Env<'ctx> {
         Env {
-            store: HashMap::new(),
+            store: Default::default(),
         }
+    }
+
+    /// The environment of these bindings: a lambda's captured ones
+    pub(crate) fn from_bindings(store: Bindings<'ctx>) -> Env<'ctx> {
+        Env { store }
     }
 
     /// Returns `true` if the environment is empty
@@ -26,19 +35,19 @@ impl<'ctx> Env<'ctx> {
 
     /// Extend this environment (create new) with added element
     pub fn extend(&self, idx: ValId, v: Value<'ctx>) -> Env<'ctx> {
-        let mut new_store = self.store.clone();
-        new_store.insert(idx, v);
-        Env { store: new_store }
+        let mut new_env = self.clone();
+        new_env.insert(idx, v);
+        new_env
     }
 
     /// Insert a Value for the given ValId
     pub fn insert(&mut self, idx: ValId, v: Value<'ctx>) {
-        self.store.insert(idx, v);
+        Arc::make_mut(&mut self.store).insert(idx, v);
     }
 
     /// Remove a Value for the given ValId
     pub fn remove(&mut self, idx: &ValId) {
-        self.store.remove(idx);
+        Arc::make_mut(&mut self.store).remove(idx);
     }
 
     /// Get an element
@@ -46,19 +55,16 @@ impl<'ctx> Env<'ctx> {
         self.store.get(&idx)
     }
 
-    /// Snapshot the current bindings — used to capture the defining
-    /// environment when a `FuncValue` evaluates to a lambda value.
-    pub(crate) fn bindings(&self) -> Vec<(ValId, Value<'ctx>)> {
-        self.store.iter().map(|(&k, v)| (k, v.clone())).collect()
+    /// The current bindings, shared: what a `FuncValue` captures when it evaluates to a lambda
+    /// value
+    pub(crate) fn shared(&self) -> Bindings<'ctx> {
+        self.store.clone()
     }
+
     /// Convert borrowed data to Arc
     pub(crate) fn to_static(&'ctx self) -> Env<'static> {
         Env {
-            store: self
-                .store
-                .iter()
-                .map(|(&k, v)| (k, v.to_static()))
-                .collect(),
+            store: bindings_to_static(&self.store),
         }
     }
 }
