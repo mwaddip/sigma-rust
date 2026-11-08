@@ -138,7 +138,8 @@ impl Display for LogicalOp {
     }
 }
 
-/// Bitwise operations
+/// Bitwise operations. sigmastate parses all six and evaluates none (v6.0.7 `trees.scala:911-946`
+/// defines no `eval`)
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub enum BitOp {
@@ -148,6 +149,12 @@ pub enum BitOp {
     BitAnd,
     /// Bitwise Xor
     BitXor,
+    /// Arithmetic shift right
+    BitShiftRight,
+    /// Shift left
+    BitShiftLeft,
+    /// Logical shift right
+    BitShiftRightZeroed,
 }
 
 impl From<BitOp> for OpCode {
@@ -156,6 +163,9 @@ impl From<BitOp> for OpCode {
             BitOp::BitOr => OpCode::BIT_OR,
             BitOp::BitAnd => OpCode::BIT_AND,
             BitOp::BitXor => OpCode::BIT_XOR,
+            BitOp::BitShiftRight => OpCode::BIT_SHIFT_RIGHT,
+            BitOp::BitShiftLeft => OpCode::BIT_SHIFT_LEFT,
+            BitOp::BitShiftRightZeroed => OpCode::BIT_SHIFT_RIGHT_ZEROED,
         }
     }
 }
@@ -166,6 +176,9 @@ impl Display for BitOp {
             BitOp::BitOr => write!(f, "|"),
             BitOp::BitAnd => write!(f, "&"),
             BitOp::BitXor => write!(f, "^"),
+            BitOp::BitShiftRight => write!(f, ">>"),
+            BitOp::BitShiftLeft => write!(f, "<<"),
+            BitOp::BitShiftRightZeroed => write!(f, ">>>"),
         }
     }
 }

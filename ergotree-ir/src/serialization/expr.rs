@@ -191,6 +191,11 @@ impl Expr {
                 OpCode::BIT_OR => Ok(bin_op_sigma_parse(BitOp::BitOr.into(), r)?),
                 OpCode::BIT_AND => Ok(bin_op_sigma_parse(BitOp::BitAnd.into(), r)?),
                 OpCode::BIT_XOR => Ok(bin_op_sigma_parse(BitOp::BitXor.into(), r)?),
+                OpCode::BIT_SHIFT_RIGHT => Ok(bin_op_sigma_parse(BitOp::BitShiftRight.into(), r)?),
+                OpCode::BIT_SHIFT_LEFT => Ok(bin_op_sigma_parse(BitOp::BitShiftLeft.into(), r)?),
+                OpCode::BIT_SHIFT_RIGHT_ZEROED => {
+                    Ok(bin_op_sigma_parse(BitOp::BitShiftRightZeroed.into(), r)?)
+                }
                 OpCode::BLOCK_VALUE => Ok(Expr::BlockValue(BlockValue::sigma_parse(r)?.into())),
                 OpCode::FUNC_VALUE => Ok(Expr::FuncValue(FuncValue::sigma_parse(r)?)),
                 OpCode::APPLY => Ok(Expr::Apply(Apply::sigma_parse(r)?)),

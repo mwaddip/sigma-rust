@@ -186,8 +186,9 @@ mod pair_form_tests {
 
     #[test]
     fn a_bitwise_operation_on_a_collection_rejects() {
-        // BitOr, BitAnd and BitXor fail `BitOp`'s `require`, unsized and size-flagged alike
-        for op in [0xf2, 0xf3, 0xf5] {
+        // BitOr, BitAnd, BitXor and the three shifts fail `BitOp`'s `require`, unsized and
+        // size-flagged alike
+        for op in [0xf2, 0xf3, 0xf5, 0xf6, 0xf7, 0xf8] {
             let unsized_tree = tree(op);
             let sized_tree = [&[0x08, 0x0c][..], &unsized_tree[1..]].concat();
             for bytes in [unsized_tree, sized_tree] {
@@ -198,6 +199,22 @@ mod pair_form_tests {
                     ),
                     "{bytes:02x?}"
                 );
+            }
+        }
+    }
+
+    /// sigmastate reads the three shifts as it reads `BitOr` (v6.0.7 `ValueSerializer.scala:44-46`,
+    /// `SigmaBuilder.scala:646-653`): `sigmaProp(op(1, 2) == 4)`, unsized v0 and size-flagged v3
+    #[test]
+    fn shifts_parse_and_round_trip() {
+        for op in [0xf6, 0xf7, 0xf8] {
+            let body = [0xd1, 0x93, op, 0x04, 0x02, 0x04, 0x04, 0x04, 0x08];
+            let unsized_tree = [&[0x00][..], &body].concat();
+            let sized_tree = [&[0x0b, body.len() as u8][..], &body].concat();
+            for bytes in [unsized_tree, sized_tree] {
+                let parsed = ErgoTree::sigma_parse_bytes(&bytes).unwrap();
+                assert!(matches!(parsed, ErgoTree::Parsed(_)), "{bytes:02x?}");
+                assert_eq!(parsed.sigma_serialize_bytes().unwrap(), bytes);
             }
         }
     }
