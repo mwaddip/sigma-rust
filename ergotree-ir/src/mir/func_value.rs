@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -10,12 +11,14 @@ use crate::serialization::sigma_byte_writer::SigmaByteWrite;
 use crate::serialization::SigmaParsingError;
 use crate::serialization::SigmaSerializable;
 use crate::serialization::SigmaSerializeResult;
-use crate::traversable::impl_traversable_expr;
+use crate::traversable::Traversable;
 use crate::types::sfunc::SFunc;
 use crate::types::stype::SType;
 
 use super::expr::Expr;
 use super::val_def::ValId;
+use super::value::Bindings;
+use super::value::Lambda;
 
 #[cfg(feature = "arbitrary")]
 use proptest_derive::Arbitrary;
@@ -53,7 +56,9 @@ impl core::fmt::Display for FuncArg {
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct FuncValue {
     args: Vec<FuncArg>,
-    body: Box<Expr>,
+    /// Shared with every lambda value evaluated from this node, as sigmastate's closure holds
+    /// its `FuncValue`'s body
+    body: Arc<Expr>,
     tpe: SType,
 }
 
@@ -69,7 +74,7 @@ impl FuncValue {
         });
         FuncValue {
             args,
-            body: Box::new(body),
+            body: Arc::new(body),
             tpe,
         }
     }
@@ -77,10 +82,8 @@ impl FuncValue {
     /// Recomputes the type from the arguments and the current body: sigmastate's `lazy val tpe`
     /// is computed afresh on a node it rebuilds, as the substitution at spend does
     pub(crate) fn rebuild(&mut self) {
-        *self = FuncValue::new(
-            core::mem::take(&mut self.args),
-            core::mem::replace(&mut *self.body, Expr::Const(true.into())),
-        );
+        let body = core::mem::replace(&mut self.body, Arc::new(Expr::Const(true.into())));
+        *self = FuncValue::new(core::mem::take(&mut self.args), Arc::unwrap_or_clone(body));
     }
 
     /// Function arguments
@@ -93,9 +96,18 @@ impl FuncValue {
         &self.body
     }
 
-    /// Function body
+    /// Function body. A body a lambda value shares is copied first, so the lambda keeps its own
     pub fn body_mut(&mut self) -> &mut Expr {
-        &mut self.body
+        Arc::make_mut(&mut self.body)
+    }
+
+    /// The lambda value this function evaluates to over `captured`: it shares the body
+    pub fn closure<'ctx>(&self, captured: Bindings<'ctx>) -> Lambda<'ctx> {
+        Lambda {
+            args: self.args.clone(),
+            body: self.body.clone(),
+            captured,
+        }
     }
 
     /// Type
@@ -123,7 +135,17 @@ impl SigmaSerializable for FuncValue {
     }
 }
 
-impl_traversable_expr!(FuncValue, boxed body);
+impl Traversable for FuncValue {
+    type Item = Expr;
+
+    fn children<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Expr> + 'a> {
+        Box::new(core::iter::once(&*self.body))
+    }
+
+    fn children_mut<'a>(&'a mut self) -> Box<dyn Iterator<Item = &'a mut Expr> + 'a> {
+        Box::new(core::iter::once(self.body_mut()))
+    }
+}
 
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
@@ -136,6 +158,30 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn rebuild_does_not_change_a_shared_body() {
+        // a lambda value shares the node's body; changing a copy of the node must not reach it
+        let fv = FuncValue::new(
+            alloc::vec![FuncArg {
+                idx: 1.into(),
+                tpe: SType::SInt,
+            }],
+            Expr::Const(1i32.into()),
+        );
+        let mut changed = fv.clone();
+        *changed.body_mut() = Expr::Const(2i32.into());
+        let mut walked = fv.clone();
+        if let Some(child) = crate::traversable::Traversable::children_mut(&mut walked).next() {
+            *child = Expr::Const(3i32.into());
+        }
+        let mut rebuilt = fv.clone();
+        rebuilt.rebuild();
+        assert_eq!(fv.body(), &Expr::Const(1i32.into()));
+        assert_eq!(changed.body(), &Expr::Const(2i32.into()));
+        assert_eq!(walked.body(), &Expr::Const(3i32.into()));
+        assert_eq!(rebuilt.body(), &Expr::Const(1i32.into()));
+    }
 
     impl Arbitrary for FuncValue {
         type Strategy = BoxedStrategy<Self>;

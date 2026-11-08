@@ -7,6 +7,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::convert::TryInto;
 use core::fmt::Formatter;
+use hashbrown::HashMap;
 
 use impl_trait_for_tuples::impl_for_tuples;
 use sigma_util::AsVecI8;
@@ -210,19 +211,72 @@ where
     }
 }
 
+/// Bindings of an environment, shared: a lambda captures its defining environment by holding
+/// them, as the JVM's closure holds its immutable `DataEnv` (v6.0.7 `values.scala:1069-1086`).
+/// A captured lambda holds its own, so the values form a graph whose shared parts must not be
+/// copied or walked once per path: [`Value::to_static`] and a lambda's `Debug` do neither
+pub type Bindings<'ctx> = Arc<HashMap<ValId, Value<'ctx>>>;
+
+/// Converts `bindings` to `'static`, each shared map once (see [`Value::to_static`])
+pub fn bindings_to_static<'ctx>(bindings: &'ctx Bindings<'ctx>) -> Bindings<'static> {
+    bindings_to_static_shared(bindings, &mut StaticMemo::default())
+}
+
+/// What one conversion has converted so far, by the address it came from: captured maps,
+/// collections' items and borrowed boxes, each shared by many values, so each is converted
+/// once however many paths reach it
+#[derive(Default)]
+struct StaticMemo {
+    maps: HashMap<usize, Bindings<'static>>,
+    items: HashMap<usize, Arc<[Value<'static>]>>,
+    boxes: HashMap<usize, Arc<ErgoBox>>,
+}
+
+fn bindings_to_static_shared<'ctx>(
+    bindings: &'ctx Bindings<'ctx>,
+    memo: &mut StaticMemo,
+) -> Bindings<'static> {
+    let key = Arc::as_ptr(bindings) as usize;
+    if let Some(done) = memo.maps.get(&key) {
+        return done.clone();
+    }
+    let done: Bindings<'static> = Arc::new(
+        bindings
+            .iter()
+            .map(|(k, v)| (*k, v.to_static_shared(memo)))
+            .collect(),
+    );
+    memo.maps.insert(key, done.clone());
+    done
+}
+
 /// Lambda
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct Lambda<'ctx> {
     /// Argument placeholders
     pub args: Vec<FuncArg>,
-    /// Body
-    pub body: Box<Expr>,
+    /// Body, shared with the `FuncValue` it was evaluated from
+    pub body: Arc<Expr>,
     /// Bindings captured from the defining environment. The JVM's
     /// `FuncValue.eval` returns a closure over the env it was created in, so
     /// a lambda that escapes its creation site (returned from another lambda,
     /// bound to a `val`) still sees those bindings when applied — the
     /// caller's environment at application time plays no role.
-    pub captured: Vec<(ValId, Value<'ctx>)>,
+    pub captured: Bindings<'ctx>,
+}
+
+impl core::fmt::Debug for Lambda<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        // the ids only: a captured lambda holds its own captured values, so printing them
+        // printed every earlier definition again, once per path to it
+        let mut captured: Vec<&ValId> = self.captured.keys().collect();
+        captured.sort();
+        f.debug_struct("Lambda")
+            .field("args", &self.args)
+            .field("body", &self.body)
+            .field("captured", &captured)
+            .finish()
+    }
 }
 
 /// Runtime value
@@ -276,6 +330,11 @@ impl<'ctx> Value<'ctx> {
     /// Convert a Value<'ctx> to a Value<'static>.
     /// Useful for returning errors especially in bindings where we can't return  borrowed values
     pub fn to_static(&'ctx self) -> Value<'static> {
+        self.to_static_shared(&mut StaticMemo::default())
+    }
+
+    /// [`Value::to_static`], converting each shared captured map once per conversion
+    fn to_static_shared(&'ctx self, memo: &mut StaticMemo) -> Value<'static> {
         match self {
             Value::Boolean(b) => Value::Boolean(*b),
             Value::Byte(b) => Value::Byte(*b),
@@ -290,16 +349,28 @@ impl<'ctx> Value<'ctx> {
             Value::AvlTree(t) => Value::AvlTree(t.clone()),
             Value::Coll(coll) => match coll {
                 CollKind::NativeColl(c) => Value::Coll(CollKind::NativeColl(c.clone())),
-                CollKind::WrappedColl { elem_tpe, items } => Value::Coll(CollKind::WrappedColl {
-                    items: items.iter().map(|v| v.to_static()).collect(),
-                    elem_tpe: elem_tpe.clone(),
-                }),
+                CollKind::WrappedColl { elem_tpe, items } => {
+                    let key = Arc::as_ptr(items) as *const Value as usize;
+                    let items = match memo.items.get(&key) {
+                        Some(done) => done.clone(),
+                        None => {
+                            let done: Arc<[Value<'static>]> =
+                                items.iter().map(|v| v.to_static_shared(memo)).collect();
+                            memo.items.insert(key, done.clone());
+                            done
+                        }
+                    };
+                    Value::Coll(CollKind::WrappedColl {
+                        items,
+                        elem_tpe: elem_tpe.clone(),
+                    })
+                }
             },
             Value::Tup(tup) => Value::Tup(
                 #[allow(clippy::unwrap_used)]
                 // The resulting tuple will be of the same length, so BoundedVec creation won't fail
                 tup.iter()
-                    .map(|v| v.to_static())
+                    .map(|v| v.to_static_shared(memo))
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
@@ -309,16 +380,25 @@ impl<'ctx> Value<'ctx> {
             Value::Header(h) => Value::Header(h.clone()),
             Value::PreHeader(h) => Value::PreHeader(h.clone()),
             Value::Global => Value::Global,
-            Value::CBox(c) => Value::CBox(c.to_static()),
-            Value::Opt(opt) => Value::Opt(Option::as_ref(opt).map(|o| o.to_static()).map(Box::new)),
+            Value::CBox(Ref::Arc(b)) => Value::CBox(Ref::Arc(b.clone())),
+            Value::CBox(Ref::Borrowed(b)) => {
+                let key = *b as *const ErgoBox as usize;
+                let owned = memo
+                    .boxes
+                    .entry(key)
+                    .or_insert_with(|| Arc::new((*b).clone()))
+                    .clone();
+                Value::CBox(Ref::Arc(owned))
+            }
+            Value::Opt(opt) => Value::Opt(
+                Option::as_ref(opt)
+                    .map(|o| o.to_static_shared(memo))
+                    .map(Box::new),
+            ),
             Value::Lambda(l) => Value::Lambda(Lambda {
                 args: l.args.clone(),
                 body: l.body.clone(),
-                captured: l
-                    .captured
-                    .iter()
-                    .map(|(k, v)| (*k, v.to_static()))
-                    .collect(),
+                captured: bindings_to_static_shared(&l.captured, memo),
             }),
         }
     }
@@ -866,5 +946,57 @@ mod tests {
         ));
         let as_vec = coll.as_vec();
         assert_eq!(as_vec, wrapped);
+    }
+
+    #[test]
+    fn to_static_converts_a_shared_collection_and_box_once() {
+        // a collection bound in two distinct captured maps, holding one borrowed box twice:
+        // converting each copy of it rebuilt the collection and cloned the box again, so the
+        // diagnostics of many lambdas over `OUTPUTS` cloned every output once per lambda
+        let ergo_box = sigma_test_util::force_any_val::<ErgoBox>();
+        let coll = Value::Coll(CollKind::WrappedColl {
+            elem_tpe: SType::SBox,
+            items: Arc::from(vec![
+                Value::CBox(Ref::Borrowed(&ergo_box)),
+                Value::CBox(Ref::Borrowed(&ergo_box)),
+            ]),
+        });
+        fn lambda(captured: HashMap<ValId, Value<'_>>) -> Value<'_> {
+            Value::Lambda(Lambda {
+                args: vec![],
+                body: Arc::new(Expr::Const(true.into())),
+                captured: Arc::new(captured),
+            })
+        }
+        let inner_1 = lambda([(ValId::from(1), coll.clone())].into_iter().collect());
+        let inner_2 = lambda([(ValId::from(1), coll)].into_iter().collect());
+        let outer = lambda(
+            [(ValId::from(2), inner_1), (ValId::from(3), inner_2)]
+                .into_iter()
+                .collect(),
+        );
+        let converted = outer.to_static();
+        let items_of = |id: u32| -> Arc<[Value<'static>]> {
+            let Value::Lambda(outer) = &converted else {
+                return Arc::from(vec![]);
+            };
+            match outer.captured.get(&ValId::from(id)) {
+                Some(Value::Lambda(inner)) => match inner.captured.get(&ValId::from(1)) {
+                    Some(Value::Coll(CollKind::WrappedColl { items, .. })) => items.clone(),
+                    _ => Arc::from(vec![]),
+                },
+                _ => Arc::from(vec![]),
+            }
+        };
+        let (items_2, items_3) = (items_of(2), items_of(3));
+        assert_eq!(items_2.len(), 2);
+        assert!(Arc::ptr_eq(&items_2, &items_3));
+        match (&items_2[0], &items_2[1]) {
+            (Value::CBox(Ref::Arc(a)), Value::CBox(Ref::Arc(b))) => assert!(Arc::ptr_eq(a, b)),
+            other => assert!(
+                matches!(other, (Value::CBox(_), Value::CBox(_))),
+                "{other:?}"
+            ),
+        }
     }
 }

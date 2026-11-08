@@ -498,9 +498,13 @@ pub(crate) trait Evaluable {
 /// bindings (`env1 = env + (argId -> value)`) — the caller's environment at
 /// application time plays no role.
 ///
-/// The captured base is materialized once per lambda value; each `invoke`
-/// overwrites the argument slot(s), which matches Scala's per-call extension
-/// because an argument binding always shadows a same-id captured binding.
+/// The invoker starts from the captured bindings, shared. Its first argument
+/// binding copies them while the lambda still holds them: once per invoker,
+/// so once per `Apply` and per `Map`/`Filter`/… call, and again for an element
+/// whose body keeps a closure over the invoker's bindings (the JVM's
+/// persistent map extends in O(log n) instead). Each `invoke` overwrites the
+/// argument slot(s), which matches Scala's per-call extension because an
+/// argument binding always shadows a same-id captured binding.
 pub(crate) struct LambdaInvoker<'l, 'ctx> {
     lambda: &'l Lambda<'ctx>,
     env: Env<'ctx>,
@@ -508,11 +512,10 @@ pub(crate) struct LambdaInvoker<'l, 'ctx> {
 
 impl<'l, 'ctx> LambdaInvoker<'l, 'ctx> {
     pub(crate) fn new(lambda: &'l Lambda<'ctx>) -> Self {
-        let mut env = Env::empty();
-        for (idx, v) in &lambda.captured {
-            env.insert(*idx, v.clone());
+        Self {
+            lambda,
+            env: Env::from_bindings(lambda.captured.clone()),
         }
-        Self { lambda, env }
     }
 
     /// Bind `args` positionally to the lambda's parameters and evaluate the
@@ -1630,8 +1633,8 @@ mod value_check_tests {
                 idx: 1.into(),
                 tpe: SType::SInt,
             }],
-            body: Box::new(int(1)),
-            captured: vec![],
+            body: alloc::sync::Arc::new(int(1)),
+            captured: Default::default(),
         });
         let rows: Vec<(SType, Value<'static>)> = vec![
             (SType::SBoolean, Value::Boolean(true)),
@@ -1734,8 +1737,8 @@ mod value_check_tests {
                     tpe: SType::SInt,
                 },
             ],
-            body: Box::new(int(1)),
-            captured: vec![],
+            body: alloc::sync::Arc::new(int(1)),
+            captured: Default::default(),
         });
         let unary = SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt));
         assert!(check_value_of_type(&unary, &two_args, v3).is_err());
