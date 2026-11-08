@@ -2,6 +2,21 @@
 
 Rust implementation of [ErgoScript](https://github.com/ScorexFoundation/sigmastate-interpreter) cryptocurrency scripting language.
 
+## About this fork
+
+This is a fork of [ergoplatform/sigma-rust](https://github.com/ergoplatform/sigma-rust), not a competing
+project. Think of it as a bleeding-edge build of sigma-rust, kept close to upstream `develop`, with three aims:
+
+1. **Take pressure off upstream review.** We have a backlog of open pull requests upstream. Carrying them here
+   lets work that depends on them continue meanwhile, so upstream reviewers can clear the queue at their own pace.
+2. **Converge towards a validation-ready sigma-rust upstream.** The goal is a library that matches the reference
+   implementation, [sigmastate](https://github.com/ScorexFoundation/sigmastate-interpreter), closely enough to
+   validate blocks and transactions. That work happens here first and is meant to flow back upstream.
+3. **Send cleaner upstream PRs later.** Once the backlog has shrunk, changes that have been running here can go
+   upstream as consolidated, battle-tested pull requests rather than as a series of incremental fixes.
+
+Releases (crates.io, npm, PyPI) come from upstream.
+
 See [Architecture](docs/architecture.md) for high-level overview.
 
 ## Crates
