@@ -63,6 +63,9 @@ impl MethodCall {
                 "MethodCall: explicit_type_args does not include substitution for STypeVar {missing_tpe:?}",
             )));
         }
+        // the arguments are checked against the domain with the explicit types substituted:
+        // `Global.some[T]`'s variable is in its domain
+        let method = method.with_concrete_types(&explicit_type_args);
         let mut expected_types: Vec<SType> = vec![obj.tpe()];
         let arg_types: Vec<SType> = args.clone().into_iter().map(|a| a.tpe()).collect();
         expected_types.extend(arg_types);
@@ -80,7 +83,7 @@ impl MethodCall {
         }
         Ok(Self {
             obj: obj.into(),
-            method: method.with_concrete_types(&explicit_type_args),
+            method,
             args,
             explicit_type_args,
         })

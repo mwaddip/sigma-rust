@@ -88,14 +88,102 @@ impl SigmaSerializable for MethodCall {
 mod tests {
     use alloc::vec;
 
+    use crate::chain::ergo_box::ErgoBox;
     use crate::ergo_tree::ErgoTreeVersion;
     use crate::mir::constant::Constant;
     use crate::mir::expr::Expr;
     use crate::mir::method_call::MethodCall;
+    use crate::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
     use crate::serialization::{roundtrip_new_feature, sigma_serialize_roundtrip};
     use crate::types::stype::SType;
     use crate::types::stype_param::STypeVar;
     use crate::types::{scoll, sglobal};
+    use hashbrown::HashMap;
+
+    fn t_is(tpe: SType) -> HashMap<STypeVar, SType> {
+        core::iter::once((STypeVar::t(), tpe)).collect()
+    }
+
+    fn hex(s: &str) -> alloc::vec::Vec<u8> {
+        base16::decode(s.as_bytes()).unwrap()
+    }
+
+    fn method_call(e: &Expr) -> Option<&MethodCall> {
+        match e {
+            Expr::MethodCall(mc) => Some(mc.expr()),
+            _ => None,
+        }
+    }
+
+    /// `tree_hex` parses as a tree (not a degraded one) and is written back unchanged: an
+    /// unparsed tree round-trips its bytes too, so the bytes alone prove nothing
+    fn assert_parsed_tree_round_trips(tree_hex: &str) {
+        use crate::ergo_tree::ErgoTree;
+        use crate::serialization::SigmaSerializable;
+        let tree = ErgoTree::sigma_parse_bytes(&hex(tree_hex)).unwrap();
+        assert!(matches!(tree, ErgoTree::Parsed(_)), "{tree_hex}: {tree:?}");
+        assert_eq!(
+            base16::encode_lower(&tree.sigma_serialize_bytes().unwrap()),
+            tree_hex
+        );
+    }
+
+    #[test]
+    fn with_type_args_builds_some_from_its_generic_method() {
+        use crate::serialization::SigmaSerializable;
+        // `some`'s type variable is in its domain, so the arguments are checked against the
+        // domain with the explicit types substituted
+        let mc = MethodCall::with_type_args(
+            Expr::Global,
+            sglobal::SOME_METHOD.clone(),
+            vec![5i32.into()],
+            t_is(SType::SInt),
+        )
+        .unwrap();
+        assert_eq!(mc.tpe(), SType::SOption(SType::SInt.into()));
+        let expr: Expr = mc.into();
+        assert_eq!(
+            base16::encode_lower(&expr.sigma_serialize_bytes().unwrap()),
+            "dc6a09dd01040a04"
+        );
+    }
+
+    #[test]
+    fn some_reads_and_writes_its_explicit_type() {
+        use crate::ergo_tree::ErgoTree;
+        use crate::serialization::SigmaSerializable;
+        // SANTA `vectors/wire/v6/authored/{ErgoTree,Box}.explicit_type_args.json`, `some`: the
+        // type follows the arguments (v6.0.7 `MethodCallSerializer.scala:29-32`)
+        assert_parsed_tree_round_trips("1b0d01040ad1e6dc6a09dd01730004");
+        let box_hex = "c0843d1b0d01040ad1e6dc6a09dd01730004010000a66b4e70ff8bf3d9dc7c600e4980ededaaeeaadfba7e47e84ec865211f4ae2a000";
+        let b = ErgoBox::sigma_parse_bytes(&hex(box_hex)).unwrap();
+        assert!(
+            matches!(b.ergo_tree, ErgoTree::Parsed(_)),
+            "{:?}",
+            b.ergo_tree
+        );
+        assert_eq!(
+            base16::encode_lower(&b.sigma_serialize_bytes().unwrap()),
+            box_hex
+        );
+    }
+
+    #[test]
+    fn an_explicit_type_wins_over_an_argument_of_another_type() {
+        use crate::serialization::SigmaSerializable;
+        // Global.some[Int](5L): the explicit type is substituted first, then `specializeFor`
+        // keeps the method when Long does not unify with Int (`MethodCallSerializer.scala:77-97`)
+        let expr = from_bytes(hex("dc6a09dd01050a04"))
+            .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
+            .unwrap();
+        let mc = method_call(&expr).unwrap();
+        assert_eq!(mc.tpe(), SType::SOption(SType::SInt.into()));
+        assert_eq!(mc.explicit_type_args, t_is(SType::SInt));
+        assert_eq!(
+            base16::encode_lower(&expr.sigma_serialize_bytes().unwrap()),
+            "dc6a09dd01050a04"
+        );
+    }
 
     #[test]
     fn from_tree_version_3_a_method_call_needs_arguments() {
