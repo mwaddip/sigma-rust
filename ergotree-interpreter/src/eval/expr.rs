@@ -6,6 +6,7 @@ use ergotree_ir::mir::value::Value;
 use ergotree_ir::source_span::Spanned;
 
 use super::error::ExtResultEvalError;
+use super::unevaluated::not_evaluated;
 use super::Context;
 use super::Env;
 use super::EvalError;
@@ -115,7 +116,7 @@ impl Evaluable for Expr {
             Expr::ExtractBytes(op) => op.eval(env, ctx),
             Expr::ExtractBytesWithNoRef(op) => op.eval(env, ctx),
             Expr::TreeLookup(op) => op.eval(env, ctx),
-            Expr::CreateAvlTree(op) => op.eval(env, ctx),
+            Expr::CreateAvlTree(_) => Err(not_evaluated("CreateAvlTree")),
         };
         res.enrich_err(self.span(), env)
     }

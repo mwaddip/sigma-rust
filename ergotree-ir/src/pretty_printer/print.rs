@@ -1150,17 +1150,22 @@ impl Print for TreeLookup {
 }
 
 impl Print for CreateAvlTree {
+    /// In the order of ErgoScript's `avlTree(operationFlags, digest, keyLength, valueLengthOpt)`
     fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
         write!(w, "avlTree(")?;
+        let flags = self.flags.print(w)?;
+        write!(w, ", ")?;
         let digest = self.digest.print(w)?;
         write!(w, ", ")?;
         let key_length = self.key_length.print(w)?;
+        write!(w, ", ")?;
+        let value_length = self.value_length.print(w)?;
         write!(w, ")")?;
         Ok(CreateAvlTree {
+            flags: Box::new(flags),
             digest: Box::new(digest),
             key_length: Box::new(key_length),
-            flags: self.flags.clone(),
-            value_length: self.value_length.clone(),
+            value_length: Box::new(value_length),
         }
         .into())
     }
