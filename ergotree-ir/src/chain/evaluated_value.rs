@@ -13,6 +13,7 @@ use crate::mir::constant::Literal;
 use crate::mir::constant::TryExtractFromError;
 use crate::mir::expr::Expr;
 use crate::mir::global_vars::GlobalVars;
+use crate::mir::tuple::tuple_items_sigma_parse;
 use crate::mir::value::CollKind;
 use crate::serialization::op_code::OpCode;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
@@ -293,17 +294,6 @@ fn collection_constant(coll: &Collection) -> Result<Constant, TryExtractFromErro
             })
         }
     }
-}
-
-/// `TupleSerializer.parse` (v6.0.6 `TupleSerializer.scala:27-36`): a signed-byte size, as
-/// many values, and no arity check
-fn tuple_items_sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Vec<Expr>, SigmaParsingError> {
-    let size = r.get_i8()?;
-    if size < 0 {
-        // `safeNewArray` throws a `NegativeArraySizeException`
-        return Err(SigmaParsingError::NegativeTupleSize(size));
-    }
-    (0..size).map(|_| Expr::sigma_parse(r)).collect()
 }
 
 impl SigmaSerializable for EvaluatedValue {
