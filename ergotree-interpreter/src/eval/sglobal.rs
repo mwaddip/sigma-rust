@@ -440,14 +440,11 @@ mod tests {
             )
             .unwrap()
             .into(),
-            None => MethodCall::with_type_args(
-                Expr::Global,
-                sglobal::NONE_METHOD.clone().with_concrete_types(&type_args),
-                vec![],
-                type_args,
-            )
-            .unwrap()
-            .into(),
+            None => {
+                PropertyCall::with_type_args(Expr::Global, sglobal::NONE_METHOD.clone(), type_args)
+                    .unwrap()
+                    .into()
+            }
         }
     }
 

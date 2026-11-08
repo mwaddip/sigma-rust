@@ -145,13 +145,13 @@ impl Expr {
                     let mc = MethodCall::sigma_parse(r)?;
                     // A MethodCall with no arguments, which parses below tree version 3, has
                     // PropertyCall as its companion and is written as one (v6.0.7
-                    // `values.scala:1351`). Only a method of version 3 has explicit type
-                    // arguments, so there are none to lose.
+                    // `values.scala:1351`)
                     if mc.args.is_empty() {
                         Ok(Expr::PropertyCall(
                             PropertyCall {
                                 obj: mc.obj,
                                 method: mc.method,
+                                explicit_type_args: mc.explicit_type_args,
                             }
                             .into(),
                         ))

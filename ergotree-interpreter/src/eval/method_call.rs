@@ -88,6 +88,7 @@ mod arity_tests {
         let pc: Expr = PropertyCall {
             obj: Box::new(Expr::Context),
             method: GET_VAR_FROM_INPUT_METHOD.clone(),
+            explicit_type_args: Default::default(),
         }
         .into();
         // the arity check's error, not the method's own read of a missing argument

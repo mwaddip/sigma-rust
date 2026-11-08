@@ -1,3 +1,5 @@
+use hashbrown::HashMap;
+
 use alloc::boxed::Box;
 
 use alloc::vec;
@@ -6,6 +8,7 @@ use crate::serialization::op_code::OpCode;
 use crate::traversable::impl_traversable_expr;
 use crate::types::smethod::SMethod;
 use crate::types::stype::SType;
+use crate::types::stype_param::STypeVar;
 
 use super::expr::Expr;
 use super::expr::InvalidArgumentError;
@@ -18,11 +21,23 @@ pub struct PropertyCall {
     pub obj: Box<Expr>,
     /// Property to be invoked
     pub method: SMethod,
+    /// Arguments that cannot be inferred from function signature, such as `Global.none[T]`
+    pub explicit_type_args: HashMap<STypeVar, SType>,
 }
 
 impl PropertyCall {
     /// Create new object, returns an error if any of the requirements failed
     pub fn new(obj: Expr, method: SMethod) -> Result<Self, InvalidArgumentError> {
+        PropertyCall::with_type_args(obj, method, Default::default())
+    }
+
+    /// Create new object with explicit type args, returns an error if any of the requirements
+    /// failed
+    pub fn with_type_args(
+        obj: Expr,
+        method: SMethod,
+        type_args: HashMap<STypeVar, SType>,
+    ) -> Result<Self, InvalidArgumentError> {
         if method.tpe().t_dom.len() != 1 {
             return Err(InvalidArgumentError(format!(
                 "PropertyCall: expected method.t_dom to have 1 element, got {}",
@@ -42,9 +57,27 @@ impl PropertyCall {
                 method.tpe().t_dom,
             )));
         }
+        if method.method_raw.explicit_type_args.len() != type_args.len() {
+            return Err(InvalidArgumentError(format!(
+                "PropertyCall: expected explicit type args count {} does not match provided type args count {}",
+                method.method_raw.explicit_type_args.len(),
+                type_args.len()
+            )));
+        }
+        if let Some(missing_tpe) = method
+            .method_raw
+            .explicit_type_args
+            .iter()
+            .find(|&tpe| !type_args.contains_key(tpe))
+        {
+            return Err(InvalidArgumentError(format!(
+                "PropertyCall: explicit_type_args does not include substitution for STypeVar {missing_tpe:?}",
+            )));
+        }
         Ok(Self {
             obj: obj.into(),
-            method,
+            method: method.with_concrete_types(&type_args),
+            explicit_type_args: type_args,
         })
     }
 
