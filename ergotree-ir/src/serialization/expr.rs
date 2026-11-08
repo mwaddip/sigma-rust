@@ -56,6 +56,7 @@ use crate::mir::if_op::If;
 use crate::mir::logical_not::LogicalNot;
 use crate::mir::long_to_byte_array::LongToByteArray;
 use crate::mir::method_call::MethodCall;
+use crate::mir::mod_q::{ModQ, ModQArithOp, ModQArithOpKind};
 use crate::mir::multiply_group::MultiplyGroup;
 use crate::mir::negation::Negation;
 use crate::mir::option_get::OptionGet;
@@ -67,7 +68,9 @@ use crate::mir::select_field::SelectField;
 use crate::mir::sigma_and::SigmaAnd;
 use crate::mir::sigma_or::SigmaOr;
 use crate::mir::sigma_prop_bytes::SigmaPropBytes;
+use crate::mir::sigma_prop_is_proven::SigmaPropIsProven;
 use crate::mir::subst_const::SubstConstants;
+use crate::mir::tagged_variable::TaggedVariable;
 use crate::mir::tree_lookup::TreeLookup;
 use crate::mir::tuple::Tuple;
 use crate::mir::upcast::Upcast;
@@ -191,6 +194,11 @@ impl Expr {
                 OpCode::BIT_OR => Ok(bin_op_sigma_parse(BitOp::BitOr.into(), r)?),
                 OpCode::BIT_AND => Ok(bin_op_sigma_parse(BitOp::BitAnd.into(), r)?),
                 OpCode::BIT_XOR => Ok(bin_op_sigma_parse(BitOp::BitXor.into(), r)?),
+                OpCode::BIT_SHIFT_RIGHT => Ok(bin_op_sigma_parse(BitOp::BitShiftRight.into(), r)?),
+                OpCode::BIT_SHIFT_LEFT => Ok(bin_op_sigma_parse(BitOp::BitShiftLeft.into(), r)?),
+                OpCode::BIT_SHIFT_RIGHT_ZEROED => {
+                    Ok(bin_op_sigma_parse(BitOp::BitShiftRightZeroed.into(), r)?)
+                }
                 OpCode::BLOCK_VALUE => Ok(Expr::BlockValue(BlockValue::sigma_parse(r)?.into())),
                 OpCode::FUNC_VALUE => Ok(Expr::FuncValue(FuncValue::sigma_parse(r)?)),
                 OpCode::APPLY => Ok(Expr::Apply(Apply::sigma_parse(r)?)),
@@ -237,6 +245,15 @@ impl Expr {
                 XorOf::OP_CODE => Ok(XorOf::sigma_parse(r)?.into()),
                 TreeLookup::OP_CODE => Ok(TreeLookup::sigma_parse(r)?.into()),
                 CreateAvlTree::OP_CODE => Ok(CreateAvlTree::sigma_parse(r)?.into()),
+                ModQ::OP_CODE => Ok(ModQ::sigma_parse(r)?.into()),
+                SigmaPropIsProven::OP_CODE => Ok(SigmaPropIsProven::sigma_parse(r)?.into()),
+                TaggedVariable::OP_CODE => Ok(TaggedVariable::sigma_parse(r)?.into()),
+                OpCode::PLUS_MOD_Q => {
+                    Ok(ModQArithOp::sigma_parse_operands(ModQArithOpKind::PlusModQ, r)?.into())
+                }
+                OpCode::MINUS_MOD_Q => {
+                    Ok(ModQArithOp::sigma_parse_operands(ModQArithOpKind::MinusModQ, r)?.into())
+                }
                 o => Err(SigmaParsingError::NotImplementedOpCode(format!(
                     "{0}(shift {1})",
                     o.value(),
@@ -360,6 +377,15 @@ impl SigmaSerializable for Expr {
             Expr::ExtractBytesWithNoRef(op) => op.sigma_serialize_w_opcode(w),
             Expr::TreeLookup(op) => op.sigma_serialize_w_opcode(w),
             Expr::CreateAvlTree(op) => op.sigma_serialize_w_opcode(w),
+            Expr::ModQ(op) => op.sigma_serialize_w_opcode(w),
+            Expr::SigmaPropIsProven(op) => op.sigma_serialize_w_opcode(w),
+            Expr::TaggedVariable(op) => op.sigma_serialize_w_opcode(w),
+            // `ModQArithOpSerializer.serialize`: the opcode, then the two operands
+            Expr::ModQArithOp(op) => {
+                op.op_code().sigma_serialize(w)?;
+                op.left.sigma_serialize(w)?;
+                op.right.sigma_serialize(w)
+            }
         }
     }
 
@@ -647,5 +673,239 @@ mod depth_limit_tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+}
+
+/// The never-evaluated node kinds as sigmastate 6.0.7 writes and judges them: SANTA `b246bf4`,
+/// `vectors/wire/v6/authored/Box.unevaluated_node_kinds.json`, every box with its verdict
+/// (true: the box is valid, false: refused). Tree versions 0 (unsized) and 3 (size-flagged).
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod jvm_authored_unevaluated_nodes {
+    use crate::chain::ergo_box::ErgoBox;
+    use crate::ergo_tree::ErgoTree;
+    use crate::serialization::SigmaSerializable;
+
+    const BOXES: &[(&str, &str, bool)] = &[
+        (
+            "bit_shift_left-v0",
+            "c0843d00d193f7040204040408010000593042c0147b743fb62109874978602615004cead9aac8bd\
+             7a2a368fbbbb82d600",
+            true,
+        ),
+        (
+            "bit_shift_right-v0",
+            "c0843d00d193f6040204040408010000ae356a9b955875373603f303cc73f63b9f26927c11861624\
+             f410b0ce748062b200",
+            true,
+        ),
+        (
+            "bit_shift_right_zeroed-v0",
+            "c0843d00d193f80402040404080100004c14899c32b0115a2a531cd1d52c8c7df707638e1eb18cd9\
+             69b3aceaf15a69ab00",
+            true,
+        ),
+        (
+            "mod_q-v0",
+            "c0843d00d193e70601010601010100000159370056b1a948a6bffb29ab1cb6af1fcc3e6d734e20d6\
+             f9c7a866e6ca6ba100",
+            true,
+        ),
+        (
+            "plus_mod_q-v0",
+            "c0843d00d193e8060101060101060101010000594463d6495789527daf206bbaf45e0b24887662fa\
+             07a63a838925b9817ee24900",
+            true,
+        ),
+        (
+            "minus_mod_q-v0",
+            "c0843d00d193e9060101060101060101010000c217d900d1652c6f75c2aa442d6362f4b7430379e9\
+             f61e3eed3b6e31e21cbd2800",
+            true,
+        ),
+        (
+            "sigma_prop_is_proven-v0",
+            "c0843d00d1cfd10101010000d678068f06b667bd37990aeee59a2bf7c0ebf78252c98477f57f4f8c\
+             4ffe7fed00",
+            true,
+        ),
+        (
+            "tagged_variable-v0",
+            "c0843d00d17101010100009a05596ddd73409db51d3904cc346501ff5a412e0f7437ae46441687dc\
+             e34a6400",
+            true,
+        ),
+        (
+            "bit_or-v0",
+            "c0843d00d193f2040a040604020100005a7e4732c1acfaadf79ca84685e1e3b4fdb26387d2989c55\
+             f9b75dbd1752cd0c00",
+            true,
+        ),
+        (
+            "bit_and-v0",
+            "c0843d00d193f3040a04060402010000109bdfc04c0f181827dfb0e70499ef13d9069bd5991b25cd\
+             73a61edafe38c2d100",
+            true,
+        ),
+        (
+            "bit_xor-v0",
+            "c0843d00d193f5040a04060402010000237c22eabb1194a82058aef439ef8539809e4df922119e69\
+             7608dd28ea5517b500",
+            true,
+        ),
+        (
+            "bit_inversion-v0",
+            "c0843d00d193f1040a040b0100002f71886c59d9aa9fa14b80cc11de4dcc65edbbb09213865a41b9\
+             a051d05a906f00",
+            true,
+        ),
+        (
+            "create_avl_tree_four_value_getvar-v0",
+            "c0843d00d193b602070e210000000000000000000000000000000000000000000000000000000000\
+             000000000440e30104b602070e210000000000000000000000000000000000000000000000000000\
+             000000000000000440e30104010000761cb8a5bb9f4c14b64c8c0b7fe6ff10e495910fff3e57047c\
+             c62a90a34c83fc00",
+            true,
+        ),
+        (
+            "bit_shift_left-v3",
+            "c0843d0b09d193f7040204040408010000593042c0147b743fb62109874978602615004cead9aac8\
+             bd7a2a368fbbbb82d600",
+            true,
+        ),
+        (
+            "bit_shift_right-v3",
+            "c0843d0b09d193f6040204040408010000ae356a9b955875373603f303cc73f63b9f26927c118616\
+             24f410b0ce748062b200",
+            true,
+        ),
+        (
+            "bit_shift_right_zeroed-v3",
+            "c0843d0b09d193f80402040404080100004c14899c32b0115a2a531cd1d52c8c7df707638e1eb18c\
+             d969b3aceaf15a69ab00",
+            true,
+        ),
+        (
+            "mod_q-v3",
+            "c0843d0b09d193e70601010601010100000159370056b1a948a6bffb29ab1cb6af1fcc3e6d734e20\
+             d6f9c7a866e6ca6ba100",
+            true,
+        ),
+        (
+            "plus_mod_q-v3",
+            "c0843d0b0cd193e8060101060101060101010000594463d6495789527daf206bbaf45e0b24887662\
+             fa07a63a838925b9817ee24900",
+            true,
+        ),
+        (
+            "minus_mod_q-v3",
+            "c0843d0b0cd193e9060101060101060101010000c217d900d1652c6f75c2aa442d6362f4b7430379\
+             e9f61e3eed3b6e31e21cbd2800",
+            true,
+        ),
+        (
+            "sigma_prop_is_proven-v3",
+            "c0843d0b05d1cfd10101010000d678068f06b667bd37990aeee59a2bf7c0ebf78252c98477f57f4f\
+             8c4ffe7fed00",
+            true,
+        ),
+        (
+            "tagged_variable-v3",
+            "c0843d0b04d17101010100009a05596ddd73409db51d3904cc346501ff5a412e0f7437ae46441687\
+             dce34a6400",
+            true,
+        ),
+        (
+            "create_avl_tree_four_value-v3",
+            "c0843d0b56d193b602070e2100000000000000000000000000000000000000000000000000000000\
+             000000000004402800b602070e210000000000000000000000000000000000000000000000000000\
+             0000000000000004402800010000c376e1d477900aa96d8602642fda29a09f1e42d7a77bfc31e279\
+             cbb6320feb6600",
+            true,
+        ),
+        (
+            "bit_or-v3",
+            "c0843d0b09d193f2040a040604020100005a7e4732c1acfaadf79ca84685e1e3b4fdb26387d2989c\
+             55f9b75dbd1752cd0c00",
+            true,
+        ),
+        (
+            "bit_and-v3",
+            "c0843d0b09d193f3040a04060402010000109bdfc04c0f181827dfb0e70499ef13d9069bd5991b25\
+             cd73a61edafe38c2d100",
+            true,
+        ),
+        (
+            "bit_xor-v3",
+            "c0843d0b09d193f5040a04060402010000237c22eabb1194a82058aef439ef8539809e4df922119e\
+             697608dd28ea5517b500",
+            true,
+        ),
+        (
+            "bit_inversion-v3",
+            "c0843d0b07d193f1040a040b0100002f71886c59d9aa9fa14b80cc11de4dcc65edbbb09213865a41\
+             b9a051d05a906f00",
+            true,
+        ),
+        (
+            "create-avl-tree-v0-reject",
+            "c0843d00d193b602070e210000000000000000000000000000000000000000000000000000000000\
+             0000000004402800b602070e21000000000000000000000000000000000000000000000000000000\
+             000000000000044028000100000d352e729de58ad8bb90801cdaebb573108a32cd8506f4905dd66c\
+             24e97ccc9700",
+            false,
+        ),
+        (
+            "old-layout-v0-reject",
+            "c0843d00d193b602070e210000000000000000000000000000000000000000000000000000000000\
+             00000000044000b602070e2100000000000000000000000000000000000000000000000000000000\
+             00000000000440000100005f8fe4e6a17346b93e93f9b7e139d1e6c062f19743ed9e51f8ba2cd7a6\
+             f4730200",
+            false,
+        ),
+        (
+            "old-layout-v3-reject",
+            "c0843d0b54d193b602070e2100000000000000000000000000000000000000000000000000000000\
+             0000000000044000b602070e21000000000000000000000000000000000000000000000000000000\
+             0000000000000440000100002c1a9623e0bc8f82321c6aaabc5371a1418334387329142bc93c708d\
+             13613d7a00",
+            false,
+        ),
+        (
+            "bool-operand-v0-reject",
+            "c0843d00d193f7010104040408010000da6f46bf4dccb0771283d92acbe21915252a738315cb6f69\
+             0a5b3661383c803b00",
+            false,
+        ),
+        (
+            "bool-operand-v3-reject",
+            "c0843d0b09d193f701010404040801000072d7090bb7a7d35d3af2e58926c276e99524f484535d82\
+             f235551d19d523b7a200",
+            false,
+        ),
+        (
+            "spip-filter-v0-reject",
+            "c0843d00d1cfb50402d901010401010100004bba7134e7ab1b1aaa3d34a791c0fe694607ab998622\
+             e3f60f7e369d78632e9200",
+            false,
+        ),
+    ];
+
+    /// A box the JVM accepts parses with its tree `Parsed` (asked directly: an `Unparsed` tree
+    /// round-trips the same bytes) and is written back to the JVM's bytes; a box it refuses is
+    /// refused
+    #[test]
+    fn jvm_authored_boxes_parse_as_sigmastate_judges_them() {
+        for (name, hex, accept) in BOXES {
+            let bytes = base16::decode(hex).unwrap();
+            let parsed = ErgoBox::sigma_parse_bytes(&bytes);
+            if *accept {
+                let b = parsed.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                assert!(matches!(b.ergo_tree, ErgoTree::Parsed(_)), "{name}");
+                assert_eq!(b.sigma_serialize_bytes().unwrap(), bytes, "{name}");
+            } else {
+                assert!(parsed.is_err(), "{name}: {parsed:?}");
+            }
+        }
     }
 }

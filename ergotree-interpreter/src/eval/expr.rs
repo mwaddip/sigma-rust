@@ -6,6 +6,7 @@ use ergotree_ir::mir::value::Value;
 use ergotree_ir::source_span::Spanned;
 
 use super::error::ExtResultEvalError;
+use super::unevaluated::not_evaluated;
 use super::Context;
 use super::Env;
 use super::EvalError;
@@ -96,7 +97,7 @@ impl Evaluable for Expr {
             Expr::OptionIsDefined(op) => op.expr().eval(env, ctx),
             Expr::OptionGetOrElse(op) => op.expr().eval(env, ctx),
             Expr::Negation(op) => op.expr().eval(env, ctx),
-            Expr::BitInversion(op) => op.eval(env, ctx),
+            Expr::BitInversion(_) => Err(not_evaluated("BitInversion")),
             Expr::ForAll(op) => op.eval(env, ctx),
             Expr::Tuple(op) => op.eval(env, ctx),
             Expr::DecodePoint(op) => op.eval(env, ctx),
@@ -115,7 +116,11 @@ impl Evaluable for Expr {
             Expr::ExtractBytes(op) => op.eval(env, ctx),
             Expr::ExtractBytesWithNoRef(op) => op.eval(env, ctx),
             Expr::TreeLookup(op) => op.eval(env, ctx),
-            Expr::CreateAvlTree(op) => op.eval(env, ctx),
+            Expr::CreateAvlTree(_) => Err(not_evaluated("CreateAvlTree")),
+            Expr::ModQ(_) => Err(not_evaluated("ModQ")),
+            Expr::ModQArithOp(_) => Err(not_evaluated("ModQArithOp")),
+            Expr::SigmaPropIsProven(_) => Err(not_evaluated("SigmaPropIsProven")),
+            Expr::TaggedVariable(_) => Err(not_evaluated("TaggedVariable")),
         };
         res.enrich_err(self.span(), env)
     }

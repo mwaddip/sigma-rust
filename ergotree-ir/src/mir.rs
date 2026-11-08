@@ -76,6 +76,7 @@ pub mod logical_not;
 pub mod long_to_byte_array;
 /// Object method call
 pub mod method_call;
+pub mod mod_q;
 /// Multiply op for GroupElement
 pub mod multiply_group;
 /// Negation operation on numeric type.
@@ -96,7 +97,9 @@ pub mod sigma_and;
 pub mod sigma_or;
 /// Extract serialized bytes of a SigmaProp value
 pub mod sigma_prop_bytes;
+pub mod sigma_prop_is_proven;
 pub mod subst_const;
+pub mod tagged_variable;
 /// Perform a lookup of key in a tree
 pub mod tree_lookup;
 /// Tuple of elements

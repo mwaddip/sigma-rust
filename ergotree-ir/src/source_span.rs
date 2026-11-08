@@ -213,6 +213,10 @@ impl Expr {
             Expr::XorOf(_) => SourceSpan::empty(),
             Expr::TreeLookup(op) => op.source_span,
             Expr::CreateAvlTree(_) => SourceSpan::empty(),
+            Expr::ModQ(_) => SourceSpan::empty(),
+            Expr::ModQArithOp(_) => SourceSpan::empty(),
+            Expr::SigmaPropIsProven(_) => SourceSpan::empty(),
+            Expr::TaggedVariable(_) => SourceSpan::empty(),
         }
     }
 }

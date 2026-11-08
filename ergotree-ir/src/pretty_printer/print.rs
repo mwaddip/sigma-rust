@@ -50,6 +50,7 @@ use crate::mir::if_op::If;
 use crate::mir::logical_not::LogicalNot;
 use crate::mir::long_to_byte_array::LongToByteArray;
 use crate::mir::method_call::MethodCall;
+use crate::mir::mod_q::{ModQ, ModQArithOp, ModQArithOpKind};
 use crate::mir::multiply_group::MultiplyGroup;
 use crate::mir::negation::Negation;
 use crate::mir::option_get::OptionGet;
@@ -61,7 +62,9 @@ use crate::mir::select_field::SelectField;
 use crate::mir::sigma_and::SigmaAnd;
 use crate::mir::sigma_or::SigmaOr;
 use crate::mir::sigma_prop_bytes::SigmaPropBytes;
+use crate::mir::sigma_prop_is_proven::SigmaPropIsProven;
 use crate::mir::subst_const::SubstConstants;
+use crate::mir::tagged_variable::TaggedVariable;
 use crate::mir::tree_lookup::TreeLookup;
 use crate::mir::tuple::Tuple;
 use crate::mir::upcast::Upcast;
@@ -174,6 +177,10 @@ impl Print for Expr {
             Expr::XorOf(v) => v.print(w),
             Expr::TreeLookup(v) => v.expr().print(w),
             Expr::CreateAvlTree(v) => v.print(w),
+            Expr::ModQ(v) => v.print(w),
+            Expr::ModQArithOp(v) => v.print(w),
+            Expr::SigmaPropIsProven(v) => v.print(w),
+            Expr::TaggedVariable(v) => v.print(w),
         }
     }
 }
@@ -1149,18 +1156,71 @@ impl Print for TreeLookup {
     }
 }
 
+impl Print for ModQ {
+    fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
+        let input = self.input.print(w)?;
+        write!(w, ".modQ")?;
+        Ok(ModQ {
+            input: Box::new(input),
+        }
+        .into())
+    }
+}
+
+impl Print for ModQArithOp {
+    fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
+        let name = match self.kind {
+            ModQArithOpKind::PlusModQ => "plusModQ",
+            ModQArithOpKind::MinusModQ => "minusModQ",
+        };
+        let left = self.left.print(w)?;
+        write!(w, ".{name}(")?;
+        let right = self.right.print(w)?;
+        write!(w, ")")?;
+        Ok(ModQArithOp {
+            left: Box::new(left),
+            right: Box::new(right),
+            kind: self.kind,
+        }
+        .into())
+    }
+}
+
+impl Print for SigmaPropIsProven {
+    fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
+        let input = self.input.print(w)?;
+        write!(w, ".isProven")?;
+        Ok(SigmaPropIsProven {
+            input: Box::new(input),
+        }
+        .into())
+    }
+}
+
+impl Print for TaggedVariable {
+    fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
+        write!(w, "taggedVar[{}]({})", self.var_tpe, self.var_id)?;
+        Ok(self.clone().into())
+    }
+}
+
 impl Print for CreateAvlTree {
+    /// In the order of ErgoScript's `avlTree(operationFlags, digest, keyLength, valueLengthOpt)`
     fn print(&self, w: &mut dyn Printer) -> Result<Expr, PrintError> {
         write!(w, "avlTree(")?;
+        let flags = self.flags.print(w)?;
+        write!(w, ", ")?;
         let digest = self.digest.print(w)?;
         write!(w, ", ")?;
         let key_length = self.key_length.print(w)?;
+        write!(w, ", ")?;
+        let value_length = self.value_length.print(w)?;
         write!(w, ")")?;
         Ok(CreateAvlTree {
+            flags: Box::new(flags),
             digest: Box::new(digest),
             key_length: Box::new(key_length),
-            flags: self.flags.clone(),
-            value_length: self.value_length.clone(),
+            value_length: Box::new(value_length),
         }
         .into())
     }
