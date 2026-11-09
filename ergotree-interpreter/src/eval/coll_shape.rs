@@ -167,6 +167,100 @@ fn matches_at<'ctx>(
     }
 }
 
+/// `Append` as the left side's JVM class runs it (`CollsOverArrays.scala:48-58`, `:379-382`,
+/// `safeConcatArrays_v5`): an empty left side, unless a `PairOfCols`, returns the right side as it
+/// is; a specialised left side casts the right side's array to its own, empty or not; a generic
+/// one copies both into an array of its own item type, where a primitive array takes only the
+/// same primitive array, even an empty one, and a reference array takes any item whose class fits
+/// it (none to check when empty), and the result keeps the LEFT's item type. A `PairOfCols` unzips
+/// the right side and appends side by side. SANTA `Coll.append_runtime_item_type`,
+/// `Append.reference_array_store`
+pub(crate) fn append<'ctx>(
+    left: &CollValue<'ctx>,
+    right: &CollValue<'ctx>,
+) -> Result<CollValue<'ctx>, EvalError> {
+    let refuse = || {
+        EvalError::UnexpectedValue(format!(
+            "Append: a collection of {:?} cannot take the items of a collection of {:?}",
+            left.elem_tpe(),
+            right.elem_tpe()
+        ))
+    };
+    match left {
+        CollValue::Pairs { ls, rs } => {
+            let (rls, rrs) = unzip(right).ok_or_else(refuse)?;
+            Ok(CollValue::pairs(append(ls, &rls)?, append(rs, &rrs)?))
+        }
+        _ if left.is_empty() => Ok(right.clone()),
+        CollValue::Bytes(_) | CollValue::Booleans(_) | CollValue::Ints(_) => {
+            if !same_primitive_array(left, right) {
+                return Err(refuse());
+            }
+            Ok(left.rebuild_like(left.as_vec().into_iter().chain(right.as_vec()).collect())?)
+        }
+        CollValue::Generic { elem_tpe, items } => {
+            let right_items = right.as_vec();
+            let fits = match primitive_array(left) {
+                Some(_) => same_primitive_array(left, right),
+                None => {
+                    primitive_array(right).is_none()
+                        && right_items
+                            .iter()
+                            .all(|item| fits_reference_array(item, elem_tpe))
+                }
+            };
+            if !fits {
+                return Err(refuse());
+            }
+            let all = items.iter().cloned().chain(right_items).collect();
+            Ok(CollValue::from_array(elem_tpe.clone(), all)?)
+        }
+    }
+}
+
+/// A collection of pairs as its two sides: a `PairOfCols`'s own, or a generic collection's items
+/// split as `builder.unzip` splits them (`CollsOverArrays.scala:244-258`); `None` for a collection
+/// of anything else (`tItem.tFst` throws)
+fn unzip<'ctx>(coll: &CollValue<'ctx>) -> Option<(CollValue<'ctx>, CollValue<'ctx>)> {
+    match coll {
+        CollValue::Pairs { ls, rs } => Some(((**ls).clone(), (**rs).clone())),
+        _ => match CollValue::from_array(coll.elem_tpe(), coll.as_vec()) {
+            Ok(CollValue::Pairs { ls, rs }) => Some(((*ls).clone(), (*rs).clone())),
+            _ => None,
+        },
+    }
+}
+
+/// Whether `item` fits a JVM array of `elem_tpe`'s reference class: `System.arraycopy` checks each
+/// item's class against the array's, so a `Coll` of any item type fits a `Coll` array, and a `Box`
+/// does not fit a `GroupElement` array (SANTA `Coll.append_runtime_item_type` #4, #5)
+fn fits_reference_array(item: &Value<'_>, elem_tpe: &SType) -> bool {
+    match elem_tpe {
+        SType::SAny => true,
+        SType::SColl(_) => matches!(item, Value::Coll(_)),
+        SType::STuple(t) if t.items.len() == 2 => matches!(item, Value::Tup(i) if i.len() == 2),
+        // a tuple of other than two items is a `Coll[Any]` on the JVM (`Tuple.value`)
+        SType::STuple(_) => {
+            matches!(item, Value::Coll(_)) || matches!(item, Value::Tup(i) if i.len() != 2)
+        }
+        SType::SOption(_) => matches!(item, Value::Opt(_)),
+        SType::SBox => matches!(item, Value::CBox(_)),
+        SType::SGroupElement => matches!(item, Value::GroupElement(_)),
+        SType::SBigInt => matches!(item, Value::BigInt(_)),
+        SType::SUnsignedBigInt => matches!(item, Value::UnsignedBigInt(_)),
+        SType::SSigmaProp => matches!(item, Value::SigmaProp(_)),
+        SType::SAvlTree => matches!(item, Value::AvlTree(_)),
+        SType::SHeader => matches!(item, Value::Header(_)),
+        SType::SPreHeader => matches!(item, Value::PreHeader(_)),
+        SType::SUnit => matches!(item, Value::Unit),
+        SType::SContext => matches!(item, Value::Context),
+        SType::SGlobal => matches!(item, Value::Global),
+        SType::SString => matches!(item, Value::String(_)),
+        SType::SFunc(_) => matches!(item, Value::Lambda(_)),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
 #[allow(clippy::unwrap_used, clippy::panic)]
@@ -836,6 +930,51 @@ pub(crate) mod santa_rows {
     }
 
     #[test]
+    fn append_rows() {
+        // SANTA `Coll.append_runtime_item_type`, `Append.reference_array_store`
+        for row in [
+            "0b17b395010083020404020404830205050205048301040406", // #0, left lies
+            "0b17b383010404069501008302040402040483020505020504", // #1, right lies
+            "0b11b383010404069501008301040402830005", // #3, an empty right of another width
+            "0b10b3950100830163a783010782830163a7",   // #5, a Box into GroupElements
+            "0b1fb3950100830158860204020402830159860205020502830158860204040404", // #6, pairs
+            "0b10b38301078295010083010782830163a7",   // K2, one Box
+        ] {
+            assert_errs(row);
+        }
+        let coll = |t: SType, items: Vec<Value<'static>>| Value::Coll(CollValue::generic(t, items));
+        // #2: an empty left side returns the right side as it is
+        assert_row(
+            "0b11b395010083010404028300058301040406",
+            coll(SType::SInt, vec![Value::Int(3)]),
+            82,
+        );
+        // #4: `Coll` items into a `Coll` array, keeping the LEFT's runtime item type
+        assert_row(
+            "0b1cb3950100830110830104040283011183010505048301108301040406",
+            coll(
+                SType::SColl(SType::SLong.into()),
+                vec![
+                    coll(SType::SLong, vec![Value::Long(2)]),
+                    coll(SType::SInt, vec![Value::Int(3)]),
+                ],
+            ),
+            127,
+        );
+        let generators = |n: usize| {
+            coll(
+                SType::SGroupElement,
+                vec![Value::from(ergo_chain_types::ec_point::generator()); n],
+            )
+        };
+        // K1: an empty `Coll[Box]` into a `Coll[GroupElement]`: no item to refuse
+        assert_row("0b0eb383010782950100830007830063", generators(1), 87);
+        // K3: an empty `Coll[Box]` on the left returns the right side
+        assert_row("0b0eb395010083000783006383010782", generators(1), 87);
+        assert_row("0b09b38301078283010782", generators(2), 82); // K4
+    }
+
+    #[test]
     fn mapped_pairs_rows() {
         // M3/M4: `map` over a collection of pairs gives a generic collection of pairs
         let pair = |a, b| Value::Tup([Value::Int(a), Value::Int(b)].into());
@@ -906,6 +1045,61 @@ mod scala_eq_tests {
             &pair(Value::Long(1), Value::Int(2)),
             &pair(Value::Int(1), Value::Int(3))
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod append_tests {
+    use alloc::vec;
+
+    use ergotree_ir::mir::coll_value::CollValue;
+    use ergotree_ir::mir::value::Value;
+    use ergotree_ir::types::stype::SType;
+
+    use super::append;
+
+    fn bytes(b: &[i8]) -> CollValue<'static> {
+        CollValue::Bytes(b.into())
+    }
+
+    #[test]
+    fn append_takes_every_reference_class() {
+        // `Context`, `Global` and function values sit in reference arrays on the JVM
+        // (`Evaluation.scala:30-31`, `:51-53`; `RType.scala:75-76`), so an append of two such
+        // collections copies them (review I1)
+        use alloc::sync::Arc;
+        use ergotree_ir::mir::expr::Expr;
+        use ergotree_ir::mir::value::Lambda;
+        use ergotree_ir::types::sfunc::SFunc;
+        let twice = |t: SType, v: Value<'static>| {
+            let one = CollValue::generic(t, vec![v]);
+            append(&one, &one).map(|c| c.len())
+        };
+        assert_eq!(twice(SType::SContext, Value::Context).unwrap(), 2);
+        assert_eq!(twice(SType::SGlobal, Value::Global).unwrap(), 2);
+        let lambda = Value::Lambda(Lambda {
+            args: vec![],
+            body: Arc::new(Expr::Const(true.into())),
+            captured: Arc::default(),
+        });
+        let func = SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt));
+        assert_eq!(twice(func, lambda).unwrap(), 2);
+    }
+
+    #[test]
+    fn append_specialised_rules() {
+        // a specialised left side keeps its class, and takes the same primitive array in either
+        // class
+        let r = append(
+            &bytes(&[1]),
+            &CollValue::generic(SType::SByte, vec![Value::Byte(2)]),
+        )
+        .unwrap();
+        assert!(matches!(r, CollValue::Bytes(_)), "{r:?}");
+        assert_eq!(r, bytes(&[1, 2]));
+        // but not another primitive array, even an empty one: the array cast comes first
+        assert!(append(&bytes(&[1]), &CollValue::generic(SType::SLong, vec![])).is_err());
     }
 }
 
