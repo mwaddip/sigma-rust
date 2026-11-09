@@ -838,18 +838,6 @@ impl<'ctx, T: TryExtractFrom<Value<'ctx>> + StoreWrapped> TryExtractFrom<Vec<Val
     }
 }
 
-// impl TryExtractFrom<Value> for Rc<Context> {
-//     fn try_extract_from(v: Value) -> Result<Self, TryExtractFromError> {
-//         match v {
-//             Value::Context(ctx) => Ok(ctx),
-//             _ => Err(TryExtractFromError(format!(
-//                 "expected Context, found {:?}",
-//                 v
-//             ))),
-//         }
-//     }
-// }
-
 impl<'ctx, T: TryExtractFrom<Value<'ctx>>> TryExtractFrom<Value<'ctx>> for Option<T> {
     fn try_extract_from(v: Value<'ctx>) -> Result<Self, TryExtractFromError> {
         match v {

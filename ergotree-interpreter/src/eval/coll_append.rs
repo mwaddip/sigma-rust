@@ -2,7 +2,6 @@ use alloc::sync::Arc;
 
 use alloc::vec::Vec;
 use ergotree_ir::mir::coll_append::Append;
-// use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
@@ -73,17 +72,6 @@ mod tests {
     use ergotree_ir::mir::constant::Constant;
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::types::stype::SType;
-
-    // Comment here for an elegant solution - generic single_test
-    // Fails due to Expr::from needing complicated type bounds
-    // Fails both with T and Vec<T>
-    // fn test_single_append<T : PartialEq + Debug + LiftIntoSType> (inp : T, inp2 : T, expected_output : T) {
-    //     let in_expr = Expr::from(inp);
-    //     let col2_expr = Expr::from(inp2);
-    //     let append_expr = Expr::from(Append::new(in_expr, col2_expr).unwrap());
-    //     let append_eval : Vec<T> = eval_out_wo_ctx(append_expr);
-    //     assert_eq!(append_eval, expected_output);
-    // }
 
     #[test]
     fn test_append_basic_numbers() {

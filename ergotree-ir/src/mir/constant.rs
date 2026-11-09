@@ -1517,8 +1517,6 @@ mod tests {
 
         #[test]
         fn tuple_primitive_types_roundtrip(v in any::<(i64, bool)>()) {
-            // let constant: Constant = v.into();
-            // eprintln!("{:?}", constant);
             test_constant_roundtrip(v);
         }
 
