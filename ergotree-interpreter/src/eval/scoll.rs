@@ -429,15 +429,28 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     ))
 };
 
+/// The receiver as sigmastate's `Coll` methods see it: a collection, or a tuple of other than
+/// two items, which sigmastate holds as a `Coll[Any]` (`Tuple.value`, v6.0.7
+/// `values.scala:818-822`). Anything else, a pair (a `Tuple2`) included, is not a `Coll`, and
+/// the reflective call fails.
+fn jvm_coll<'ctx>(obj: Value<'ctx>, method: &str) -> Result<CollKind<Value<'ctx>>, EvalError> {
+    match obj {
+        Value::Coll(coll) => Ok(coll),
+        Value::Tup(items) if items.len() != 2 => {
+            CollKind::from_collection(SType::SAny, items.to_vec())
+                .map_err(EvalError::TryExtractFrom)
+        }
+        _ => Err(EvalError::UnexpectedValue(format!(
+            "{method}: expected Coll, found {obj:?}"
+        ))),
+    }
+}
+
 /// `Coll.size` (id 1): sigmastate calls `Coll.size` reflectively at `SizeOf`'s fixed cost
 /// (`invokeFixed`, v6.0.7 `methods.scala:821`)
 pub(crate) static SIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(14)?;
-    let Value::Coll(coll) = obj else {
-        return Err(EvalError::UnexpectedValue(format!(
-            "size: expected Coll, found {obj:?}"
-        )));
-    };
+    let coll = jvm_coll(obj, "size")?;
     Ok(Value::Int(coll.len() as i32))
 };
 
@@ -445,11 +458,7 @@ pub(crate) static SIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
 /// (`methods.scala:940`); out of range it throws
 pub(crate) static APPLY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     ctx.add_jit_cost(30)?;
-    let Value::Coll(coll) = obj else {
-        return Err(EvalError::UnexpectedValue(format!(
-            "apply: expected Coll, found {obj:?}"
-        )));
-    };
+    let coll = jvm_coll(obj, "apply")?;
     let index = args
         .first()
         .cloned()
@@ -470,11 +479,7 @@ pub(crate) static APPLY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 /// default
 pub(crate) static GET_OR_ELSE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     ctx.add_jit_cost(30)?;
-    let Value::Coll(coll) = obj else {
-        return Err(EvalError::UnexpectedValue(format!(
-            "getOrElse: expected Coll, found {obj:?}"
-        )));
-    };
+    let coll = jvm_coll(obj, "getOrElse")?;
     let [index, default]: [Value; 2] = args.try_into().map_err(|_| {
         EvalError::UnexpectedValue("getOrElse: expected an index and a default".into())
     })?;
@@ -484,6 +489,16 @@ pub(crate) static GET_OR_ELSE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::UnexpectedValue("getOrElse: default argument not found".into()))?
         .tpe();
     crate::eval::check_value_of_type(&default_tpe, &default, ctx.tree_version())?;
+    // a collection of pairs is a `PairOfCols` on the JVM, whose `getOrElse` the interface call
+    // reaches through a bridge that casts the default to `Tuple2`, whatever the index
+    // (`CollsOverArrays.scala:309-315`)
+    if matches!(coll.elem_tpe(), SType::STuple(t) if t.items.len() == 2)
+        && !matches!(&default, Value::Tup(items) if items.len() == 2)
+    {
+        return Err(EvalError::UnexpectedValue(format!(
+            "getOrElse: a collection of pairs takes a pair default, found {default:?}"
+        )));
+    }
     Ok(item_at(&coll, index.try_extract_into::<i32>()?).unwrap_or(default))
 };
 
@@ -500,7 +515,12 @@ pub(crate) static MAP_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     let mapper = args
         .first()
         .ok_or_else(|| EvalError::UnexpectedValue("map: mapper argument not found".into()))?;
-    map_coll(ctx, obj, mapper, (**item_tpe).clone())
+    map_coll(
+        ctx,
+        Value::Coll(jvm_coll(obj, "map")?),
+        mapper,
+        (**item_tpe).clone(),
+    )
 };
 
 #[allow(clippy::unwrap_used)]

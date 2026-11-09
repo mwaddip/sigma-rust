@@ -390,4 +390,37 @@ mod jvm_method_rows {
             assert!(res.is_ok(), "{tree_hex}: {res:?}");
         }
     }
+
+    #[test]
+    fn coll_runtime_shapes_rows() {
+        // SANTA `Coll.runtime_shapes_methodcall.json` (bar the two `Coll[Byte]`-constant rows)
+        use ergotree_ir::types::stuple::TupleItems;
+        let pair = |a: i32, b: i32| Value::Tup(TupleItems::from([Value::Int(a), Value::Int(b)]));
+        // a collection of pairs is a `PairOfCols` on the JVM: the `Coll.getOrElse` bridge
+        // casts the default to `Tuple2` whatever the index (`CollsOverArrays.scala:309-315`)
+        assert_evaluator_refuses("0b0edc0c0283015858020402040a0101"); // getOrElse(5, true)
+        assert_evaluator_refuses("0b0edc0c028301585802040204000101"); // getOrElse(0, true)
+        assert_accepts(
+            "0b15dc0c0283015886020402040402040a8602040e0410",
+            pair(7, 8),
+            109,
+        ); // getOrElse(5, (7, 8))
+        assert_accepts(
+            "0b15dc0c028301588602040204040204008602040e0410",
+            pair(1, 2),
+            109,
+        ); // getOrElse(0, (7, 8))
+           // a ConcreteCollection of bytes is a generic `CollOverArray`: the default is returned
+        assert_accepts(
+            "0b0fdc0c028302020201020202040a0101",
+            Value::Boolean(true),
+            74,
+        );
+        assert_accepts("0b0fdc0c02830202020102020204000101", Value::Byte(1), 74);
+        // a tuple of other than two items is a `Coll[Any]` on the JVM (`values.scala:818-822`)
+        assert_accepts("0b0adb0c0148040404020406", Value::Int(3), 23); // (1, 2, 3).size
+        assert_accepts("0b0ddc0c0a48040404020406010400", Value::Int(1), 44); // .apply(0)
+        assert_accepts("0b0fdc0c024804040402040602040a0412", Value::Int(9), 49);
+        // .getOrElse(5, 9)
+    }
 }
