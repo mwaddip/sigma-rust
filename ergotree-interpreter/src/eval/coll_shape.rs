@@ -6,6 +6,7 @@ use alloc::format;
 
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::value::Value;
+use ergotree_ir::types::stype::SType;
 
 use super::coll_by_index::item_at;
 use crate::eval::EvalError;
@@ -38,6 +39,132 @@ pub(crate) fn get_or_else<'ctx>(
         )));
     }
     Ok(item_at(coll, index).unwrap_or(default))
+}
+
+/// Scala's `==` on two boxed items (`BoxesRunTime.equals`): two integral numbers (`Byte`,
+/// `Short`, `Int`, `Long`) are equal when their values are, whatever their widths; two pairs
+/// compare item by item the same way (`Tuple2.equals`), and two options their values
+/// (`Some.equals`); anything else by its own equality, so a
+/// `Boolean` never equals a number, a `BigInt` never equals a small integer, and two collections
+/// compare their item types first (`CollOverArray.equals`). SANTA
+/// `Coll.prefix_cross_type_equality`
+pub(crate) fn scala_eq(a: &Value<'_>, b: &Value<'_>) -> bool {
+    fn integral(v: &Value<'_>) -> Option<i64> {
+        match v {
+            Value::Byte(x) => Some(i64::from(*x)),
+            Value::Short(x) => Some(i64::from(*x)),
+            Value::Int(x) => Some(i64::from(*x)),
+            Value::Long(x) => Some(*x),
+            _ => None,
+        }
+    }
+    match (a, b) {
+        (Value::Tup(l), Value::Tup(r)) if l.len() == 2 && r.len() == 2 => {
+            l.iter().zip(r.iter()).all(|(x, y)| scala_eq(x, y))
+        }
+        // `Some.equals` compares the values the same way
+        (Value::Opt(l), Value::Opt(r)) => match (l, r) {
+            (Some(x), Some(y)) => scala_eq(x, y),
+            (None, None) => true,
+            _ => false,
+        },
+        _ => match (integral(a), integral(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => a == b,
+        },
+    }
+}
+
+/// The primitive item type of a collection's backing array, if it is a primitive array: a
+/// specialised class's, or a generic collection's of `Boolean`, `Byte`, `Short`, `Int` or `Long`
+/// (sigmastate builds those over `boolean[]`, `byte[]`, `short[]`, `int[]`, `long[]`)
+fn primitive_array(coll: &CollValue<'_>) -> Option<SType> {
+    match coll {
+        CollValue::Bytes(_) => Some(SType::SByte),
+        CollValue::Booleans(_) => Some(SType::SBoolean),
+        CollValue::Ints(_) => Some(SType::SInt),
+        CollValue::Generic { elem_tpe, .. }
+            if matches!(
+                elem_tpe,
+                SType::SBoolean | SType::SByte | SType::SShort | SType::SInt | SType::SLong
+            ) =>
+        {
+            Some(elem_tpe.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Whether `other` is held over the same primitive array as `coll`
+pub(crate) fn same_primitive_array(coll: &CollValue<'_>, other: &CollValue<'_>) -> bool {
+    match primitive_array(coll) {
+        Some(t) => primitive_array(other) == Some(t),
+        None => false,
+    }
+}
+
+/// `Coll.startsWith` as the receiver's JVM class runs it (`CollsOverArrays.scala:44`, `:398-401`)
+pub(crate) fn starts_with<'ctx>(
+    coll: &CollValue<'ctx>,
+    prefix: &CollValue<'ctx>,
+) -> Result<bool, EvalError> {
+    matches_at(coll, prefix, false)
+}
+
+/// `Coll.endsWith` as the receiver's JVM class runs it (`CollsOverArrays.scala:46`, `:403-406`)
+pub(crate) fn ends_with<'ctx>(
+    coll: &CollValue<'ctx>,
+    suffix: &CollValue<'ctx>,
+) -> Result<bool, EvalError> {
+    matches_at(coll, suffix, true)
+}
+
+/// Whether `coll` starts (or, `at_end`, ends) with `other`: a specialised receiver casts the
+/// argument's array to its own primitive array first, whatever the lengths, so another array is
+/// an error (SANTA S1, S7); a `PairOfCols` compares side by side with another `PairOfCols`, the
+/// first side first, so a `false` there never reaches the second, and with any other argument
+/// casts that argument's array to `Object[]`, so a primitive one is an error; anything else
+/// compares the items with Scala's `==` ([`scala_eq`])
+fn matches_at<'ctx>(
+    coll: &CollValue<'ctx>,
+    other: &CollValue<'ctx>,
+    at_end: bool,
+) -> Result<bool, EvalError> {
+    match (coll, other) {
+        (CollValue::Bytes(_) | CollValue::Booleans(_) | CollValue::Ints(_), _)
+            if !same_primitive_array(coll, other) =>
+        {
+            Err(EvalError::UnexpectedValue(format!(
+                "a specialised collection of {:?} cannot compare with a collection of {:?}",
+                coll.elem_tpe(),
+                other.elem_tpe()
+            )))
+        }
+        (CollValue::Pairs { ls, rs }, CollValue::Pairs { ls: ols, rs: ors }) => {
+            Ok(matches_at(ls, ols, at_end)? && matches_at(rs, ors, at_end)?)
+        }
+        // with any other argument it compares the arrays, casting the argument's to `Object[]`
+        // (`CollsOverArrays.scala:400`, `:405`): a primitive array fails, even an empty one
+        (CollValue::Pairs { .. }, _) if primitive_array(other).is_some() => {
+            Err(EvalError::UnexpectedValue(format!(
+                "a collection of pairs cannot compare with a primitive collection of {:?}",
+                other.elem_tpe()
+            )))
+        }
+        _ => {
+            let items = coll.as_vec();
+            let other_items = other.as_vec();
+            let Some(offset) = items.len().checked_sub(other_items.len()) else {
+                return Ok(false);
+            };
+            let start = if at_end { offset } else { 0 };
+            Ok(items
+                .iter()
+                .skip(start)
+                .zip(other_items.iter())
+                .all(|(x, y)| scala_eq(x, y)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -566,6 +693,149 @@ pub(crate) mod santa_rows {
     }
 
     #[test]
+    fn prefix_suffix_per_class() {
+        // SANTA `Coll.specialisation_prefix_suffix`: a specialised receiver refuses an argument
+        // over another array, even an empty one; a generic receiver compares with Scala's `==`
+        for row in [
+            "0b16dc0c1f0e030102030195010083010202018301050502", // S1
+            "0b12dc0c1f0d0305019501008501018301050502",         // S3
+            "0b19dc0c1fdb0c0e0e030102030195010083010404008301050502", // S5
+            "0b12dc0c1f0e0301020301950100830002830005",         // S7
+            "0b16dc0c200e030102030195010083010202018301050502", // E1
+        ] {
+            assert_errs(row);
+        }
+        let t = Value::Boolean(true);
+        let f = Value::Boolean(false);
+        assert_row(
+            "0b1adc0c1f8303020201020202030195010083010202018301050502",
+            t.clone(),
+            90,
+        ); // S2
+        assert_row("0b12dc0c1f850305019501008501018301050502", f.clone(), 90); // S4
+        assert_row(
+            "0b1adc0c1f8303040400040204040195010083010404008301050502",
+            f.clone(),
+            90,
+        ); // S6
+        assert_row(
+            "0b16dc0c1f83030202010202020301950100830002830005",
+            t.clone(),
+            85,
+        ); // S8
+        assert_row("0b0edc0c1f0e03010203018301020201", t.clone(), 45); // S9
+        assert_row("0b12dc0c1f830302020102020203018301020201", t.clone(), 75); // S10
+        assert_row(
+            "0b1adc0c208303020201020202030195010083010202018301050502",
+            f,
+            90,
+        ); // E2
+        assert_row("0b0edc0c200e03010203018301020203", t, 45); // E3
+    }
+
+    #[test]
+    fn prefix_suffix_pairs() {
+        // SANTA `Coll.specialisation_pair_prefix`, `Coll.pair_shape_map`, `Coll.pair_shape_restored`:
+        // a `PairOfCols` compares side by side with another, so its specialised side refuses
+        for row in [
+            "0b30dc0c1fdc0c1d0e030102030183030404000402040401dc0c1d9501008301020201830105050201830304040004020404", // P1
+            "0b30dc0c20dc0c1d0e030102030183030404000402040401dc0c1d9501008301020201830105050201830304040004020404", // P5
+        ] {
+            assert_errs(row);
+        }
+        let t = Value::Boolean(true);
+        let f = Value::Boolean(false);
+        assert_row("0b34dc0c1fdc0c1d8303020201020202030183030404000402040401dc0c1d9501008301020201830105050201830304040004020404", t.clone(), 190); // P2
+        assert_row("0b2cdc0c1fdc0c1d0e030102030183030404000402040401dc0c1d83030202010202020301830304040004020404", t.clone(), 155); // P3
+        assert_row("0b30dc0c1fdc0c1d8303020201020202030183030404000402040401dc0c1d83030202010202020301830304040004020404", t.clone(), 185); // P4
+        assert_row("0b34dc0c20dc0c1d8303020201020202030183030404000402040401dc0c1d9501008301020201830105050201830304040004020404", f.clone(), 190); // P6
+        assert_row(
+            "0b1edc0c1fdc0c030c58020204060801d9010158720101830158860204020404",
+            t.clone(),
+            115,
+        ); // M12
+        assert_row(
+            "0b1edc0c1f0c58020204060801dc0c0383015886020402040401d90101587201",
+            t.clone(),
+            105,
+        ); // M13
+        assert_row("0b43dc0c1fdc0c15dc0c1d0e030102030183030404000402040402830104040083013e0486020209041201dc0c1d9501008301020201830105050201830304040004020404", f, 256); // Y8
+        assert_row("0b38dc0c1fb5dc0c1d0e0301020301830304040004020404d901013e04010101dc0c1d9501008301020201830105050201830304040004020404", t, 216);
+        // Y11
+    }
+
+    #[test]
+    fn prefix_suffix_runtime_item_type() {
+        // SANTA `Coll.prefix_suffix_runtime_item_type`: a mismatched item type is invisible to
+        // a generic receiver
+        let t = Value::Boolean(true);
+        let f = Value::Boolean(false);
+        assert_row(
+            "0b1adc0c1f9501008302040402040483020505020504018301040402",
+            t.clone(),
+            85,
+        );
+        assert_row(
+            "0b1adc0c209501008302040402040483020505020504018301040404",
+            t.clone(),
+            85,
+        );
+        assert_row(
+            "0b18dc0c1f830204040204040195010083010404028301050502",
+            t.clone(),
+            85,
+        );
+        assert_row(
+            "0b14dc0c1f9501008301040402830005018301040402",
+            f.clone(),
+            75,
+        );
+        assert_row("0b14dc0c209501008301040402830005018301040402", f, 75);
+        assert_row(
+            "0b18dc0c1f950100830204040204048302050502050401830004",
+            t.clone(),
+            80,
+        );
+        assert_row(
+            "0b18dc0c20950100830204040204048302050502050401830004",
+            t.clone(),
+            80,
+        );
+        assert_row("0b12dc0c1f950100830104040283000501830004", t, 70);
+    }
+
+    #[test]
+    fn prefix_cross_type_equality() {
+        // SANTA `Coll.prefix_cross_type_equality`: Scala's `==` widens every integral box, never
+        // a `BigInt`, and never inside a nested collection
+        let t = Value::Boolean(true);
+        let f = Value::Boolean(false);
+        assert_row(
+            "0b18dc0c1f830203030203040195010083010303028301040402",
+            t.clone(),
+            85,
+        ); // J1
+        assert_row("0b10dc0c1f83020303020304018301030302", t.clone(), 70); // J2
+        assert_row(
+            "0b18dc0c1f830106060101019501008301060601018301050502",
+            f.clone(),
+            80,
+        ); // J3
+        assert_row("0b10dc0c1f83010606010101830106060101", t.clone(), 65); // J4
+        assert_row(
+            "0b1fdc0c1f83011083010404020195010083011083010404028301118301050502",
+            f.clone(),
+            120,
+        ); // J5
+        assert_row("0b14dc0c1f8301108301040402018301108301040402", t, 105); // J6
+        assert_row(
+            "0b1fdc0c2083011083010404020195010083011083010404028301118301050502",
+            f,
+            120,
+        ); // J7
+    }
+
+    #[test]
     fn mapped_pairs_rows() {
         // M3/M4: `map` over a collection of pairs gives a generic collection of pairs
         let pair = |a, b| Value::Tup([Value::Int(a), Value::Int(b)].into());
@@ -579,5 +849,99 @@ pub(crate) mod santa_rows {
             pair(1, 2),
             99,
         );
+    }
+}
+
+#[cfg(test)]
+mod scala_eq_tests {
+    use alloc::vec;
+
+    use ergotree_ir::bigint256::BigInt256;
+    use ergotree_ir::mir::coll_value::CollValue;
+    use ergotree_ir::mir::value::Value;
+    use ergotree_ir::types::stype::SType;
+
+    use super::scala_eq;
+
+    #[test]
+    fn integral_boxes_widen() {
+        assert!(scala_eq(&Value::Int(1), &Value::Long(1)));
+        assert!(scala_eq(&Value::Byte(1), &Value::Long(1)));
+        assert!(scala_eq(&Value::Short(1), &Value::Int(1)));
+        assert!(!scala_eq(&Value::Int(1), &Value::Long(2)));
+    }
+
+    #[test]
+    fn other_kinds_do_not() {
+        assert!(!scala_eq(&Value::Boolean(true), &Value::Int(1)));
+        assert!(!scala_eq(
+            &Value::BigInt(BigInt256::from(1i64)),
+            &Value::Long(1)
+        ));
+        let coll = |t: SType, v: Value<'static>| Value::Coll(CollValue::generic(t, vec![v]));
+        assert!(!scala_eq(
+            &coll(SType::SInt, Value::Int(1)),
+            &coll(SType::SLong, Value::Long(1))
+        ));
+    }
+
+    #[test]
+    fn options_compare_their_values() {
+        // `Some.equals` compares the two values with `BoxesRunTime.equals` (review I3)
+        let some = |v: Value<'static>| Value::Opt(Some(alloc::boxed::Box::new(v)));
+        assert!(scala_eq(&some(Value::Long(1)), &some(Value::Int(1))));
+        assert!(!scala_eq(&some(Value::Long(1)), &some(Value::Int(2))));
+        assert!(scala_eq(&Value::Opt(None), &Value::Opt(None)));
+        assert!(!scala_eq(&some(Value::Int(1)), &Value::Opt(None)));
+    }
+
+    #[test]
+    fn pairs_compare_component_wise() {
+        let pair = |a: Value<'static>, b: Value<'static>| Value::Tup([a, b].into());
+        assert!(scala_eq(
+            &pair(Value::Long(1), Value::Int(2)),
+            &pair(Value::Int(1), Value::Int(2))
+        ));
+        assert!(!scala_eq(
+            &pair(Value::Long(1), Value::Int(2)),
+            &pair(Value::Int(1), Value::Int(3))
+        ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod prefix_tests {
+    use alloc::vec;
+
+    use ergotree_ir::mir::coll_value::CollValue;
+    use ergotree_ir::mir::value::Value;
+    use ergotree_ir::types::stype::SType;
+
+    use super::{ends_with, starts_with};
+
+    #[test]
+    fn pairs_receiver_casts_a_primitive_argument() {
+        // `PairOfCols.startsWith`/`endsWith` with any other argument run
+        // `toArray.startsWith(ys.toArray)`, whose `ys.toArray()` is cast to `Object[]`
+        // (`CollsOverArrays.scala:400`, `:405`): an argument over a primitive array throws, even
+        // an empty one (review I2)
+        let pairs = CollValue::pairs(
+            CollValue::generic(SType::SInt, vec![Value::Int(1)]),
+            CollValue::generic(SType::SInt, vec![Value::Int(2)]),
+        );
+        for arg in [
+            CollValue::generic(SType::SInt, vec![]),
+            CollValue::Bytes([1i8].as_slice().into()),
+            CollValue::Ints([1].as_slice().into()),
+        ] {
+            assert!(starts_with(&pairs, &arg).is_err(), "{arg:?}");
+            assert!(ends_with(&pairs, &arg).is_err(), "{arg:?}");
+        }
+        // an argument over a reference array compares
+        let colls = |items| CollValue::generic(SType::SColl(SType::SInt.into()), items);
+        assert!(starts_with(&pairs, &colls(vec![])).unwrap());
+        let one = colls(vec![Value::Coll(CollValue::generic(SType::SInt, vec![]))]);
+        assert!(!starts_with(&pairs, &one).unwrap());
     }
 }

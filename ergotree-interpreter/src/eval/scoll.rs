@@ -407,14 +407,9 @@ pub(crate) static STARTS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             args.first(),
         )));
     };
-    if prefix.elem_tpe() != coll.elem_tpe() {
-        return Err(EvalError::UnexpectedValue(format!(
-            "startsWith: expected prefix to be of type {:?}, found {:?}",
-            coll.elem_tpe(),
-            prefix.elem_tpe()
-        )));
-    }
-    Ok(Value::from(coll.as_vec().starts_with(&prefix.as_vec())))
+    // the receiver's class decides; no item-type check (SANTA
+    // `Coll.prefix_suffix_runtime_item_type`)
+    Ok(Value::from(super::coll_shape::starts_with(&coll, prefix)?))
 };
 
 pub(crate) static ENDS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -433,14 +428,9 @@ pub(crate) static ENDS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             args.first(),
         )));
     };
-    if suffix.elem_tpe() != coll.elem_tpe() {
-        return Err(EvalError::UnexpectedValue(format!(
-            "endsWith: expected suffix to be of type {:?}, found {:?}",
-            coll.elem_tpe(),
-            suffix.elem_tpe()
-        )));
-    }
-    Ok(Value::from(coll.as_vec().ends_with(&suffix.as_vec())))
+    // the receiver's class decides; no item-type check (SANTA
+    // `Coll.prefix_suffix_runtime_item_type`)
+    Ok(Value::from(super::coll_shape::ends_with(&coll, suffix)?))
 };
 
 pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
