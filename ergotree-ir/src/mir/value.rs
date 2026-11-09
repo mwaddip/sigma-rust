@@ -877,20 +877,27 @@ mod tests {
     }
 
     #[test]
-    fn byte_from_vec_roundtrip() {
+    fn byte_from_array_is_generic() {
+        // `fromArray` at an abstract type never specialises, a `Coll[Byte]` included
         let bytes = vec![1i8, 2i8, 3i8];
         let wrapped: Vec<Value> = bytes.into_iter().map(|b| b.into()).collect();
-        let coll = CollValue::from_collection(SType::SByte, &wrapped[..]).unwrap();
-        assert!(matches!(coll, CollValue::Bytes(_)));
+        let coll = CollValue::from_array(SType::SByte, wrapped.clone()).unwrap();
+        assert!(matches!(
+            coll,
+            CollValue::Generic {
+                elem_tpe: SType::SByte,
+                ..
+            }
+        ));
         let as_vec = coll.as_vec();
         assert_eq!(as_vec, wrapped);
     }
 
     #[test]
-    fn wrapped_from_vec_roundtrip() {
+    fn wrapped_from_array_roundtrip() {
         let longs = vec![1i64, 2i64, 3i64];
         let wrapped: Vec<Value> = longs.into_iter().map(|b| b.into()).collect();
-        let coll = CollValue::from_collection(SType::SLong, &wrapped[..]).unwrap();
+        let coll = CollValue::from_array(SType::SLong, wrapped.clone()).unwrap();
         assert!(matches!(
             coll,
             CollValue::Generic {

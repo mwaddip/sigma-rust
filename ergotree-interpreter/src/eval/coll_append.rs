@@ -2,7 +2,6 @@ use alloc::sync::Arc;
 
 use alloc::vec::Vec;
 use ergotree_ir::mir::coll_append::Append;
-use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
@@ -51,14 +50,17 @@ impl Evaluable for Append {
                 input_elem_tpe, col2_elem_tpe
             )));
         }
-        let input_vecval: Vec<Value> = extract_vecval(input_v)?;
+        let input_vecval: Vec<Value> = extract_vecval(input_v.clone())?;
         let col_2_vecval: Vec<Value> = extract_vecval(col2_v)?;
         ctx.add_per_item_jit_cost(20, 2, 100, (input_vecval.len() + col_2_vecval.len()) as u32)?;
         let concat_vecval = concat(input_vecval, col_2_vecval);
-        Ok(Value::Coll(CollValue::from_collection(
-            input_elem_tpe,
-            concat_vecval,
-        )?))
+        let Value::Coll(receiver) = input_v else {
+            return Err(EvalError::UnexpectedValue(format!(
+                "Append: expected Value to be Value::Coll, got: {input_v:?}"
+            )));
+        };
+        // the receiver's class (`builder.fromArray` inside the receiver)
+        Ok(Value::Coll(receiver.rebuild_like(concat_vecval.to_vec())?))
     }
 }
 

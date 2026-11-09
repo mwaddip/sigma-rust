@@ -289,6 +289,136 @@ pub(crate) mod santa_rows {
     }
 
     #[test]
+    fn item_store_primitive() {
+        // SANTA `Coll.item_store_type_check` #0-#9: `updated`/`patch` store into the receiver's
+        // array, and a generic collection over a primitive array refuses an item of another type,
+        // as the specialised one does
+        for row in [
+            "0b0bdc0c148503050204000402",             // #0 Coll[Boolean] updated Int
+            "0b10dc0c1385030503040083010404020402",   // #1 Coll[Boolean] patch Int
+            "0b11dc0c148303020201020202030204000101", // #2 Coll[Byte] updated Boolean
+            "0b14dc0c138303020201020202030304008501010402", // #3 Coll[Byte] patch Boolean
+            "0b0fdc0c14830203030203040204000101",     // #4 Coll[Short]
+            "0b12dc0c13830203030203040304008501010402", // #5
+            "0b11dc0c148303040400040204040204000101", // #6 Coll[Int]
+            "0b14dc0c138303040400040204040304008501010402", // #7
+            "0b0fdc0c14830205050205040204000101",     // #8 Coll[Long]
+            "0b12dc0c13830205050205040304008501010402", // #9
+        ] {
+            let (res, _) = eval_row(row);
+            assert!(res.is_err(), "{row}: {res:?}");
+        }
+        // #10: a reference array takes a `Coll` of another item type
+        let (res, cost) = eval_row("0b13dc0c1483011083010404020204008301050502");
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(cost, 100);
+    }
+
+    #[test]
+    fn receiver_class_results() {
+        let is_pairs = |c: &CollValue| matches!(c, CollValue::Pairs { .. });
+        let generic_pairs = |c: &CollValue| {
+            matches!(
+                c,
+                CollValue::Generic {
+                    elem_tpe: SType::STuple(_),
+                    ..
+                }
+            )
+        };
+        // `map`/`flatMap` are generic, except INTO pairs from a non-pair receiver, which goes
+        // through `builder.fromArray`'s pair arm (SANTA `Coll.pair_shape_restored` Y1, Y3); `map`
+        // OVER a `PairOfCols` builds a generic collection directly (`PairOfCols.map`, M3)
+        assert!(
+            generic_bytes(&coll_of("dc0c030e02010201d90101027201")),
+            "map of Bytes"
+        );
+        assert!(
+            generic_pairs(&coll_of("dc0c030c58020204060801d90101587201")),
+            "map over pairs"
+        );
+        assert!(
+            is_pairs(&coll_of("dc0c0383030404000402040401d9010104860272017201")),
+            "map into pairs"
+        );
+        assert!(
+            is_pairs(&coll_of(
+                "dc0c0f83030404000402040401d9010104830158860272017201"
+            )),
+            "flatMap into pairs"
+        );
+        // `reverse`, `slice`, `filter` keep the receiver's class
+        assert!(
+            matches!(coll_of("db0c1e0e020102"), CollValue::Bytes(_)),
+            "reverse of Bytes"
+        );
+        assert!(
+            generic_bytes(&coll_of("db0c1e83020202010202")),
+            "reverse of generic"
+        );
+        assert!(
+            matches!(coll_of("b40e02010204000402"), CollValue::Bytes(_)),
+            "slice of Bytes"
+        );
+        assert!(
+            generic_bytes(&coll_of("b48302020201020204000402")),
+            "slice of generic"
+        );
+        assert!(
+            matches!(coll_of("b50e020102d90101020101"), CollValue::Bytes(_)),
+            "filter of Bytes"
+        );
+        assert!(
+            generic_bytes(&coll_of("b583020202010202d90101020101")),
+            "filter of generic"
+        );
+        // ... through `builder.fromArray`, so a generic collection of pairs comes back a
+        // `PairOfCols` (Y4)
+        assert!(
+            is_pairs(&coll_of(
+                "db0c1edc0c0383025886020402040486020406040801d90101587201"
+            )),
+            "reverse of mapped pairs"
+        );
+        // `zip` keeps both sides as they are
+        assert!(
+            matches!(coll_of("dc0c1d0e0301020301830304040004020404"), CollValue::Pairs { ls, rs }
+                if matches!(*ls, CollValue::Bytes(_))
+                    && matches!(*rs, CollValue::Generic { elem_tpe: SType::SInt, .. })),
+            "zip"
+        );
+        // `updateMany` and the `Filter` node rebuild a `PairOfCols`'s sides generic (Y8, Y11)
+        let generic_ls =
+            |c: CollValue| matches!(c, CollValue::Pairs { ls, .. } if generic_bytes(&ls));
+        assert!(
+            generic_ls(coll_of(
+                "dc0c15dc0c1d0e030102030183030404000402040402830104040083013e04860202090412"
+            )),
+            "updateMany of a zip"
+        );
+        assert!(
+            generic_ls(coll_of(
+                "b5dc0c1d0e0301020301830304040004020404d901013e040101"
+            )),
+            "Filter of a zip"
+        );
+        // `SELF.tokens` is a generic collection of pairs (M14-M17)
+        assert!(generic_pairs(&coll_of("db6308a7")), "SELF.tokens");
+    }
+
+    #[test]
+    fn zip_keeps_sides_and_takes_shorter_length() {
+        // `pairColl` slices the longer side to the shorter's length (v5+, `CollsOverArrays.scala:183-196`),
+        // keeping its class: `Coll[Byte](1,2,3)` constant `.zip(Coll(7))`
+        let z = coll_of("dc0c1d0e0301020301830104040e");
+        assert_eq!(z.len(), 1);
+        assert!(
+            matches!(&z, CollValue::Pairs { ls, .. } if matches!(&**ls, CollValue::Bytes(b) if b.len() == 1)),
+            "{z:?}"
+        );
+    }
+
+    #[test]
     #[ignore = "Task 5: getOrElse follows the collection class"]
     fn mapped_pairs_rows() {
         // M3/M4: `map` over a collection of pairs gives a generic collection of pairs

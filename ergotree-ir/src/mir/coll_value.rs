@@ -63,7 +63,9 @@ impl<'ctx> CollValue<'ctx> {
     /// `CollsOverArrays.scala:226-232`): never specialised; a pair item type gives a `PairOfCols`
     /// whose sides are built the same way from each component (`fromBoxedPairs`, `:205-215`), any
     /// other item type a generic collection. A pair item type with an item that is not a pair is an
-    /// error, as the JVM's `asInstanceOf[(A, B)]` throws
+    /// error, as the JVM's `asInstanceOf[(A, B)]` throws; so is a primitive item type (`Boolean`,
+    /// `Byte`, `Short`, `Int`, `Long`) with an item of another type, as the JVM holds those items
+    /// in a primitive array, whose store unboxes (SANTA `Coll.item_store_type_check` #0-#9)
     pub fn from_array(
         elem_tpe: SType,
         items: Vec<Value<'ctx>>,
@@ -76,24 +78,45 @@ impl<'ctx> CollValue<'ctx> {
             Err(_) if pair_item_types(&elem_tpe).is_some() => Err(TryExtractFromError(format!(
                 "a collection of {elem_tpe:?} holds an item that is not a pair"
             ))),
-            Err(items) => Ok(CollValue::generic(elem_tpe, items)),
+            Err(items) => match items.iter().find(|v| !fits_primitive_array(&elem_tpe, v)) {
+                Some(item) => Err(TryExtractFromError(format!(
+                    "a collection of {elem_tpe:?} cannot hold {item:?}"
+                ))),
+                None => Ok(CollValue::generic(elem_tpe, items)),
+            },
         }
     }
 
-    /// A `Coll[Byte]` of `items` as native bytes, any other item type generic
-    pub fn from_collection(
-        elem_tpe: SType,
-        items: impl Into<Arc<[Value<'ctx>]>>,
-    ) -> Result<Self, TryExtractFromError> {
-        let items = items.into();
-        match elem_tpe {
-            SType::SByte => items
-                .iter()
-                .cloned()
+    /// The result of an operation that keeps its receiver's class: sigmastate builds it with
+    /// `builder.fromArray` inside the receiver (v6.0.7 `CollsOverArrays.scala:31-111`), so a
+    /// specialised receiver gives the same specialised form (an item of another kind is an error, as
+    /// the store into its primitive array throws), a generic one goes through
+    /// [`CollValue::from_array`], and a `PairOfCols` rebuilds each side the same way
+    pub fn rebuild_like(&self, items: Vec<Value<'ctx>>) -> Result<Self, TryExtractFromError> {
+        match self {
+            CollValue::Bytes(_) => items
+                .into_iter()
                 .map(|v| v.try_extract_into::<i8>())
                 .collect::<Result<Arc<[_]>, _>>()
                 .map(CollValue::Bytes),
-            _ => Ok(CollValue::Generic { elem_tpe, items }),
+            CollValue::Booleans(_) => items
+                .into_iter()
+                .map(|v| v.try_extract_into::<bool>())
+                .collect::<Result<Arc<[_]>, _>>()
+                .map(CollValue::Booleans),
+            CollValue::Ints(_) => items
+                .into_iter()
+                .map(|v| v.try_extract_into::<i32>())
+                .collect::<Result<Arc<[_]>, _>>()
+                .map(CollValue::Ints),
+            CollValue::Generic { elem_tpe, .. } => CollValue::from_array(elem_tpe.clone(), items),
+            CollValue::Pairs { ls, rs } => match split_pairs(&self.elem_tpe(), items) {
+                Ok((_, _, l, r)) => Ok(CollValue::pairs(ls.rebuild_like(l)?, rs.rebuild_like(r)?)),
+                Err(_) => Err(TryExtractFromError(format!(
+                    "a collection of {:?} holds an item that is not a pair",
+                    self.elem_tpe()
+                ))),
+            },
         }
     }
 
@@ -155,6 +178,19 @@ impl<'ctx> CollValue<'ctx> {
                 .map(|(l, r)| Value::Tup([l, r].into()))
                 .collect(),
         }
+    }
+}
+
+/// Whether `item` can be stored into a JVM array of `elem_tpe`'s items: a primitive item type takes
+/// only its own values; any other item type is not checked here
+fn fits_primitive_array(elem_tpe: &SType, item: &Value<'_>) -> bool {
+    match elem_tpe {
+        SType::SBoolean => matches!(item, Value::Boolean(_)),
+        SType::SByte => matches!(item, Value::Byte(_)),
+        SType::SShort => matches!(item, Value::Short(_)),
+        SType::SInt => matches!(item, Value::Int(_)),
+        SType::SLong => matches!(item, Value::Long(_)),
+        _ => true,
     }
 }
 
