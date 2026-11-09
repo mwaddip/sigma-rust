@@ -14,8 +14,9 @@ use ergo_avltree_rust::operation::KeyValue;
 use ergo_avltree_rust::operation::Operation;
 use ergotree_ir::mir::avl_tree_data::AvlTreeData;
 use ergotree_ir::mir::avl_tree_data::AvlTreeFlags;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::mir::value::{CollKind, NativeColl, Value};
+use ergotree_ir::mir::value::Value;
 
 use super::Context;
 use super::EvalError;
@@ -73,9 +74,9 @@ fn create_verifier(
 pub(crate) static DIGEST_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(15)?;
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Coll(CollKind::NativeColl(NativeColl::CollByte(
+    Ok(Value::Coll(CollValue::Bytes(
         avl_tree_data.digest.iter().map(|&b| b as i8).collect(),
-    ))))
+    )))
 };
 
 pub(crate) static ENABLED_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
@@ -148,57 +149,56 @@ pub(crate) static UPDATE_DIGEST_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     Ok(Value::AvlTree(Box::new(avl_tree_data)))
 };
 
-pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    let key = {
-        let v = args
-            .first()
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
-        v.try_extract_into::<Vec<u8>>()?
-    };
-    let proof = {
-        let v = args
-            .get(1)
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
-        Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-    };
+pub(crate) static GET_EVAL_FN: EvalFn =
+    |_mc, _env, ctx, obj, args| {
+        let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+        let key = {
+            let v = args.first().cloned().ok_or_else(|| {
+                EvalError::AvlTree("eval is missing first arg (entries)".to_string())
+            })?;
+            v.try_extract_into::<Vec<u8>>()?
+        };
+        let proof = {
+            let v = args.get(1).cloned().ok_or_else(|| {
+                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
+            })?;
+            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
+        };
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-        Ok(bv) => bv,
-        // The reference impl's verifier construction never throws: a proof that
-        // does not match the tree digest yields a verifier with no reconstructed
-        // tree, the lookup fails, and `get_eval` raises the same "Tree proof is
-        // incorrect" error as an op-level lookup failure
-        // (`CErgoTreeEvaluator.get_eval`). The JVM charges that lookup before
-        // raising — charge-then-throw. Cost-limit errors from the construction
-        // charge are not construction failures — they propagate.
-        Err(EvalError::AvlTree(_)) => {
-            ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-            return Err(EvalError::AvlTree(format!(
+        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+            Ok(bv) => bv,
+            // The reference impl's verifier construction never throws: a proof that
+            // does not match the tree digest yields a verifier with no reconstructed
+            // tree, the lookup fails, and `get_eval` raises the same "Tree proof is
+            // incorrect" error as an op-level lookup failure
+            // (`CErgoTreeEvaluator.get_eval`). The JVM charges that lookup before
+            // raising — charge-then-throw. Cost-limit errors from the construction
+            // charge are not construction failures — they propagate.
+            Err(EvalError::AvlTree(_)) => {
+                ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+                return Err(EvalError::AvlTree(format!(
+                    "Tree proof is incorrect {:?}",
+                    avl_tree_data
+                )));
+            }
+            Err(e) => return Err(e),
+        };
+        // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
+        // PerItemCost(40, 10, 1) per height item (Scala `get_eval`).
+        ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+        match bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
+            Ok(opt) => match opt {
+                Some(v) => Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
+                    v.iter().map(|&b| b as i8).collect(),
+                )))))),
+                _ => Ok(Value::Opt(None)),
+            },
+            Err(_) => Err(EvalError::AvlTree(format!(
                 "Tree proof is incorrect {:?}",
                 avl_tree_data
-            )));
+            ))),
         }
-        Err(e) => return Err(e),
     };
-    // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
-    // PerItemCost(40, 10, 1) per height item (Scala `get_eval`).
-    ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-    match bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
-        Ok(opt) => match opt {
-            Some(v) => Ok(Value::Opt(Some(Box::new(Value::Coll(
-                CollKind::NativeColl(NativeColl::CollByte(v.iter().map(|&b| b as i8).collect())),
-            ))))),
-            _ => Ok(Value::Opt(None)),
-        },
-        Err(_) => Err(EvalError::AvlTree(format!(
-            "Tree proof is incorrect {:?}",
-            avl_tree_data
-        ))),
-    }
-};
 
 pub(crate) static GET_MANY_EVAL_FN: EvalFn =
     |_mc, _env, ctx, obj, args| {
@@ -229,7 +229,7 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn =
             // propagate.
             Err(EvalError::AvlTree(_)) => {
                 return if keys.is_empty() {
-                    Ok(Value::Coll(CollKind::WrappedColl {
+                    Ok(Value::Coll(CollValue::Generic {
                         elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
                         items: Arc::new([]),
                     }))
@@ -253,11 +253,9 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn =
                 ctx.add_per_item_jit_cost(40, 10, 1, height)?;
                 if let Ok(r) = bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
                     if let Some(v) = r {
-                        Ok(Value::Opt(Some(Box::new(Value::Coll(
-                            CollKind::NativeColl(NativeColl::CollByte(
-                                v.iter().map(|&b| b as i8).collect(),
-                            )),
-                        )))))
+                        Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
+                            v.iter().map(|&b| b as i8).collect(),
+                        ))))))
                     } else {
                         Ok(Value::Opt(None))
                     }
@@ -270,7 +268,7 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn =
             })
             .collect::<Result<Arc<[_]>, _>>()?;
 
-        Ok(Value::Coll(CollKind::WrappedColl {
+        Ok(Value::Coll(CollValue::Generic {
             elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
             items: res,
         }))
@@ -704,8 +702,7 @@ mod tests {
         let res_not_found = eval_out_wo_ctx::<Value>(&expr_not_found);
 
         if let Value::Opt(opt) = res_found {
-            if let Some(Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b)))) = opt.as_deref()
-            {
+            if let Some(Value::Coll(CollValue::Bytes(b))) = opt.as_deref() {
                 assert!(lookup_found.unwrap().eq(&b.as_vec_u8()));
             } else {
                 unreachable!();
@@ -781,12 +778,12 @@ mod tests {
 
         let res = eval_out_wo_ctx::<Value>(&expr);
 
-        if let Value::Coll(CollKind::WrappedColl { items, .. }) = res {
+        if let Value::Coll(CollValue::Generic { items, .. }) = res {
             for (item, expected) in items.iter().zip(lookups) {
                 if let Value::Opt(opt) = item.clone() {
                     match opt.as_deref() {
                         None => assert!(expected.is_none()),
-                        Some(Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b)))) => {
+                        Some(Value::Coll(CollValue::Bytes(b))) => {
                             assert_eq!(&b[..], &expected.unwrap().to_vec().as_vec_i8()[..]);
                         }
                         Some(_) => unreachable!(),
@@ -1089,7 +1086,7 @@ mod tests {
             .into();
 
             let res = eval_out_wo_ctx::<Value>(&expr);
-            if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) = res {
+            if let Value::Coll(CollValue::Bytes(b)) = res {
                 assert_eq!(&b[..], digest.as_slice());
             } else {
                 unreachable!();
@@ -1291,9 +1288,7 @@ mod tests {
                 MethodCall::new(updated, savltree::DIGEST_METHOD.clone(), vec![])
                     .unwrap()
                     .into();
-            if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) =
-                eval_out_wo_ctx::<Value>(&digest_back)
-            {
+            if let Value::Coll(CollValue::Bytes(b)) = eval_out_wo_ctx::<Value>(&digest_back) {
                 assert_eq!(b.as_vec_u8(), new_digest);
             } else {
                 unreachable!();
@@ -1742,7 +1737,7 @@ mod tests {
         .unwrap()
         .into();
         let res = try_eval_out_wo_ctx::<Value<'_>>(&expr).unwrap();
-        if let Value::Coll(CollKind::WrappedColl { items, .. }) = res {
+        if let Value::Coll(CollValue::Generic { items, .. }) = res {
             assert!(items.is_empty());
         } else {
             unreachable!();

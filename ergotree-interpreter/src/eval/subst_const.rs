@@ -5,11 +5,10 @@ use crate::eval::Evaluable;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use ergotree_ir::ergo_tree::ErgoTree;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::Constant;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::subst_const::SubstConstants;
-use ergotree_ir::mir::value::CollKind;
-use ergotree_ir::mir::value::NativeColl;
 use ergotree_ir::mir::value::Value;
 use sigma_util::AsVecI8;
 use sigma_util::AsVecU8;
@@ -30,7 +29,7 @@ impl Evaluable for SubstConstants {
             .map(|i| i as usize)
             .collect();
 
-        let new_constants = if let Value::Coll(CollKind::WrappedColl { items, .. }) = new_values_v {
+        let new_constants = if let Value::Coll(CollValue::Generic { items, .. }) = new_values_v {
             let mut items_const = vec![];
             for v in &*items {
                 let c = Constant::try_from(v.to_static()).map_err(EvalError::Misc)?;
@@ -53,7 +52,7 @@ impl Evaluable for SubstConstants {
             )));
         }
 
-        if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) = script_bytes_v {
+        if let Value::Coll(CollValue::Bytes(b)) = script_bytes_v {
             // Byte-level substitution mirroring sigma-state's
             // `ErgoTreeSerializer.substituteConstants`: the tree body is never
             // parsed and out-of-range positions are a no-op, so a malformed
@@ -72,9 +71,7 @@ impl Evaluable for SubstConstants {
             // constant in the template regardless of how many positions the
             // caller asks to replace.
             ctx.add_per_item_jit_cost(100, 100, 1, num_constants as u32)?;
-            Ok(Value::Coll(CollKind::NativeColl(NativeColl::CollByte(
-                new_bytes.as_vec_i8().into(),
-            ))))
+            Ok(Value::Coll(CollValue::Bytes(new_bytes.as_vec_i8().into())))
         } else {
             Err(EvalError::Misc(format!(
                 "SubstConstants: expected evaluation of `script_bytes` to be of type `Coll[SBytes]`, \
@@ -188,7 +185,7 @@ mod tests {
         );
 
         let x: Value = try_eval_out_wo_ctx(&subst_const).unwrap();
-        if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) = x {
+        if let Value::Coll(CollValue::Bytes(b)) = x {
             // The template's root is not a `SigmaProp`, which a tree parse rejects (rule
             // 1001) but SubstConstants never parses: compare the bytes with the tree built
             // from the new constant.
@@ -248,7 +245,7 @@ mod tests {
         );
 
         let x: Value = try_eval_out_wo_ctx(&subst_const).unwrap();
-        if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) = x {
+        if let Value::Coll(CollValue::Bytes(b)) = x {
             // As in `test_single_substitution`. Positions [1, 2, 0] take n0, n1 and n2,
             // so the constants become [n2, n0, n1].
             let expected = ErgoTree::new(ErgoTreeHeader::v0(true), &plus_times(n2, n0, n1))

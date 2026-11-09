@@ -1,6 +1,6 @@
 use ergotree_ir::mir::coll_slice::Slice;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
@@ -35,9 +35,9 @@ impl Evaluable for Slice {
         // see https://github.com/ergoplatform/sigma-rust/issues/724
         let range = from.max(0) as usize..until.min(input_vec.len() as i32) as usize;
         match input_vec.get(range) {
-            Some(slice) => Ok(Value::Coll(CollKind::from_collection(elem_tpe, slice)?)),
+            Some(slice) => Ok(Value::Coll(CollValue::from_collection(elem_tpe, slice)?)),
             // Scala version returns empty collection if the range is out of bounds
-            None => Ok(Value::Coll(CollKind::from_collection(elem_tpe, [])?)),
+            None => Ok(Value::Coll(CollValue::from_collection(elem_tpe, [])?)),
         }
     }
 }
@@ -75,7 +75,7 @@ mod tests {
             vec![1i64, 2i64, 3i64, 4i64]
         );
         match eval_out_wo_ctx::<Value>(&expr) {
-            Value::Coll(coll) => assert_eq!(coll.elem_tpe(), &SType::SLong),
+            Value::Coll(coll) => assert_eq!(coll.elem_tpe(), SType::SLong),
             _ => panic!("fail"),
         }
     }

@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 
 use alloc::vec::Vec;
 use ergotree_ir::mir::coll_append::Append;
-use ergotree_ir::mir::value::CollKind;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
@@ -55,7 +55,7 @@ impl Evaluable for Append {
         let col_2_vecval: Vec<Value> = extract_vecval(col2_v)?;
         ctx.add_per_item_jit_cost(20, 2, 100, (input_vecval.len() + col_2_vecval.len()) as u32)?;
         let concat_vecval = concat(input_vecval, col_2_vecval);
-        Ok(Value::Coll(CollKind::from_collection(
+        Ok(Value::Coll(CollValue::from_collection(
             input_elem_tpe,
             concat_vecval,
         )?))
@@ -96,7 +96,7 @@ mod tests {
             let append_eval: Vec<i32> = eval_out_wo_ctx(&append_expr);
             assert_eq!(append_eval, *expected_output);
             match eval_out_wo_ctx::<Value>(&append_expr) {
-                Value::Coll(coll) => assert_eq!(coll.elem_tpe(), &SType::SInt),
+                Value::Coll(coll) => assert_eq!(coll.elem_tpe(), SType::SInt),
                 _ => panic!("fail"),
             }
         }

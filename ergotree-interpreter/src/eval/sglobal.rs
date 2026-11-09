@@ -7,10 +7,7 @@ use ergotree_ir::mir::constant::Literal;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
 use ergotree_ir::unsignedbigint256::UnsignedBigInt;
 use ergotree_ir::{
-    mir::{
-        constant::TryExtractInto,
-        value::{CollKind, NativeColl, Value},
-    },
+    mir::{coll_value::CollValue, constant::TryExtractInto, value::Value},
     serialization::{
         data::DataSerializer,
         sigma_byte_reader::{self, SigmaByteRead},
@@ -58,12 +55,9 @@ pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::NotFound("xor: missing left arg".to_string()))?;
 
     match (left_v.clone(), right_v.clone()) {
-        (
-            Value::Coll(CollKind::NativeColl(NativeColl::CollByte(l_byte))),
-            Value::Coll(CollKind::NativeColl(NativeColl::CollByte(r_byte))),
-        ) => {
+        (Value::Coll(CollValue::Bytes(l_byte)), Value::Coll(CollValue::Bytes(r_byte))) => {
             let xor = helper_xor(&l_byte, &r_byte);
-            Ok(CollKind::NativeColl(NativeColl::CollByte(xor)).into())
+            Ok(CollValue::Bytes(xor).into())
         }
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected Xor input to be byte array, got: {0:?}",
@@ -88,7 +82,7 @@ pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx,
     let type_val = mc.tpe().t_range.clone();
 
     let bytes = match bytes_val {
-        Value::Coll(CollKind::NativeColl(NativeColl::CollByte(bytes))) => bytes,
+        Value::Coll(CollValue::Bytes(bytes)) => bytes,
         _ => {
             return Err(EvalError::UnexpectedValue(format!(
                 "fromBigEndianBytes: expected first argument to be byte array, got {:?}",

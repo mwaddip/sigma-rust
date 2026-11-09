@@ -1,7 +1,6 @@
 use alloc::vec::Vec;
 use ergotree_ir::mir::calc_blake2b256::CalcBlake2b256;
-use ergotree_ir::mir::value::CollKind;
-use ergotree_ir::mir::value::NativeColl;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::value::Value;
 use sigma_util::hash::blake2b256_hash;
 use sigma_util::AsVecU8;
@@ -19,7 +18,7 @@ impl Evaluable for CalcBlake2b256 {
     ) -> Result<Value<'ctx>, EvalError> {
         let input_v = self.input.eval(env, ctx)?;
         match input_v.clone() {
-            Value::Coll(CollKind::NativeColl(NativeColl::CollByte(coll_byte))) => {
+            Value::Coll(CollValue::Bytes(coll_byte)) => {
                 ctx.add_per_item_jit_cost(20, 7, 128, coll_byte.len() as u32)?;
                 let expected_hash: Vec<u8> =
                     blake2b256_hash(coll_byte.as_vec_u8().as_slice()).to_vec();

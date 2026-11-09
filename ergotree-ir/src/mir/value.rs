@@ -23,6 +23,7 @@ use crate::unsignedbigint256::UnsignedBigInt;
 use ergo_chain_types::{EcPoint, Header, PreHeader};
 
 use super::avl_tree_data::AvlTreeData;
+use super::coll_value::CollValue;
 use super::constant::Literal;
 use super::constant::TryExtractFrom;
 use super::constant::TryExtractFromError;
@@ -232,6 +233,39 @@ struct StaticMemo {
     boxes: HashMap<usize, Arc<ErgoBox>>,
 }
 
+/// [`Value::to_static_shared`] for a collection: its form kept, each generic item list converted
+/// once per conversion
+fn coll_to_static_shared<'ctx>(
+    coll: &'ctx CollValue<'ctx>,
+    memo: &mut StaticMemo,
+) -> CollValue<'static> {
+    match coll {
+        CollValue::Bytes(items) => CollValue::Bytes(items.clone()),
+        CollValue::Booleans(items) => CollValue::Booleans(items.clone()),
+        CollValue::Ints(items) => CollValue::Ints(items.clone()),
+        CollValue::Generic { elem_tpe, items } => {
+            let key = Arc::as_ptr(items) as *const Value as usize;
+            let items = match memo.items.get(&key) {
+                Some(done) => done.clone(),
+                None => {
+                    let done: Arc<[Value<'static>]> =
+                        items.iter().map(|v| v.to_static_shared(memo)).collect();
+                    memo.items.insert(key, done.clone());
+                    done
+                }
+            };
+            CollValue::Generic {
+                elem_tpe: elem_tpe.clone(),
+                items,
+            }
+        }
+        CollValue::Pairs { ls, rs } => CollValue::pairs(
+            coll_to_static_shared(ls, memo),
+            coll_to_static_shared(rs, memo),
+        ),
+    }
+}
+
 fn bindings_to_static_shared<'ctx>(
     bindings: &'ctx Bindings<'ctx>,
     memo: &mut StaticMemo,
@@ -306,8 +340,8 @@ pub enum Value<'ctx> {
     CBox(Ref<'ctx, ErgoBox>),
     /// AVL tree
     AvlTree(Box<AvlTreeData>),
-    /// Collection of values of the same type
-    Coll(CollKind<Value<'ctx>>),
+    /// Collection of values of the same type, in the form of the JVM object that holds it
+    Coll(CollValue<'ctx>),
     /// Tuple (arbitrary type values)
     Tup(TupleItems<Value<'ctx>>),
     /// Transaction(and blockchain) context info
@@ -347,25 +381,7 @@ impl<'ctx> Value<'ctx> {
             Value::SigmaProp(p) => Value::SigmaProp(p.clone()),
             Value::UnsignedBigInt(b) => Value::UnsignedBigInt(*b),
             Value::AvlTree(t) => Value::AvlTree(t.clone()),
-            Value::Coll(coll) => match coll {
-                CollKind::NativeColl(c) => Value::Coll(CollKind::NativeColl(c.clone())),
-                CollKind::WrappedColl { elem_tpe, items } => {
-                    let key = Arc::as_ptr(items) as *const Value as usize;
-                    let items = match memo.items.get(&key) {
-                        Some(done) => done.clone(),
-                        None => {
-                            let done: Arc<[Value<'static>]> =
-                                items.iter().map(|v| v.to_static_shared(memo)).collect();
-                            memo.items.insert(key, done.clone());
-                            done
-                        }
-                    };
-                    Value::Coll(CollKind::WrappedColl {
-                        items,
-                        elem_tpe: elem_tpe.clone(),
-                    })
-                }
-            },
+            Value::Coll(coll) => Value::Coll(coll_to_static_shared(coll, memo)),
             Value::Tup(tup) => Value::Tup(tup.mapped_ref(|v| v.to_static_shared(memo))),
             Value::Context => Value::Context,
             Value::String(s) => Value::String(s.clone()),
@@ -429,15 +445,13 @@ impl<'ctx> From<&'ctx EcPoint> for Value<'ctx> {
 
 impl<'ctx> From<Vec<i8>> for Value<'ctx> {
     fn from(v: Vec<i8>) -> Self {
-        Value::Coll(CollKind::NativeColl(NativeColl::CollByte(v.into())))
+        Value::Coll(CollValue::Bytes(v.into()))
     }
 }
 
 impl<'ctx> From<Vec<u8>> for Value<'ctx> {
     fn from(v: Vec<u8>) -> Self {
-        Value::Coll(CollKind::NativeColl(NativeColl::CollByte(
-            v.as_vec_i8().into(),
-        )))
+        Value::Coll(CollValue::Bytes(v.as_vec_i8().into()))
     }
 }
 
@@ -462,16 +476,7 @@ impl From<Literal> for Value<'static> {
             Literal::UnsignedBigInt(b) => Value::UnsignedBigInt(b),
             Literal::GroupElement(e) => Value::GroupElement(e.into()),
             Literal::CBox(b) => Value::CBox(b),
-            Literal::Coll(coll) => {
-                let converted_coll = match coll {
-                    CollKind::NativeColl(n) => CollKind::NativeColl(n),
-                    CollKind::WrappedColl { elem_tpe, items } => CollKind::WrappedColl {
-                        elem_tpe,
-                        items: items.iter().cloned().map(Value::from).collect(),
-                    },
-                };
-                Value::Coll(converted_coll)
-            }
+            Literal::Coll(coll) => Value::Coll(CollValue::from(coll)),
             Literal::AvlTree(a) => Value::AvlTree(a),
             Literal::Header(h) => Value::Header(h),
             Literal::Opt(lit) => Value::Opt(lit.map(|boxed| *boxed).map(Value::from).map(Box::new)),
@@ -483,7 +488,7 @@ impl From<Literal> for Value<'static> {
 impl core::fmt::Display for Value<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
-            Value::Coll(CollKind::NativeColl(NativeColl::CollByte(i8_bytes))) => {
+            Value::Coll(CollValue::Bytes(i8_bytes)) => {
                 write!(f, "Coll[Byte](")?;
                 for (i, b) in i8_bytes.iter().enumerate() {
                     if i > 0 {
@@ -493,9 +498,9 @@ impl core::fmt::Display for Value<'_> {
                 }
                 write!(f, ")")
             }
-            Value::Coll(CollKind::WrappedColl { elem_tpe, items }) => {
-                write!(f, "Coll[{}](", elem_tpe)?;
-                for (i, item) in items.iter().enumerate() {
+            Value::Coll(coll) => {
+                write!(f, "Coll[{}](", coll.elem_tpe())?;
+                for (i, item) in coll.as_vec().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -569,10 +574,10 @@ impl StoreWrapped for Tuple {}
 
 impl<'ctx, T: LiftIntoSType + StoreWrapped + Into<Value<'ctx>>> From<Vec<T>> for Value<'ctx> {
     fn from(v: Vec<T>) -> Self {
-        Value::Coll(CollKind::WrappedColl {
-            elem_tpe: T::stype(),
-            items: v.into_iter().map(|i| i.into()).collect(),
-        })
+        Value::Coll(CollValue::generic(
+            T::stype(),
+            v.into_iter().map(|i| i.into()).collect::<Arc<[_]>>(),
+        ))
     }
 }
 
@@ -588,10 +593,10 @@ impl<'ctx> Into<Value<'ctx>> for Tuple {
 
 impl<'ctx> From<Vec<Ref<'ctx, ErgoBox>>> for Value<'ctx> {
     fn from(v: Vec<Ref<'ctx, ErgoBox>>) -> Self {
-        Value::Coll(CollKind::WrappedColl {
-            elem_tpe: SType::SBox,
-            items: v.into_iter().map(|i| i.into()).collect(),
-        })
+        Value::Coll(CollValue::generic(
+            SType::SBox,
+            v.into_iter().map(|i| i.into()).collect::<Arc<[_]>>(),
+        ))
     }
 }
 
@@ -718,17 +723,7 @@ impl TryExtractFrom<Value<'_>> for PreHeader {
 impl<'ctx, T: TryExtractFrom<Value<'ctx>> + StoreWrapped> TryExtractFrom<Value<'ctx>> for Vec<T> {
     fn try_extract_from(c: Value<'ctx>) -> Result<Self, TryExtractFromError> {
         match c {
-            Value::Coll(coll) => match coll {
-                CollKind::WrappedColl {
-                    elem_tpe: _,
-                    items: v,
-                } => v.iter().cloned().map(T::try_extract_from).collect(),
-                _ => Err(TryExtractFromError(format!(
-                    "expected {:?}, found {:?}",
-                    core::any::type_name::<Self>(),
-                    coll
-                ))),
-            },
+            Value::Coll(coll) => coll.as_vec().into_iter().map(T::try_extract_from).collect(),
             _ => Err(TryExtractFromError(format!(
                 "expected {:?}, found {:?}",
                 core::any::type_name::<Self>(),
@@ -743,25 +738,15 @@ impl<'ctx, T: TryExtractFrom<Value<'ctx>> + StoreWrapped, const N: usize>
 {
     fn try_extract_from(c: Value<'ctx>) -> Result<Self, TryExtractFromError> {
         match c {
-            Value::Coll(coll) => match coll {
-                CollKind::WrappedColl {
-                    elem_tpe: _,
-                    items: v,
-                } => {
-                    let v = v
-                        .iter()
-                        .cloned()
-                        .map(T::try_extract_from)
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let len = v.len();
-                    v.try_into().map_err(|_| TryExtractFromError(format!("can't convert vec of {:?} with length of {:?} to array with length of {:?}", core::any::type_name::<T>(), len, N)))
-                }
-                _ => Err(TryExtractFromError(format!(
-                    "expected {:?}, found {:?}",
-                    core::any::type_name::<Self>(),
-                    coll
-                ))),
-            },
+            Value::Coll(coll) => {
+                let v = coll
+                    .as_vec()
+                    .into_iter()
+                    .map(T::try_extract_from)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let len = v.len();
+                v.try_into().map_err(|_| TryExtractFromError(format!("can't convert vec of {:?} with length of {:?} to array with length of {:?}", core::any::type_name::<T>(), len, N)))
+            }
             _ => Err(TryExtractFromError(format!(
                 "expected {:?}, found {:?}",
                 core::any::type_name::<Self>(),
@@ -774,14 +759,12 @@ impl<'ctx, T: TryExtractFrom<Value<'ctx>> + StoreWrapped, const N: usize>
 impl TryExtractFrom<Value<'_>> for Vec<i8> {
     fn try_extract_from(v: Value) -> Result<Self, TryExtractFromError> {
         match v {
-            Value::Coll(v) => match v {
-                CollKind::NativeColl(NativeColl::CollByte(bs)) => Ok(bs.iter().copied().collect()),
-                _ => Err(TryExtractFromError(format!(
-                    "expected {:?}, found {:?}",
-                    core::any::type_name::<Self>(),
-                    v
-                ))),
-            },
+            Value::Coll(CollValue::Bytes(bs)) => Ok(bs.iter().copied().collect()),
+            Value::Coll(coll) if coll.elem_tpe() == SType::SByte => coll
+                .as_vec()
+                .into_iter()
+                .map(|v| v.try_extract_into::<i8>())
+                .collect(),
             _ => Err(TryExtractFromError(format!(
                 "expected {:?}, found {:?}",
                 core::any::type_name::<Self>(),
@@ -883,31 +866,22 @@ mod tests {
     fn byte_u8_array_into() {
         let bytes = vec![1u8, 2u8, 3u8];
         let value: Value = bytes.into();
-        assert!(matches!(
-            value,
-            Value::Coll(CollKind::NativeColl(NativeColl::CollByte(_)))
-        ))
+        assert!(matches!(value, Value::Coll(CollValue::Bytes(_))))
     }
 
     #[test]
     fn byte_i8_array_into() {
         let bytes = vec![1i8, 2i8, 3i8];
         let value: Value = bytes.into();
-        assert!(matches!(
-            value,
-            Value::Coll(CollKind::NativeColl(NativeColl::CollByte(_)))
-        ))
+        assert!(matches!(value, Value::Coll(CollValue::Bytes(_))))
     }
 
     #[test]
     fn byte_from_vec_roundtrip() {
         let bytes = vec![1i8, 2i8, 3i8];
         let wrapped: Vec<Value> = bytes.into_iter().map(|b| b.into()).collect();
-        let coll = CollKind::from_collection(SType::SByte, &wrapped[..]).unwrap();
-        assert!(matches!(
-            coll,
-            CollKind::NativeColl(NativeColl::CollByte(_))
-        ));
+        let coll = CollValue::from_collection(SType::SByte, &wrapped[..]).unwrap();
+        assert!(matches!(coll, CollValue::Bytes(_)));
         let as_vec = coll.as_vec();
         assert_eq!(as_vec, wrapped);
     }
@@ -916,10 +890,10 @@ mod tests {
     fn wrapped_from_vec_roundtrip() {
         let longs = vec![1i64, 2i64, 3i64];
         let wrapped: Vec<Value> = longs.into_iter().map(|b| b.into()).collect();
-        let coll = CollKind::from_collection(SType::SLong, &wrapped[..]).unwrap();
+        let coll = CollValue::from_collection(SType::SLong, &wrapped[..]).unwrap();
         assert!(matches!(
             coll,
-            CollKind::WrappedColl {
+            CollValue::Generic {
                 elem_tpe: SType::SLong,
                 items: _,
             }
@@ -934,13 +908,13 @@ mod tests {
         // converting each copy of it rebuilt the collection and cloned the box again, so the
         // diagnostics of many lambdas over `OUTPUTS` cloned every output once per lambda
         let ergo_box = sigma_test_util::force_any_val::<ErgoBox>();
-        let coll = Value::Coll(CollKind::WrappedColl {
-            elem_tpe: SType::SBox,
-            items: Arc::from(vec![
+        let coll = Value::Coll(CollValue::generic(
+            SType::SBox,
+            Arc::from(vec![
                 Value::CBox(Ref::Borrowed(&ergo_box)),
                 Value::CBox(Ref::Borrowed(&ergo_box)),
             ]),
-        });
+        ));
         fn lambda(captured: HashMap<ValId, Value<'_>>) -> Value<'_> {
             Value::Lambda(Lambda {
                 args: vec![],
@@ -962,7 +936,7 @@ mod tests {
             };
             match outer.captured.get(&ValId::from(id)) {
                 Some(Value::Lambda(inner)) => match inner.captured.get(&ValId::from(1)) {
-                    Some(Value::Coll(CollKind::WrappedColl { items, .. })) => items.clone(),
+                    Some(Value::Coll(CollValue::Generic { items, .. })) => items.clone(),
                     _ => Arc::from(vec![]),
                 },
                 _ => Arc::from(vec![]),

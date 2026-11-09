@@ -3,8 +3,8 @@ use alloc::sync::Arc;
 
 use alloc::vec::Vec;
 use ergotree_ir::mir::coll_filter::Filter;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
@@ -70,7 +70,7 @@ impl Evaluable for Filter {
             .filter(|(_, condition)| *condition)
             .map(|(item, _)| item)
             .collect::<Arc<_>>();
-        Ok(Value::Coll(CollKind::from_collection(
+        Ok(Value::Coll(CollValue::from_collection(
             input_elem_tpe,
             filtered_items,
         )?))
@@ -235,7 +235,7 @@ mod element_type_tests {
         let none_kept = || filter(int_coll_holding(vec![2]), SType::SLong, false);
         let kept = try_eval_out_wo_ctx::<Value>(&none_kept()).unwrap();
         assert!(
-            matches!(&kept, Value::Coll(coll) if coll.elem_tpe() == &SType::SLong),
+            matches!(&kept, Value::Coll(coll) if coll.elem_tpe() == SType::SLong),
             "expected an empty Coll[Long], got {kept:?}"
         );
         let eq: Expr = BinOp {

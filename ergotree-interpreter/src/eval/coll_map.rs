@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 
 use alloc::vec::Vec;
 use ergotree_ir::mir::coll_map::Map;
-use ergotree_ir::mir::value::CollKind;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
@@ -92,7 +92,7 @@ pub(crate) fn map_coll<'ctx>(
         .map(|item| mapper_call(item.clone()))
         .collect::<Result<Arc<[Value]>, EvalError>>()
         .map(|values| {
-            CollKind::from_collection(out_elem_tpe, values).map_err(EvalError::TryExtractFrom)
+            CollValue::from_collection(out_elem_tpe, values).map_err(EvalError::TryExtractFrom)
         })
         .and_then(|v| v) // flatten <Result<Result<Value, _>, _>
         .map(Value::Coll)

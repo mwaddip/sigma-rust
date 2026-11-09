@@ -34,6 +34,8 @@ pub mod coll_map;
 pub mod coll_size;
 /// Collection.slice
 pub mod coll_slice;
+/// A collection value as sigmastate's evaluator holds it
+pub mod coll_value;
 /// Collection of elements
 pub mod collection;
 pub mod constant;

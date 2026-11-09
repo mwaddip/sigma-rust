@@ -4,9 +4,10 @@ use crate::eval::LambdaInvoker;
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
+use ergotree_ir::mir::coll_value::CollValue;
+use ergotree_ir::mir::constant::TryExtractFromError;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::expr::Expr;
-use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stuple::STuple;
 use ergotree_ir::types::stype::SType;
@@ -66,6 +67,28 @@ pub(crate) static INDEX_OF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     }))
 };
 
+/// The concatenation of `colls`, each a collection of the type `colls_tpe`
+fn flatten<'ctx>(
+    colls_tpe: SType,
+    colls: Vec<Value<'ctx>>,
+) -> Result<CollValue<'ctx>, TryExtractFromError> {
+    match colls_tpe {
+        SType::SColl(item_tpe) if *item_tpe == SType::SByte => colls
+            .into_iter()
+            .map(|v| v.try_extract_into::<Vec<i8>>())
+            .collect::<Result<Vec<_>, _>>()
+            .map(|bytes| CollValue::Bytes(bytes.concat().into())),
+        SType::SColl(item_tpe) => colls
+            .into_iter()
+            .map(|v| v.try_extract_into::<Vec<Value>>())
+            .collect::<Result<Vec<_>, _>>()
+            .map(|items| CollValue::generic((*item_tpe).clone(), items.concat())),
+        other => Err(TryExtractFromError(format!(
+            "Expected Value::Coll, got: {other:?}"
+        ))),
+    }
+}
+
 pub(crate) fn flatmap_eval<'ctx>(
     _mc: &MethodCallSite<'_>,
     _env: &mut Env<'ctx>,
@@ -122,8 +145,7 @@ pub(crate) fn flatmap_eval<'ctx>(
         .iter()
         .map(|item| lambda_call(item.clone()))
         .collect::<Result<Vec<Value>, EvalError>>()?;
-    let coll =
-        CollKind::from_vec_vec(lambda.body.tpe(), values).map_err(EvalError::TryExtractFrom)?;
+    let coll = flatten(lambda.body.tpe(), values).map_err(EvalError::TryExtractFrom)?;
     // flatMap cost scales with the OUTPUT (flattened) length, not the input
     // length, matching Scala's `flatMap_eval` (addSeqCost over `res.length`
     // after building the result, post the per-item lambda calls).
@@ -157,7 +179,7 @@ pub(crate) static ZIP_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .zip(coll_2)
         .map(|(a, b)| Value::Tup([a, b].into()))
         .collect::<Arc<[_]>>();
-    let coll_zip = CollKind::from_collection(STuple::pair(type_1, type_2).into(), zip);
+    let coll_zip = CollValue::from_collection(STuple::pair(type_1, type_2).into(), zip);
     match coll_zip {
         Ok(coll) => Ok(Value::Coll(coll)),
         Err(e) => Err(EvalError::TryExtractFrom(e)),
@@ -177,7 +199,7 @@ pub(crate) static INDICES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         .map(|i| Ok(Value::Int(i32::try_from(i)?)))
         .collect::<Result<Arc<[_]>, core::num::TryFromIntError>>();
     match indices_i32 {
-        Ok(vec_val) => match CollKind::from_collection(SInt, vec_val) {
+        Ok(vec_val) => match CollValue::from_collection(SInt, vec_val) {
             Ok(coll) => Ok(Value::Coll(coll)),
             Err(e) => Err(EvalError::TryExtractFrom(e)),
         },
@@ -228,7 +250,7 @@ pub(crate) static PATCH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .chain(normalized_input_vals.iter().skip(from + replaced))
         .cloned()
         .collect::<Arc<[_]>>();
-    Ok(Value::Coll(CollKind::from_collection(input_tpe, res)?))
+    Ok(Value::Coll(CollValue::from_collection(input_tpe, res)?))
 };
 
 pub(crate) static UPDATED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -256,7 +278,10 @@ pub(crate) static UPDATED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     match res.get_mut(target_index_usize) {
         Some(elem) => {
             *elem = update_val;
-            Ok(Value::Coll(CollKind::from_collection(input_tpe, &res[..])?))
+            Ok(Value::Coll(CollValue::from_collection(
+                input_tpe,
+                &res[..],
+            )?))
         }
         None => Err(EvalError::UnexpectedValue(format!(
             "updated: target index out of bounds, got: {:?}",
@@ -339,7 +364,10 @@ pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
             }
             i += 1;
         }
-        Ok(Value::Coll(CollKind::from_collection(input_tpe, &res[..])?))
+        Ok(Value::Coll(CollValue::from_collection(
+            input_tpe,
+            &res[..],
+        )?))
     };
 
 pub(crate) static REVERSE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
@@ -353,7 +381,11 @@ pub(crate) static REVERSE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     // transformers.scala:74). A flat 20 omitted the per-chunk term (JVM charges
     // 20+2 = 22 for a non-empty single chunk) -> 2 undercharge.
     ctx.add_per_item_jit_cost(20, 2, 100, coll.len() as u32)?;
-    Ok(Value::from(coll.reverse()))
+    let reversed: Vec<Value> = coll.as_vec().into_iter().rev().collect();
+    Ok(Value::Coll(CollValue::from_collection(
+        coll.elem_tpe(),
+        reversed,
+    )?))
 };
 
 pub(crate) static STARTS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -379,7 +411,7 @@ pub(crate) static STARTS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             prefix.elem_tpe()
         )));
     }
-    Ok(Value::from(coll.starts_with(prefix)))
+    Ok(Value::from(coll.as_vec().starts_with(&prefix.as_vec())))
 };
 
 pub(crate) static ENDS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -405,7 +437,7 @@ pub(crate) static ENDS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             suffix.elem_tpe()
         )));
     }
-    Ok(Value::from(coll.ends_with(suffix)))
+    Ok(Value::from(coll.as_vec().ends_with(&suffix.as_vec())))
 };
 
 pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -433,11 +465,11 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 /// two items, which sigmastate holds as a `Coll[Any]` (`Tuple.value`, v6.0.7
 /// `values.scala:818-822`). Anything else, a pair (a `Tuple2`) included, is not a `Coll`, and
 /// the reflective call fails.
-fn jvm_coll<'ctx>(obj: Value<'ctx>, method: &str) -> Result<CollKind<Value<'ctx>>, EvalError> {
+fn jvm_coll<'ctx>(obj: Value<'ctx>, method: &str) -> Result<CollValue<'ctx>, EvalError> {
     match obj {
         Value::Coll(coll) => Ok(coll),
         Value::Tup(items) if items.len() != 2 => {
-            CollKind::from_collection(SType::SAny, items.to_vec())
+            CollValue::from_collection(SType::SAny, items.to_vec())
                 .map_err(EvalError::TryExtractFrom)
         }
         _ => Err(EvalError::UnexpectedValue(format!(

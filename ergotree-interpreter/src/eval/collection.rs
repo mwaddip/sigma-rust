@@ -1,10 +1,9 @@
 use alloc::sync::Arc;
 
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::collection::Collection;
 use ergotree_ir::mir::constant::TryExtractFromError;
 use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::mir::value::CollKind;
-use ergotree_ir::mir::value::NativeColl;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
@@ -52,9 +51,9 @@ impl Evaluable for Collection {
                             .cloned()
                             .map(|i| i.try_extract_into::<i8>())
                             .collect();
-                        Value::Coll(CollKind::NativeColl(NativeColl::CollByte(bytes?)))
+                        Value::Coll(CollValue::Bytes(bytes?))
                     }
-                    _ => Value::Coll(CollKind::WrappedColl {
+                    _ => Value::Coll(CollValue::Generic {
                         elem_tpe: elem_tpe.clone(),
                         items: items_v?,
                     }),

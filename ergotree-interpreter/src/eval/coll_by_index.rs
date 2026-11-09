@@ -1,7 +1,7 @@
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::coll_by_index::ByIndex;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
@@ -11,7 +11,7 @@ use crate::eval::Evaluable;
 
 /// The item at `index`, or `None` out of range (a negative index included): `ByIndex`'s
 /// lookup, shared with the `Coll.apply` and `Coll.getOrElse` methods
-pub(crate) fn item_at<'ctx>(coll: &CollKind<Value<'ctx>>, index: i32) -> Option<Value<'ctx>> {
+pub(crate) fn item_at<'ctx>(coll: &CollValue<'ctx>, index: i32) -> Option<Value<'ctx>> {
     usize::try_from(index).ok().and_then(|i| coll.get_val(i))
 }
 
@@ -24,7 +24,7 @@ impl Evaluable for ByIndex {
         ctx.add_jit_cost(30)?; // ByIndex = Fixed(30)
         let input_v = self.input.eval(env, ctx)?;
         let index_v = self.index.eval(env, ctx)?;
-        let normalized_input_vals: &CollKind<Value<'ctx>> = match &input_v {
+        let normalized_input_vals: &CollValue<'ctx> = match &input_v {
             Value::Coll(coll) => Ok(coll),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "ByIndex: expected input to be Value::Coll, got: {0:?}",
