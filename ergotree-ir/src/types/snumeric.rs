@@ -190,11 +190,12 @@ lazy_static! {
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V3
     };
-    static ref METHOD_DESC: [&'static SMethodDesc; 12] = [
+    static ref METHOD_DESC: [&'static SMethodDesc; 13] = [
         &TO_BYTE_METHOD_DESC,
         &TO_SHORT_METHOD_DESC,
         &TO_INT_METHOD_DESC,
         &TO_LONG_METHOD_DESC,
+        &TO_BIGINT_METHOD_DESC,
         &TO_BYTES_METHOD_DESC,
         &TO_BITS_METHOD_DESC,
         &BITWISE_INVERSE_METHOD_DESC,
