@@ -4,13 +4,12 @@ use crate::eval::LambdaInvoker;
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
+use ergotree_ir::mir::coll_value::CollValue;
+use ergotree_ir::mir::constant::TryExtractFromError;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::expr::Expr;
-use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
-use ergotree_ir::types::stuple::STuple;
 use ergotree_ir::types::stype::SType;
-use ergotree_ir::types::stype::SType::SInt;
 
 use super::coll_by_index::item_at;
 use super::coll_map::map_coll;
@@ -65,6 +64,37 @@ pub(crate) static INDEX_OF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         found.map(|off| (start + off) as i32).unwrap_or(-1)
     }))
 };
+
+/// The concatenation of `colls`, each a collection of the type `colls_tpe`, as `flatMap` builds
+/// it: `builder.fromArray` at an abstract item type (v6.0.7 `CollsOverArrays.scala:72-75`,
+/// `:426-427`), so generic, or a `PairOfCols` for pairs (SANTA `Coll.pair_shape_restored` Y3)
+fn flatten<'ctx>(
+    colls_tpe: SType,
+    colls: Vec<Value<'ctx>>,
+) -> Result<CollValue<'ctx>, TryExtractFromError> {
+    let SType::SColl(item_tpe) = colls_tpe else {
+        return Err(TryExtractFromError(format!(
+            "Expected Value::Coll, got: {colls_tpe:?}"
+        )));
+    };
+    let items: Vec<Value> = if *item_tpe == SType::SByte {
+        colls
+            .into_iter()
+            .map(|v| v.try_extract_into::<Vec<i8>>())
+            .collect::<Result<Vec<_>, _>>()?
+            .concat()
+            .into_iter()
+            .map(Value::Byte)
+            .collect()
+    } else {
+        colls
+            .into_iter()
+            .map(|v| v.try_extract_into::<Vec<Value>>())
+            .collect::<Result<Vec<_>, _>>()?
+            .concat()
+    };
+    CollValue::from_array((*item_tpe).clone(), items)
+}
 
 pub(crate) fn flatmap_eval<'ctx>(
     _mc: &MethodCallSite<'_>,
@@ -122,8 +152,7 @@ pub(crate) fn flatmap_eval<'ctx>(
         .iter()
         .map(|item| lambda_call(item.clone()))
         .collect::<Result<Vec<Value>, EvalError>>()?;
-    let coll =
-        CollKind::from_vec_vec(lambda.body.tpe(), values).map_err(EvalError::TryExtractFrom)?;
+    let coll = flatten(lambda.body.tpe(), values).map_err(EvalError::TryExtractFrom)?;
     // flatMap cost scales with the OUTPUT (flattened) length, not the input
     // length, matching Scala's `flatMap_eval` (addSeqCost over `res.length`
     // after building the result, post the per-item lambda calls).
@@ -132,36 +161,37 @@ pub(crate) fn flatmap_eval<'ctx>(
 }
 
 pub(crate) static ZIP_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let (type_1, coll_1) = match obj {
-        Value::Coll(coll) => Ok((coll.elem_tpe().clone(), coll.as_vec())),
-        _ => Err(EvalError::UnexpectedValue(format!(
+    let Value::Coll(ls) = obj else {
+        return Err(EvalError::UnexpectedValue(format!(
             "expected obj to be Value::Coll, got: {0:?}",
             obj
-        ))),
-    }?;
-    let n = coll_1.len() as u32;
-    ctx.add_per_item_jit_cost(10, 1, 10, n)?;
+        )));
+    };
+    ctx.add_per_item_jit_cost(10, 1, 10, ls.len() as u32)?;
     let arg_1 = args
         .first()
         .cloned()
         .ok_or_else(|| EvalError::NotFound("zip: missing first arg".to_string()))?;
-    let (type_2, coll_2) = match arg_1 {
-        Value::Coll(coll) => Ok((coll.elem_tpe().clone(), coll.as_vec())),
-        _ => Err(EvalError::UnexpectedValue(format!(
+    let Value::Coll(rs) = arg_1 else {
+        return Err(EvalError::UnexpectedValue(format!(
             "expected first arg to be Value::Coll, got: {0:?}",
             arg_1
-        ))),
-    }?;
-    let zip = coll_1
-        .into_iter()
-        .zip(coll_2)
-        .map(|(a, b)| Value::Tup([a, b].into()))
-        .collect::<Arc<[_]>>();
-    let coll_zip = CollKind::from_collection(STuple::pair(type_1, type_2).into(), zip);
-    match coll_zip {
-        Ok(coll) => Ok(Value::Coll(coll)),
-        Err(e) => Err(EvalError::TryExtractFrom(e)),
+        )));
+    };
+    // a `PairOfCols` of both sides as they are, the longer sliced to the shorter's length, which
+    // keeps its class (`pairColl`, v6.0.7 `CollsOverArrays.scala:183-196`)
+    fn shorten(side: CollValue<'_>, n: usize) -> Result<CollValue<'_>, EvalError> {
+        if side.len() > n {
+            Ok(side.rebuild_like(side.as_vec().into_iter().take(n).collect())?)
+        } else {
+            Ok(side)
+        }
     }
+    let n = ls.len().min(rs.len());
+    Ok(Value::Coll(CollValue::pairs(
+        shorten(ls, n)?,
+        shorten(rs, n)?,
+    )))
 };
 
 pub(crate) static INDICES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
@@ -173,24 +203,18 @@ pub(crate) static INDICES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         ))),
     }?;
     ctx.add_per_item_jit_cost(20, 2, 16, input_len as u32)?;
-    let indices_i32 = (0..input_len)
-        .map(|i| Ok(Value::Int(i32::try_from(i)?)))
-        .collect::<Result<Arc<[_]>, core::num::TryFromIntError>>();
-    match indices_i32 {
-        Ok(vec_val) => match CollKind::from_collection(SInt, vec_val) {
-            Ok(coll) => Ok(Value::Coll(coll)),
-            Err(e) => Err(EvalError::TryExtractFrom(e)),
-        },
-        Err(e) => Err(EvalError::UnexpectedValue(format!(
-            "Coll length overflow: {0:?}",
-            e
-        ))),
-    }
+    // a specialised `Coll[Int]` from any receiver (`builder.fromArray(toArray.indices.toArray)`,
+    // v6.0.7 `CollsOverArrays.scala:68`)
+    let indices = (0..input_len)
+        .map(i32::try_from)
+        .collect::<Result<Arc<[_]>, core::num::TryFromIntError>>()
+        .map_err(|e| EvalError::UnexpectedValue(format!("Coll length overflow: {0:?}", e)))?;
+    Ok(Value::Coll(CollValue::Ints(indices)))
 };
 
 pub(crate) static PATCH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let (input_tpe, normalized_input_vals) = match obj {
-        Value::Coll(coll) => Ok((coll.elem_tpe().clone(), coll.as_vec())),
+    let (normalized_input_vals, receiver) = match obj {
+        Value::Coll(coll) => Ok((coll.as_vec(), coll)),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected obj to be Value::Coll, got: {0:?}",
             obj
@@ -228,12 +252,13 @@ pub(crate) static PATCH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .chain(normalized_input_vals.iter().skip(from + replaced))
         .cloned()
         .collect::<Arc<[_]>>();
-    Ok(Value::Coll(CollKind::from_collection(input_tpe, res)?))
+    // the receiver's class (`builder.fromArray` inside the receiver)
+    Ok(Value::Coll(receiver.rebuild_like(res.to_vec())?))
 };
 
 pub(crate) static UPDATED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let (input_tpe, normalized_input_vals) = match obj {
-        Value::Coll(coll) => Ok((coll.elem_tpe().clone(), coll.as_vec())),
+    let (normalized_input_vals, receiver) = match obj {
+        Value::Coll(coll) => Ok((coll.as_vec(), coll)),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected obj to be Value::Coll, got: {0:?}",
             obj
@@ -256,7 +281,8 @@ pub(crate) static UPDATED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     match res.get_mut(target_index_usize) {
         Some(elem) => {
             *elem = update_val;
-            Ok(Value::Coll(CollKind::from_collection(input_tpe, &res[..])?))
+            // the receiver's class (`builder.fromArray` inside the receiver)
+            Ok(Value::Coll(receiver.rebuild_like(res)?))
         }
         None => Err(EvalError::UnexpectedValue(format!(
             "updated: target index out of bounds, got: {:?}",
@@ -267,8 +293,8 @@ pub(crate) static UPDATED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 
 pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
     |_mc, _env, ctx, obj, args| {
-        let (input_tpe, normalized_input_vals) = match obj {
-            Value::Coll(coll) => Ok((coll.elem_tpe().clone(), coll.as_vec())),
+        let (input_tpe, normalized_input_vals, receiver) = match obj {
+            Value::Coll(coll) => Ok((coll.elem_tpe(), coll.as_vec(), coll)),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected obj to be Value::Coll, got: {0:?}",
                 obj
@@ -339,7 +365,13 @@ pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
             }
             i += 1;
         }
-        Ok(Value::Coll(CollKind::from_collection(input_tpe, &res[..])?))
+        // the receiver's class (`builder.fromArray` inside the receiver), but a `PairOfCols`
+        // rebuilds its sides with `fromArray` at an abstract type (v6.0.7 `CollsOverArrays.scala:436-450`;
+        // SANTA `Coll.pair_shape_restored` Y8)
+        Ok(Value::Coll(match receiver {
+            CollValue::Pairs { .. } => CollValue::from_array(input_tpe, res)?,
+            _ => receiver.rebuild_like(res)?,
+        }))
     };
 
 pub(crate) static REVERSE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
@@ -353,7 +385,10 @@ pub(crate) static REVERSE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     // transformers.scala:74). A flat 20 omitted the per-chunk term (JVM charges
     // 20+2 = 22 for a non-empty single chunk) -> 2 undercharge.
     ctx.add_per_item_jit_cost(20, 2, 100, coll.len() as u32)?;
-    Ok(Value::from(coll.reverse()))
+    // the receiver's class (`builder.fromArray` inside the receiver): a generic collection of
+    // pairs comes back a `PairOfCols` (SANTA `Coll.pair_shape_restored` Y4)
+    let reversed: Vec<Value> = coll.as_vec().into_iter().rev().collect();
+    Ok(Value::Coll(coll.rebuild_like(reversed)?))
 };
 
 pub(crate) static STARTS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -372,14 +407,9 @@ pub(crate) static STARTS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             args.first(),
         )));
     };
-    if prefix.elem_tpe() != coll.elem_tpe() {
-        return Err(EvalError::UnexpectedValue(format!(
-            "startsWith: expected prefix to be of type {:?}, found {:?}",
-            coll.elem_tpe(),
-            prefix.elem_tpe()
-        )));
-    }
-    Ok(Value::from(coll.starts_with(prefix)))
+    // the receiver's class decides; no item-type check (SANTA
+    // `Coll.prefix_suffix_runtime_item_type`)
+    Ok(Value::from(super::coll_shape::starts_with(&coll, prefix)?))
 };
 
 pub(crate) static ENDS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -398,14 +428,9 @@ pub(crate) static ENDS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             args.first(),
         )));
     };
-    if suffix.elem_tpe() != coll.elem_tpe() {
-        return Err(EvalError::UnexpectedValue(format!(
-            "endsWith: expected suffix to be of type {:?}, found {:?}",
-            coll.elem_tpe(),
-            suffix.elem_tpe()
-        )));
-    }
-    Ok(Value::from(coll.ends_with(suffix)))
+    // the receiver's class decides; no item-type check (SANTA
+    // `Coll.prefix_suffix_runtime_item_type`)
+    Ok(Value::from(super::coll_shape::ends_with(&coll, suffix)?))
 };
 
 pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -433,12 +458,11 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 /// two items, which sigmastate holds as a `Coll[Any]` (`Tuple.value`, v6.0.7
 /// `values.scala:818-822`). Anything else, a pair (a `Tuple2`) included, is not a `Coll`, and
 /// the reflective call fails.
-fn jvm_coll<'ctx>(obj: Value<'ctx>, method: &str) -> Result<CollKind<Value<'ctx>>, EvalError> {
+fn jvm_coll<'ctx>(obj: Value<'ctx>, method: &str) -> Result<CollValue<'ctx>, EvalError> {
     match obj {
         Value::Coll(coll) => Ok(coll),
         Value::Tup(items) if items.len() != 2 => {
-            CollKind::from_collection(SType::SAny, items.to_vec())
-                .map_err(EvalError::TryExtractFrom)
+            Ok(CollValue::generic(SType::SAny, items.to_vec()))
         }
         _ => Err(EvalError::UnexpectedValue(format!(
             "{method}: expected Coll, found {obj:?}"
@@ -489,17 +513,8 @@ pub(crate) static GET_OR_ELSE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::UnexpectedValue("getOrElse: default argument not found".into()))?
         .tpe();
     crate::eval::check_value_of_type(&default_tpe, &default, ctx.tree_version())?;
-    // a collection of pairs is a `PairOfCols` on the JVM, whose `getOrElse` the interface call
-    // reaches through a bridge that casts the default to `Tuple2`, whatever the index
-    // (`CollsOverArrays.scala:309-315`)
-    if matches!(coll.elem_tpe(), SType::STuple(t) if t.items.len() == 2)
-        && !matches!(&default, Value::Tup(items) if items.len() == 2)
-    {
-        return Err(EvalError::UnexpectedValue(format!(
-            "getOrElse: a collection of pairs takes a pair default, found {default:?}"
-        )));
-    }
-    Ok(item_at(&coll, index.try_extract_into::<i32>()?).unwrap_or(default))
+    // then the receiver's class decides whether it takes the default
+    super::coll_shape::get_or_else(&coll, index.try_extract_into::<i32>()?, default)
 };
 
 /// `Coll.map` (id 3), as sigmastate's `map_eval` (`methods.scala:862-867`): the result's item

@@ -1,12 +1,10 @@
 use alloc::string::ToString;
-use alloc::sync::Arc;
 
 use alloc::vec::Vec;
 use ergotree_ir::mir::coll_filter::Filter;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
-use ergotree_ir::types::stype::SType;
 
 use crate::eval::env::Env;
 use crate::eval::Context;
@@ -45,8 +43,8 @@ impl Evaluable for Filter {
         // sigmastate reads no element type here: the condition checks each element against its
         // argument's type, and the result is `inputV.filter(...)`, with the input's item type
         // (v6.0.7 `transformers.scala:117-128`, `values.scala:1074`)
-        let (input_elem_tpe, normalized_input_vals): (SType, Vec<Value>) = match input_v {
-            Value::Coll(coll) => Ok((coll.elem_tpe().clone(), coll.as_vec())),
+        let (normalized_input_vals, receiver) = match input_v {
+            Value::Coll(coll) => Ok((coll.as_vec(), coll)),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected Map input to be Value::Coll, got: {0:?}",
                 input_v
@@ -69,11 +67,14 @@ impl Evaluable for Filter {
             .zip(items_conditions)
             .filter(|(_, condition)| *condition)
             .map(|(item, _)| item)
-            .collect::<Arc<_>>();
-        Ok(Value::Coll(CollKind::from_collection(
-            input_elem_tpe,
-            filtered_items,
-        )?))
+            .collect::<Vec<_>>();
+        // the receiver's class (`builder.fromArray` inside the receiver), but a `PairOfCols`
+        // rebuilds its sides with `pairCollFromArrays` at an abstract type (v6.0.7
+        // `CollsOverArrays.scala:348-370`; SANTA `Coll.pair_shape_restored` Y11)
+        Ok(Value::Coll(match receiver {
+            CollValue::Pairs { .. } => CollValue::from_array(receiver.elem_tpe(), filtered_items)?,
+            _ => receiver.rebuild_like(filtered_items)?,
+        }))
     }
 }
 
@@ -235,7 +236,7 @@ mod element_type_tests {
         let none_kept = || filter(int_coll_holding(vec![2]), SType::SLong, false);
         let kept = try_eval_out_wo_ctx::<Value>(&none_kept()).unwrap();
         assert!(
-            matches!(&kept, Value::Coll(coll) if coll.elem_tpe() == &SType::SLong),
+            matches!(&kept, Value::Coll(coll) if coll.elem_tpe() == SType::SLong),
             "expected an empty Coll[Long], got {kept:?}"
         );
         let eq: Expr = BinOp {

@@ -6,7 +6,8 @@
 //! PR 846 (arkadianet/jit-costing) against 19,549 mainnet transactions.
 
 use ergotree_ir::chain::context::Context;
-use ergotree_ir::mir::value::{CollKind, NativeColl, Value};
+use ergotree_ir::mir::coll_value::CollValue;
+use ergotree_ir::mir::value::Value;
 use ergotree_ir::sigma_protocol::sigma_boolean::{
     SigmaBoolean, SigmaConjecture, SigmaProofOfKnowledgeTree,
 };
@@ -269,22 +270,22 @@ fn eq_sigma_bools_with_cost(
 /// SigmaProp/...), which pays `EQ_COLL_DEFAULT_PER_ITEM` and recurses per
 /// element via JVM's generic `equalColls`. Mirrors Scala's per-type array cost
 /// kinds.
-fn coll_eq_cost(coll: &CollKind<Value<'_>>) -> Option<(u32, u32, u32)> {
-    match coll {
-        CollKind::NativeColl(NativeColl::CollByte(_)) => Some(EQ_COLL_BYTE_PER_ITEM),
-        CollKind::WrappedColl { elem_tpe, .. } => match elem_tpe {
-            SType::SShort => Some(EQ_COLL_SHORT_PER_ITEM),
-            SType::SInt => Some(EQ_COLL_INT_PER_ITEM),
-            SType::SLong => Some(EQ_COLL_LONG_PER_ITEM),
-            SType::SBoolean => Some(EQ_COLL_BOOLEAN_PER_ITEM),
-            SType::SBigInt | SType::SUnsignedBigInt => Some(EQ_COLL_BIGINT_PER_ITEM),
-            SType::SGroupElement => Some(EQ_COLL_GROUP_ELEMENT_PER_ITEM),
-            SType::SAvlTree => Some(EQ_COLL_AVL_TREE_PER_ITEM),
-            SType::SBox => Some(EQ_COLL_BOX_PER_ITEM),
-            SType::SPreHeader => Some(EQ_COLL_PREHEADER_PER_ITEM),
-            SType::SHeader => Some(EQ_COLL_HEADER_PER_ITEM),
-            _ => None,
-        },
+fn coll_eq_cost(coll: &CollValue<'_>) -> Option<(u32, u32, u32)> {
+    // keyed on the item type alone, as the JVM's dispatch on `tItem` is: the collection's form
+    // never changes the cost
+    match coll.elem_tpe() {
+        SType::SByte => Some(EQ_COLL_BYTE_PER_ITEM),
+        SType::SShort => Some(EQ_COLL_SHORT_PER_ITEM),
+        SType::SInt => Some(EQ_COLL_INT_PER_ITEM),
+        SType::SLong => Some(EQ_COLL_LONG_PER_ITEM),
+        SType::SBoolean => Some(EQ_COLL_BOOLEAN_PER_ITEM),
+        SType::SBigInt | SType::SUnsignedBigInt => Some(EQ_COLL_BIGINT_PER_ITEM),
+        SType::SGroupElement => Some(EQ_COLL_GROUP_ELEMENT_PER_ITEM),
+        SType::SAvlTree => Some(EQ_COLL_AVL_TREE_PER_ITEM),
+        SType::SBox => Some(EQ_COLL_BOX_PER_ITEM),
+        SType::SPreHeader => Some(EQ_COLL_PREHEADER_PER_ITEM),
+        SType::SHeader => Some(EQ_COLL_HEADER_PER_ITEM),
+        _ => None,
     }
 }
 
@@ -296,16 +297,16 @@ fn coll_eq_cost(coll: &CollKind<Value<'_>>) -> Option<(u32, u32, u32)> {
 /// kinds cannot occur for a COA element type (`Coll[Byte]` is always native,
 /// every other leaf type always wrapped with a matching element type); the `n`
 /// fallback keeps the prior full-length charge for that unreachable shape.
-fn coll_eq_compared_count(l: &CollKind<Value<'_>>, r: &CollKind<Value<'_>>) -> u32 {
+fn coll_eq_compared_count(l: &CollValue<'_>, r: &CollValue<'_>) -> u32 {
     let first_mismatch = match (l, r) {
-        (
-            CollKind::NativeColl(NativeColl::CollByte(la)),
-            CollKind::NativeColl(NativeColl::CollByte(ra)),
-        ) => la.iter().zip(ra.iter()).position(|(a, b)| a != b),
-        (CollKind::WrappedColl { items: li, .. }, CollKind::WrappedColl { items: ri, .. }) => {
+        (CollValue::Bytes(la), CollValue::Bytes(ra)) => {
+            la.iter().zip(ra.iter()).position(|(a, b)| a != b)
+        }
+        (CollValue::Generic { items: li, .. }, CollValue::Generic { items: ri, .. }) => {
             li.iter().zip(ri.iter()).position(|(a, b)| a != b)
         }
-        _ => None,
+        // two forms of the same item type: compare item by item
+        _ => (0..l.len()).position(|i| l.get_val(i) != r.get_val(i)),
     };
     match first_mismatch {
         Some(idx) => idx as u32 + 1,
@@ -333,6 +334,36 @@ mod tests {
     }
 
     #[test]
+    fn forms_compare_equal_at_same_cost() {
+        // A specialised and a generic collection with the same items are equal on the JVM
+        // (SANTA `Coll.specialisation_blind_ops` Q1-Q3), at the cost of their item type
+        use ergotree_ir::mir::coll_value::CollValue;
+        let cost = |l: Value<'static>, r: Value<'static>| {
+            let ctx = force_any_val::<Context>();
+            let before = ctx.jit_cost_value();
+            let eq = eq_with_cost(&l, &r, &ctx).unwrap();
+            (eq, ctx.jit_cost_value() - before)
+        };
+        let bytes = || Value::Coll(CollValue::Bytes([1i8, 2, 3].as_slice().into()));
+        let gen_bytes = Value::Coll(CollValue::generic(
+            SType::SByte,
+            vec![Value::Byte(1), Value::Byte(2), Value::Byte(3)],
+        ));
+        assert_eq!(cost(bytes(), gen_bytes.clone()), cost(bytes(), bytes()));
+        assert!(cost(gen_bytes, bytes()).0);
+        let ints = || Value::Coll(CollValue::Ints([1, 2, 3].as_slice().into()));
+        let gen_ints = Value::Coll(CollValue::generic(
+            SType::SInt,
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+        ));
+        assert_eq!(
+            cost(ints(), gen_ints.clone()),
+            cost(gen_ints.clone(), gen_ints)
+        );
+        assert!(cost(ints(), ints()).0);
+    }
+
+    #[test]
     fn coll_eq_charges_match_type_plus_per_item() {
         // Bug 4 regression: equal Coll[Int] of length 3 must pay MatchType(1)
         // + per-item SInt cost (base=15, per_chunk=2, chunk_size=64 → 1 chunk
@@ -340,11 +371,11 @@ mod tests {
         let ctx = force_any_val::<Context>();
         let before = ctx.jit_cost_value();
         let items: Arc<[Value<'_>]> = Arc::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
-        let lv: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let lv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
             items: items.clone(),
         });
-        let rv: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let rv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
             items,
         });
@@ -362,15 +393,15 @@ mod tests {
         // 1+14 = 15; each inner Coll[Int] len 3 = MatchType 1 + (15,2,64) over
         // 3 = 1+17 = 18; total = 15 + 18 + 18 = 51 (pre-fix, no recursion: 15).
         let ctx = force_any_val::<Context>();
-        let inner_a: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let inner_a: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
             items: Arc::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
         });
-        let inner_b: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let inner_b: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
             items: Arc::from(vec![Value::Int(4), Value::Int(5), Value::Int(6)]),
         });
-        let outer: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let outer: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SColl(Arc::new(SType::SInt)),
             items: Arc::from(vec![inner_a, inner_b]),
         });
@@ -387,11 +418,11 @@ mod tests {
         let before = ctx.jit_cost_value();
         let items_a: Arc<[Value<'_>]> = Arc::from(vec![Value::Int(1), Value::Int(2)]);
         let items_b: Arc<[Value<'_>]> = Arc::from(vec![Value::Int(1)]);
-        let lv: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let lv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
             items: items_a,
         });
-        let rv: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let rv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
             items: items_b,
         });
@@ -405,11 +436,11 @@ mod tests {
         let ctx = force_any_val::<Context>();
         let before = ctx.jit_cost_value();
         let empty: Arc<[Value<'_>]> = Arc::from(Vec::<Value<'_>>::new());
-        let lv: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let lv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: elem_tpe.clone(),
             items: empty.clone(),
         });
-        let rv: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let rv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe,
             items: empty,
         });
@@ -442,10 +473,8 @@ mod tests {
         let ctx = force_any_val::<Context>();
         let before = ctx.jit_cost_value();
         let empty_bytes: Arc<[i8]> = Arc::from(Vec::<i8>::new());
-        let lv: Value<'_> = Value::Coll(CollKind::NativeColl(NativeColl::CollByte(
-            empty_bytes.clone(),
-        )));
-        let rv: Value<'_> = Value::Coll(CollKind::NativeColl(NativeColl::CollByte(empty_bytes)));
+        let lv: Value<'_> = Value::Coll(CollValue::Bytes(empty_bytes.clone()));
+        let rv: Value<'_> = Value::Coll(CollValue::Bytes(empty_bytes));
         assert!(eq_with_cost(&lv, &rv, &ctx).unwrap());
         assert_eq!(ctx.jit_cost_value() - before, 18);
     }
@@ -474,11 +503,11 @@ mod tests {
             let before = ctx.jit_cost_value();
             let items: Arc<[Value<'_>]> =
                 Arc::from((0..len as i64).map(Value::Long).collect::<Vec<Value<'_>>>());
-            let lv: Value<'_> = Value::Coll(CollKind::WrappedColl {
+            let lv: Value<'_> = Value::Coll(CollValue::Generic {
                 elem_tpe: SType::SLong,
                 items: items.clone(),
             });
-            let rv: Value<'_> = Value::Coll(CollKind::WrappedColl {
+            let rv: Value<'_> = Value::Coll(CollValue::Generic {
                 elem_tpe: SType::SLong,
                 items,
             });
@@ -573,11 +602,11 @@ mod tests {
             let mut r_vec: Vec<Value<'_>> = (0..len as i64).map(Value::Long).collect();
             r_vec[mismatch_at] = Value::Long(-1); // -1 is never equal to its index
             let r: Arc<[Value<'_>]> = Arc::from(r_vec);
-            let lv = Value::Coll(CollKind::WrappedColl {
+            let lv = Value::Coll(CollValue::Generic {
                 elem_tpe: SType::SLong,
                 items: l,
             });
-            let rv = Value::Coll(CollKind::WrappedColl {
+            let rv = Value::Coll(CollValue::Generic {
                 elem_tpe: SType::SLong,
                 items: r,
             });
@@ -605,23 +634,23 @@ mod tests {
         // Pre-fix charged EQ_Coll on the full length 3 (=16) BEFORE recursing,
         // for a total of 35.
         let ctx = force_any_val::<Context>();
-        let inner_l: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let inner_l: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
             items: Arc::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
         });
-        let inner_r: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let inner_r: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
             items: Arc::from(vec![Value::Int(9), Value::Int(2), Value::Int(3)]),
         });
-        let other: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let other: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
             items: Arc::from(vec![Value::Int(7), Value::Int(8), Value::Int(9)]),
         });
-        let outer_l: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let outer_l: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SColl(Arc::new(SType::SInt)),
             items: Arc::from(vec![inner_l, other.clone(), other.clone()]),
         });
-        let outer_r: Value<'_> = Value::Coll(CollKind::WrappedColl {
+        let outer_r: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SColl(Arc::new(SType::SInt)),
             items: Arc::from(vec![inner_r, other.clone(), other]),
         });
@@ -634,7 +663,7 @@ mod tests {
     // `MatchType` charge and before any item (v6.0.7 `DataValueComparer.scala:318-326`)
 
     fn empty_coll(elem_tpe: SType) -> Value<'static> {
-        Value::Coll(CollKind::WrappedColl {
+        Value::Coll(CollValue::Generic {
             elem_tpe,
             items: Arc::from(vec![]),
         })
@@ -674,7 +703,7 @@ mod tests {
         let ctx = force_any_val::<Context>();
         let before = ctx.jit_cost_value();
         let pairs = || -> Value<'static> {
-            Value::Coll(CollKind::WrappedColl {
+            Value::Coll(CollValue::Generic {
                 elem_tpe: int_pair(),
                 items: Arc::from(vec![
                     Value::Tup([Value::Int(1), Value::Int(2)].into()),

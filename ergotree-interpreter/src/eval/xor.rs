@@ -1,7 +1,8 @@
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
-use ergotree_ir::mir::value::CollKind;
-use ergotree_ir::mir::value::NativeColl;
+use ergotree_ir::mir::coll_value::CollValue;
+use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::mir::xor::Xor;
 
@@ -23,14 +24,15 @@ impl Evaluable for Xor {
         let left_v = self.left.eval(env, ctx)?;
         let right_v = self.right.eval(env, ctx)?;
 
-        match (left_v.clone(), right_v.clone()) {
-            (
-                Value::Coll(CollKind::NativeColl(NativeColl::CollByte(l_byte))),
-                Value::Coll(CollKind::NativeColl(NativeColl::CollByte(r_byte))),
-            ) => {
+        // the bytes of any `Coll[Byte]`, specialised or generic (sigmastate reads `toArray`)
+        match (
+            left_v.clone().try_extract_into::<Vec<i8>>(),
+            right_v.clone().try_extract_into::<Vec<i8>>(),
+        ) {
+            (Ok(l_byte), Ok(r_byte)) => {
                 ctx.add_per_item_jit_cost(10, 2, 128, l_byte.len() as u32)?;
                 let xor = helper_xor(&l_byte, &r_byte);
-                Ok(CollKind::NativeColl(NativeColl::CollByte(xor)).into())
+                Ok(CollValue::Bytes(xor).into())
             }
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected Xor input to be byte array, got: {0:?}",

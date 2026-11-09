@@ -1,7 +1,5 @@
 use alloc::string::ToString;
 use ergotree_ir::mir::coll_fold::Fold;
-use ergotree_ir::mir::value::CollKind;
-use ergotree_ir::mir::value::NativeColl;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
@@ -47,21 +45,10 @@ impl Evaluable for Fold {
         };
         ctx.add_per_item_jit_cost(3, 1, 10, n_items)?;
         match input_v {
-            Value::Coll(coll) => match coll {
-                CollKind::NativeColl(NativeColl::CollByte(coll_byte)) => {
-                    coll_byte.iter().try_fold(zero_v, |acc, byte| {
-                        let tup_arg = Value::Tup([acc, Value::Byte(*byte)].into());
-                        fold_op_call(tup_arg)
-                    })
-                }
-                CollKind::WrappedColl {
-                    elem_tpe: _,
-                    items: v,
-                } => v.iter().try_fold(zero_v, |acc, item| {
-                    let tup_arg = Value::Tup([acc, item.clone()].into());
-                    fold_op_call(tup_arg)
-                }),
-            },
+            Value::Coll(coll) => coll.as_vec().into_iter().try_fold(zero_v, |acc, item| {
+                let tup_arg = Value::Tup([acc, item].into());
+                fold_op_call(tup_arg)
+            }),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected Fold input to be Value::Coll, got: {0:?}",
                 input_v

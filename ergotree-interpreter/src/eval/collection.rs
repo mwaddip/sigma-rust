@@ -1,17 +1,12 @@
 use alloc::sync::Arc;
 
-use ergotree_ir::mir::collection::Collection;
-use ergotree_ir::mir::constant::TryExtractFromError;
-use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::mir::value::CollKind;
-use ergotree_ir::mir::value::NativeColl;
-use ergotree_ir::mir::value::Value;
-use ergotree_ir::types::stype::SType;
-
 use crate::eval::env::Env;
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
+use ergotree_ir::mir::coll_value::CollValue;
+use ergotree_ir::mir::collection::Collection;
+use ergotree_ir::mir::value::Value;
 
 impl Evaluable for Collection {
     fn eval<'ctx>(
@@ -45,20 +40,9 @@ impl Evaluable for Collection {
                         Ok(v)
                     })
                     .collect();
-                match elem_tpe {
-                    SType::SByte => {
-                        let bytes: Result<Arc<[i8]>, TryExtractFromError> = items_v?
-                            .iter()
-                            .cloned()
-                            .map(|i| i.try_extract_into::<i8>())
-                            .collect();
-                        Value::Coll(CollKind::NativeColl(NativeColl::CollByte(bytes?)))
-                    }
-                    _ => Value::Coll(CollKind::WrappedColl {
-                        elem_tpe: elem_tpe.clone(),
-                        items: items_v?,
-                    }),
-                }
+                // built with `fromArray` at an abstract type (`values.scala:897`): a generic
+                // collection whatever the item type, a `PairOfCols` for pairs
+                Value::Coll(CollValue::from_array(elem_tpe.clone(), items_v?.to_vec())?)
             }
         })
     }
@@ -73,6 +57,7 @@ mod tests {
     use crate::eval::test_util::{eval_out, eval_out_wo_ctx};
     use ergotree_ir::chain::context::Context;
     use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::types::stype::SType;
     use proptest::prelude::*;
     use sigma_test_util::force_any_val;
 

@@ -1,9 +1,8 @@
 use alloc::string::ToString;
 use alloc::sync::Arc;
 
-use alloc::vec::Vec;
 use ergotree_ir::mir::coll_map::Map;
-use ergotree_ir::mir::value::CollKind;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
@@ -72,8 +71,8 @@ pub(crate) fn map_coll<'ctx>(
     let mut mapper_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
     // sigmastate reads no element type here: the mapper checks each element against its
     // argument's type (v6.0.7 `transformers.scala:33-46`, `values.scala:1074`)
-    let normalized_input_vals: Vec<Value> = match input_v {
-        Value::Coll(coll) => Ok(coll.as_vec()),
+    let (normalized_input_vals, over_pairs) = match input_v {
+        Value::Coll(coll) => Ok((coll.as_vec(), matches!(coll, CollValue::Pairs { .. }))),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected Map input to be Value::Coll, got: {0:?}",
             input_v
@@ -92,7 +91,16 @@ pub(crate) fn map_coll<'ctx>(
         .map(|item| mapper_call(item.clone()))
         .collect::<Result<Arc<[Value]>, EvalError>>()
         .map(|values| {
-            CollKind::from_collection(out_elem_tpe, values).map_err(EvalError::TryExtractFrom)
+            // `PairOfCols.map` builds a generic collection directly (v6.0.7
+            // `CollsOverArrays.scala:317-324`); any other receiver's goes through `builder.fromArray`
+            // at an abstract type (`:31-34`), a `PairOfCols` for pairs (SANTA
+            // `Coll.pair_shape_restored` Y1)
+            if over_pairs {
+                Ok(CollValue::generic(out_elem_tpe, values))
+            } else {
+                CollValue::from_array(out_elem_tpe, values.to_vec())
+                    .map_err(EvalError::TryExtractFrom)
+            }
         })
         .and_then(|v| v) // flatten <Result<Result<Value, _>, _>
         .map(Value::Coll)

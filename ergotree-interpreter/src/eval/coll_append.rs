@@ -1,40 +1,10 @@
-use alloc::sync::Arc;
-
-use alloc::vec::Vec;
 use ergotree_ir::mir::coll_append::Append;
-// use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
-use ergotree_ir::types::stype::SType;
 
 use crate::eval::env::Env;
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
-
-fn concat<T>(e1: Vec<T>, e2: Vec<T>) -> Arc<[T]> {
-    e1.into_iter().chain(e2).collect()
-}
-
-fn extract_vecval(inp: Value) -> Result<Vec<Value>, EvalError> {
-    match inp {
-        Value::Coll(coll) => Ok(coll.as_vec()),
-        _ => Err(EvalError::UnexpectedValue(format!(
-            "Append: expected Value to be Value::Coll, got: {0:?}",
-            inp
-        ))),
-    }
-}
-
-fn extract_elem_tpe(inp: &Value) -> Result<SType, EvalError> {
-    match inp {
-        Value::Coll(coll) => Ok(coll.elem_tpe().clone()),
-        _ => Err(EvalError::UnexpectedValue(format!(
-            "Append: expected Value to be Value::Coll, got: {0:?}",
-            inp
-        ))),
-    }
-}
 
 impl Evaluable for Append {
     fn eval<'ctx>(
@@ -44,22 +14,15 @@ impl Evaluable for Append {
     ) -> Result<Value<'ctx>, EvalError> {
         let input_v = self.input.eval(env, ctx)?;
         let col2_v = self.col_2.eval(env, ctx)?;
-        let input_elem_tpe = extract_elem_tpe(&input_v)?;
-        let col2_elem_tpe = extract_elem_tpe(&col2_v)?;
-        if input_elem_tpe != col2_elem_tpe {
+        let (Value::Coll(left), Value::Coll(right)) = (&input_v, &col2_v) else {
             return Err(EvalError::UnexpectedValue(format!(
-                "Append: expected the same elem tpe, got {0:?} and {1:?}",
-                input_elem_tpe, col2_elem_tpe
+                "Append: expected two collections, got: {input_v:?} and {col2_v:?}"
             )));
-        }
-        let input_vecval: Vec<Value> = extract_vecval(input_v)?;
-        let col_2_vecval: Vec<Value> = extract_vecval(col2_v)?;
-        ctx.add_per_item_jit_cost(20, 2, 100, (input_vecval.len() + col_2_vecval.len()) as u32)?;
-        let concat_vecval = concat(input_vecval, col_2_vecval);
-        Ok(Value::Coll(CollKind::from_collection(
-            input_elem_tpe,
-            concat_vecval,
-        )?))
+        };
+        // charged before the append, as `Append.eval`'s `addSeqCost` does (v6.0.7
+        // `transformers.scala:67-68`)
+        ctx.add_per_item_jit_cost(20, 2, 100, (left.len() + right.len()) as u32)?;
+        Ok(Value::Coll(super::coll_shape::append(left, right)?))
     }
 }
 
@@ -73,17 +36,6 @@ mod tests {
     use ergotree_ir::mir::constant::Constant;
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::types::stype::SType;
-
-    // Comment here for an elegant solution - generic single_test
-    // Fails due to Expr::from needing complicated type bounds
-    // Fails both with T and Vec<T>
-    // fn test_single_append<T : PartialEq + Debug + LiftIntoSType> (inp : T, inp2 : T, expected_output : T) {
-    //     let in_expr = Expr::from(inp);
-    //     let col2_expr = Expr::from(inp2);
-    //     let append_expr = Expr::from(Append::new(in_expr, col2_expr).unwrap());
-    //     let append_eval : Vec<T> = eval_out_wo_ctx(append_expr);
-    //     assert_eq!(append_eval, expected_output);
-    // }
 
     #[test]
     fn test_append_basic_numbers() {
@@ -108,7 +60,7 @@ mod tests {
             let append_eval: Vec<i32> = eval_out_wo_ctx(&append_expr);
             assert_eq!(append_eval, *expected_output);
             match eval_out_wo_ctx::<Value>(&append_expr) {
-                Value::Coll(coll) => assert_eq!(coll.elem_tpe(), &SType::SInt),
+                Value::Coll(coll) => assert_eq!(coll.elem_tpe(), SType::SInt),
                 _ => panic!("fail"),
             }
         }

@@ -401,23 +401,7 @@ impl<'ctx> TryFrom<Value<'ctx>> for Literal {
             Value::UnsignedBigInt(b) => Ok(Literal::from(b)),
             Value::GroupElement(e) => Ok(Literal::from(e)),
             Value::CBox(i) => Ok(Literal::from(i.to_static())),
-            Value::Coll(coll) => {
-                let v = match coll {
-                    CollKind::NativeColl(n) => Literal::Coll(CollKind::NativeColl(n)),
-                    CollKind::WrappedColl { elem_tpe, items } => {
-                        let new_items = items
-                            .iter()
-                            .map(|v| Literal::try_from(v.clone()))
-                            .collect::<Result<Arc<[_]>, String>>()?;
-
-                        Literal::Coll(CollKind::WrappedColl {
-                            elem_tpe: elem_tpe.clone(),
-                            items: new_items,
-                        })
-                    }
-                };
-                Ok(v)
-            }
+            Value::Coll(coll) => Ok(Literal::Coll(CollKind::try_from(coll)?)),
             Value::Opt(lit) => match lit {
                 Some(v) => {
                     let v = Literal::try_from((*v).clone())?;
@@ -1517,8 +1501,6 @@ mod tests {
 
         #[test]
         fn tuple_primitive_types_roundtrip(v in any::<(i64, bool)>()) {
-            // let constant: Constant = v.into();
-            // eprintln!("{:?}", constant);
             test_constant_roundtrip(v);
         }
 

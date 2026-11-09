@@ -5,11 +5,10 @@ use crate::eval::Evaluable;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use ergotree_ir::ergo_tree::ErgoTree;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::Constant;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::subst_const::SubstConstants;
-use ergotree_ir::mir::value::CollKind;
-use ergotree_ir::mir::value::NativeColl;
 use ergotree_ir::mir::value::Value;
 use sigma_util::AsVecI8;
 use sigma_util::AsVecU8;
@@ -30,9 +29,11 @@ impl Evaluable for SubstConstants {
             .map(|i| i as usize)
             .collect();
 
-        let new_constants = if let Value::Coll(CollKind::WrappedColl { items, .. }) = new_values_v {
+        // every item of the new values becomes a constant, whatever the collection's form
+        // (sigmastate's `toArrayOfConstants`, v6.0.7 `Extensions.scala:53-64`)
+        let new_constants = if let Value::Coll(coll) = new_values_v {
             let mut items_const = vec![];
-            for v in &*items {
+            for v in &coll.as_vec() {
                 let c = Constant::try_from(v.to_static()).map_err(EvalError::Misc)?;
                 items_const.push(c);
             }
@@ -53,7 +54,8 @@ impl Evaluable for SubstConstants {
             )));
         }
 
-        if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) = script_bytes_v {
+        // the bytes of any `Coll[Byte]`, specialised or generic (sigmastate reads `toArray`)
+        if let Ok(b) = script_bytes_v.clone().try_extract_into::<Vec<i8>>() {
             // Byte-level substitution mirroring sigma-state's
             // `ErgoTreeSerializer.substituteConstants`: the tree body is never
             // parsed and out-of-range positions are a no-op, so a malformed
@@ -72,9 +74,7 @@ impl Evaluable for SubstConstants {
             // constant in the template regardless of how many positions the
             // caller asks to replace.
             ctx.add_per_item_jit_cost(100, 100, 1, num_constants as u32)?;
-            Ok(Value::Coll(CollKind::NativeColl(NativeColl::CollByte(
-                new_bytes.as_vec_i8().into(),
-            ))))
+            Ok(Value::Coll(CollValue::Bytes(new_bytes.as_vec_i8().into())))
         } else {
             Err(EvalError::Misc(format!(
                 "SubstConstants: expected evaluation of `script_bytes` to be of type `Coll[SBytes]`, \
@@ -100,10 +100,8 @@ mod tests {
         mir::{
             bin_op::{ArithOp, BinOp, BinOpKind},
             expr::Expr,
-            value::StoreWrapped,
         },
         serialization::SigmaSerializable,
-        types::stype::LiftIntoSType,
     };
     use proptest::prelude::*;
 
@@ -164,10 +162,19 @@ mod tests {
         assert_eq!(subst(0x0c, 1).unwrap(), template(0x0c));
     }
 
-    fn test_single_substitution<T: Clone + LiftIntoSType + StoreWrapped + Into<Constant>>(
-        original: T,
-        new: T,
-    ) {
+    #[test]
+    fn new_values_of_every_collection_form() {
+        // sigmastate lifts each item of the new values to a constant whatever the collection
+        // (`toArrayOfConstants`, v6.0.7 `Extensions.scala:53-64`): a `Coll[Boolean]` and a
+        // `Coll[Byte]`, both specialised, substitute as a generic collection does
+        test_single_substitution(true, false);
+        test_single_substitution(5i8, 7i8);
+    }
+
+    fn test_single_substitution<T: Clone + Into<Constant>>(original: T, new: T)
+    where
+        Vec<T>: Into<Constant>,
+    {
         let expr = Expr::Const(original.clone().into());
         let ergo_tree = ErgoTree::new(ErgoTreeHeader::v0(true), &expr).unwrap();
         assert_eq!(ergo_tree.constants_len().unwrap(), 1);
@@ -176,7 +183,7 @@ mod tests {
         let script_bytes =
             Expr::Const(Constant::from(ergo_tree.sigma_serialize_bytes().unwrap())).into();
         let positions = Expr::Const(Constant::from(vec![0])).into();
-        let new_values = Expr::Const(Constant::from(vec![new.clone()])).into();
+        let new_values = Expr::Const(vec![new.clone()].into()).into();
 
         let subst_const = Expr::SubstConstants(
             SubstConstants {
@@ -188,7 +195,7 @@ mod tests {
         );
 
         let x: Value = try_eval_out_wo_ctx(&subst_const).unwrap();
-        if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) = x {
+        if let Value::Coll(CollValue::Bytes(b)) = x {
             // The template's root is not a `SigmaProp`, which a tree parse rejects (rule
             // 1001) but SubstConstants never parses: compare the bytes with the tree built
             // from the new constant.
@@ -248,7 +255,7 @@ mod tests {
         );
 
         let x: Value = try_eval_out_wo_ctx(&subst_const).unwrap();
-        if let Value::Coll(CollKind::NativeColl(NativeColl::CollByte(b))) = x {
+        if let Value::Coll(CollValue::Bytes(b)) = x {
             // As in `test_single_substitution`. Positions [1, 2, 0] take n0, n1 and n2,
             // so the constants become [n2, n0, n1].
             let expected = ErgoTree::new(ErgoTreeHeader::v0(true), &plus_times(n2, n0, n1))

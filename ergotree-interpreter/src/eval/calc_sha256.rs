@@ -1,7 +1,6 @@
 use alloc::vec::Vec;
 use ergotree_ir::mir::calc_sha256::CalcSha256;
-use ergotree_ir::mir::value::CollKind;
-use ergotree_ir::mir::value::NativeColl;
+use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 use sigma_util::hash::sha256_hash;
 use sigma_util::AsVecU8;
@@ -18,13 +17,14 @@ impl Evaluable for CalcSha256 {
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
         let input_v = self.input.eval(env, ctx)?;
-        match input_v.clone() {
-            Value::Coll(CollKind::NativeColl(NativeColl::CollByte(coll_byte))) => {
+        // the bytes of any `Coll[Byte]`, specialised or generic (sigmastate reads `toArray`)
+        match input_v.clone().try_extract_into::<Vec<i8>>() {
+            Ok(coll_byte) => {
                 ctx.add_per_item_jit_cost(80, 8, 64, coll_byte.len() as u32)?;
                 let expected_hash: Vec<u8> = sha256_hash(coll_byte.as_vec_u8().as_slice()).to_vec();
                 Ok(expected_hash.into())
             }
-            _ => Err(EvalError::UnexpectedValue(format!(
+            Err(_) => Err(EvalError::UnexpectedValue(format!(
                 "expected Sha256 input to be byte array, got: {0:?}",
                 input_v
             ))),

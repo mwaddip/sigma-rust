@@ -7,10 +7,7 @@ use ergotree_ir::mir::constant::Literal;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
 use ergotree_ir::unsignedbigint256::UnsignedBigInt;
 use ergotree_ir::{
-    mir::{
-        constant::TryExtractInto,
-        value::{CollKind, NativeColl, Value},
-    },
+    mir::{coll_value::CollValue, constant::TryExtractInto, value::Value},
     serialization::{
         data::DataSerializer,
         sigma_byte_reader::{self, SigmaByteRead},
@@ -57,13 +54,14 @@ pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::NotFound("xor: missing left arg".to_string()))?;
 
-    match (left_v.clone(), right_v.clone()) {
-        (
-            Value::Coll(CollKind::NativeColl(NativeColl::CollByte(l_byte))),
-            Value::Coll(CollKind::NativeColl(NativeColl::CollByte(r_byte))),
-        ) => {
+    // the bytes of any `Coll[Byte]`, specialised or generic (sigmastate reads `toArray`)
+    match (
+        left_v.clone().try_extract_into::<Vec<i8>>(),
+        right_v.clone().try_extract_into::<Vec<i8>>(),
+    ) {
+        (Ok(l_byte), Ok(r_byte)) => {
             let xor = helper_xor(&l_byte, &r_byte);
-            Ok(CollKind::NativeColl(NativeColl::CollByte(xor)).into())
+            Ok(CollValue::Bytes(xor).into())
         }
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected Xor input to be byte array, got: {0:?}",
@@ -87,9 +85,9 @@ pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx,
         .ok_or_else(|| EvalError::NotFound("fromBigEndianBytes: missing bytes arg".to_string()))?;
     let type_val = mc.tpe().t_range.clone();
 
-    let bytes = match bytes_val {
-        Value::Coll(CollKind::NativeColl(NativeColl::CollByte(bytes))) => bytes,
-        _ => {
+    let bytes = match bytes_val.clone().try_extract_into::<Vec<i8>>() {
+        Ok(bytes) => bytes,
+        Err(_) => {
             return Err(EvalError::UnexpectedValue(format!(
                 "fromBigEndianBytes: expected first argument to be byte array, got {:?}",
                 bytes_val

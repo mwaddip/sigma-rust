@@ -2,8 +2,8 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::reference::Ref;
 use ergotree_ir::serialization::SigmaSerializable;
@@ -20,7 +20,7 @@ pub(crate) static DATA_INPUTS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
             obj
         )));
     }
-    Ok(Value::Coll(CollKind::WrappedColl {
+    Ok(Value::Coll(CollValue::Generic {
         items: ctx.data_inputs.clone().map_or(Arc::new([]), |d| {
             d.iter().map(|&di| Ref::from(di)).map(Value::CBox).collect()
         }),
@@ -61,7 +61,7 @@ pub(crate) static HEADERS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
             obj
         )));
     }
-    Ok(Value::Coll(CollKind::WrappedColl {
+    Ok(Value::Coll(CollValue::Generic {
         items: ctx
             .headers
             .iter()

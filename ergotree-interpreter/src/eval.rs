@@ -39,6 +39,7 @@ pub(crate) mod coll_filter;
 pub(crate) mod coll_fold;
 pub(crate) mod coll_forall;
 pub(crate) mod coll_map;
+pub(crate) mod coll_shape;
 pub(crate) mod coll_size;
 pub(crate) mod coll_slice;
 pub(crate) mod collection;

@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use ergotree_ir::{
     bigint256::BigInt256,
-    mir::{constant::TryExtractInto, value::Value},
+    mir::{coll_value::CollValue, constant::TryExtractInto, value::Value},
     types::{
         smethod::SMethod,
         snumeric::{
@@ -12,6 +12,7 @@ use ergotree_ir::{
                 SUBTRACT_MOD_METHOD_ID, TO_SIGNED_METHOD_ID,
             },
         },
+        stype::SType,
         stype_companion::STypeCompanion,
     },
     unsignedbigint256::UnsignedBigInt,
@@ -29,11 +30,17 @@ const NUMERIC_METHOD_COST_KIND: u64 = 5;
 
 const TO_BYTES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
+    // the four fixed-width containers build a generic `Coll[Byte]`, the two arbitrary-precision
+    // ones a specialised one (SANTA `Coll.producer_specialisation_witness` H3, H4, H12)
+    fn generic_bytes(bytes: &[u8]) -> Value<'static> {
+        let items: Vec<Value> = bytes.iter().map(|&b| Value::Byte(b as i8)).collect();
+        Value::Coll(CollValue::generic(SType::SByte, items))
+    }
     Ok(match obj {
-        Value::Byte(obj) => obj.to_be_bytes().to_vec().into(),
-        Value::Short(obj) => obj.to_be_bytes().to_vec().into(),
-        Value::Int(obj) => obj.to_be_bytes().to_vec().into(),
-        Value::Long(obj) => obj.to_be_bytes().to_vec().into(),
+        Value::Byte(obj) => generic_bytes(&obj.to_be_bytes()),
+        Value::Short(obj) => generic_bytes(&obj.to_be_bytes()),
+        Value::Int(obj) => generic_bytes(&obj.to_be_bytes()),
+        Value::Long(obj) => generic_bytes(&obj.to_be_bytes()),
         // BigInt/UnsignedBigInt use a minimal-length big-endian encoding, not a
         // fixed 32 bytes: JVM `BigInt.toBytes` = `BigInteger.toByteArray` (signed
         // two's-complement, minimal length, `0 -> [0]`) and
@@ -62,13 +69,11 @@ static TO_BITS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         }
         res
     }
+    // every `toBits` builds a specialised `Coll[Boolean]` (SANTA H5)
     fn to_bits(bytes: &[u8]) -> Value<'static> {
-        bytes
-            .iter()
-            .copied()
-            .flat_map(byte_to_bits)
-            .collect::<Vec<_>>()
-            .into()
+        Value::Coll(CollValue::Booleans(
+            bytes.iter().copied().flat_map(byte_to_bits).collect(),
+        ))
     }
     Ok(match obj {
         Value::Byte(obj) => to_bits(obj.to_be_bytes().as_slice()),

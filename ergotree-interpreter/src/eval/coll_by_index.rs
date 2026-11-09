@@ -1,9 +1,10 @@
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::coll_by_index::ByIndex;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
 
+use super::coll_shape::get_or_else;
 use crate::eval::env::Env;
 use crate::eval::Context;
 use crate::eval::EvalError;
@@ -11,7 +12,7 @@ use crate::eval::Evaluable;
 
 /// The item at `index`, or `None` out of range (a negative index included): `ByIndex`'s
 /// lookup, shared with the `Coll.apply` and `Coll.getOrElse` methods
-pub(crate) fn item_at<'ctx>(coll: &CollKind<Value<'ctx>>, index: i32) -> Option<Value<'ctx>> {
+pub(crate) fn item_at<'ctx>(coll: &CollValue<'ctx>, index: i32) -> Option<Value<'ctx>> {
     usize::try_from(index).ok().and_then(|i| coll.get_val(i))
 }
 
@@ -24,7 +25,7 @@ impl Evaluable for ByIndex {
         ctx.add_jit_cost(30)?; // ByIndex = Fixed(30)
         let input_v = self.input.eval(env, ctx)?;
         let index_v = self.index.eval(env, ctx)?;
-        let normalized_input_vals: &CollKind<Value<'ctx>> = match &input_v {
+        let normalized_input_vals: &CollValue<'ctx> = match &input_v {
             Value::Coll(coll) => Ok(coll),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "ByIndex: expected input to be Value::Coll, got: {0:?}",
@@ -40,11 +41,18 @@ impl Evaluable for ByIndex {
                     crate::eval::check_value_of_type(&default.tpe(), &d, ctx.tree_version())?;
                     Ok(d)
                 };
-                let val = item_at(normalized_input_vals, index_v.try_extract_into::<i32>()?);
+                // the default reaches the collection's `getOrElse`, whose class decides whether it
+                // takes it (`transformers.scala:259-276`): from tree version 3 only out of range
+                // (the default is lazy), below it always (eager), so an in-range index on a
+                // specialised receiver with a default of another type fails below version 3
+                let index = index_v.try_extract_into::<i32>()?;
                 if ctx.tree_version() >= ErgoTreeVersion::V3 {
-                    val.map(Ok).unwrap_or_else(default_v)
+                    match item_at(normalized_input_vals, index) {
+                        Some(v) => Ok(v),
+                        None => get_or_else(normalized_input_vals, index, default_v()?),
+                    }
                 } else {
-                    Ok(val.unwrap_or(default_v()?))
+                    get_or_else(normalized_input_vals, index, default_v()?)
                 }
             }
             None => item_at(
