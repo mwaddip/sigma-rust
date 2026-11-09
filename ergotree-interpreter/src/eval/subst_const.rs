@@ -54,7 +54,8 @@ impl Evaluable for SubstConstants {
             )));
         }
 
-        if let Value::Coll(CollValue::Bytes(b)) = script_bytes_v {
+        // the bytes of any `Coll[Byte]`, specialised or generic (sigmastate reads `toArray`)
+        if let Ok(b) = script_bytes_v.clone().try_extract_into::<Vec<i8>>() {
             // Byte-level substitution mirroring sigma-state's
             // `ErgoTreeSerializer.substituteConstants`: the tree body is never
             // parsed and out-of-range positions are a no-op, so a malformed
