@@ -22,6 +22,7 @@ use super::snumeric::sshort;
 use super::snumeric::sunsignedbigint;
 use super::soption;
 use super::spreheader;
+use super::ssigmaprop;
 
 use alloc::vec::Vec;
 use strum::IntoEnumIterator;
@@ -50,6 +51,8 @@ pub enum STypeCompanion {
     Coll,
     /// Group element
     GroupElem,
+    /// SigmaProp
+    SigmaProp,
     /// Global
     Global,
     /// Header
@@ -69,6 +72,7 @@ impl STypeCompanion {
             STypeCompanion::Box => &sbox::METHOD_DESC,
             STypeCompanion::Coll => &scoll::METHOD_DESC,
             STypeCompanion::GroupElem => &sgroup_elem::METHOD_DESC,
+            STypeCompanion::SigmaProp => &ssigmaprop::METHOD_DESC,
             STypeCompanion::Global => &sglobal::METHOD_DESC,
             STypeCompanion::Header => &sheader::METHOD_DESC,
             STypeCompanion::PreHeader => &spreheader::METHOD_DESC,
@@ -106,6 +110,7 @@ impl STypeCompanion {
             STypeCompanion::Box => sbox::TYPE_CODE,
             STypeCompanion::Coll => scoll::TYPE_CODE,
             STypeCompanion::GroupElem => sgroup_elem::TYPE_CODE,
+            STypeCompanion::SigmaProp => ssigmaprop::TYPE_CODE,
             STypeCompanion::Global => sglobal::TYPE_CODE,
             STypeCompanion::Header => sheader::TYPE_CODE,
             STypeCompanion::PreHeader => spreheader::TYPE_CODE,
@@ -127,6 +132,7 @@ impl STypeCompanion {
             STypeCompanion::Box => sbox::TYPE_NAME,
             STypeCompanion::Coll => scoll::TYPE_NAME,
             STypeCompanion::GroupElem => sgroup_elem::TYPE_NAME,
+            STypeCompanion::SigmaProp => ssigmaprop::TYPE_NAME,
             STypeCompanion::Global => sglobal::TYPE_NAME,
             STypeCompanion::Header => sheader::TYPE_NAME,
             STypeCompanion::PreHeader => spreheader::TYPE_NAME,

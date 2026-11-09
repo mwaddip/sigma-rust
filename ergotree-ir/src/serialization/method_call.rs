@@ -422,4 +422,18 @@ mod tests {
             assert_expr_parses_from(&alloc::format!("db63{id:02x}a7"), ErgoTreeVersion::V0);
         }
     }
+
+    #[test]
+    fn sigmaprop_methods_parse() {
+        // SANTA `ErgoTree.sigmaprop_methodcall_ids.json`: the JVM resolves SSigmaProp 1-2
+        // (`propBytes`, `isProven`) at every tree version (`methods.scala:703-707`)
+        for tree_hex in [
+            "00d191b1db0801d101010400", // sigmaProp(sigmaProp(true).propBytes.size > 0)
+            "0b0bd191b1db0801d101010400",
+            "00d1db0802d10101", // sigmaProp(sigmaProp(true).isProven)
+            "0b07d1db0802d10101",
+        ] {
+            assert_parsed_tree_round_trips(tree_hex);
+        }
+    }
 }

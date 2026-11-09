@@ -25,6 +25,8 @@ pub mod snumeric;
 pub mod soption;
 /// PreHeader's methods
 pub mod spreheader;
+/// SigmaProp methods
+pub mod ssigmaprop;
 /// Tuple type
 pub mod stuple;
 /// Type companion for an object
