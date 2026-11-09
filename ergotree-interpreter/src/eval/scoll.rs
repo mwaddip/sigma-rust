@@ -523,17 +523,8 @@ pub(crate) static GET_OR_ELSE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::UnexpectedValue("getOrElse: default argument not found".into()))?
         .tpe();
     crate::eval::check_value_of_type(&default_tpe, &default, ctx.tree_version())?;
-    // a collection of pairs is a `PairOfCols` on the JVM, whose `getOrElse` the interface call
-    // reaches through a bridge that casts the default to `Tuple2`, whatever the index
-    // (`CollsOverArrays.scala:309-315`)
-    if matches!(coll.elem_tpe(), SType::STuple(t) if t.items.len() == 2)
-        && !matches!(&default, Value::Tup(items) if items.len() == 2)
-    {
-        return Err(EvalError::UnexpectedValue(format!(
-            "getOrElse: a collection of pairs takes a pair default, found {default:?}"
-        )));
-    }
-    Ok(item_at(&coll, index.try_extract_into::<i32>()?).unwrap_or(default))
+    // then the receiver's class decides whether it takes the default
+    super::coll_shape::get_or_else(&coll, index.try_extract_into::<i32>()?, default)
 };
 
 /// `Coll.map` (id 3), as sigmastate's `map_eval` (`methods.scala:862-867`): the result's item

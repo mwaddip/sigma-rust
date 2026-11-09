@@ -4,6 +4,7 @@ use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 
+use super::coll_shape::get_or_else;
 use crate::eval::env::Env;
 use crate::eval::Context;
 use crate::eval::EvalError;
@@ -40,11 +41,18 @@ impl Evaluable for ByIndex {
                     crate::eval::check_value_of_type(&default.tpe(), &d, ctx.tree_version())?;
                     Ok(d)
                 };
-                let val = item_at(normalized_input_vals, index_v.try_extract_into::<i32>()?);
+                // the default reaches the collection's `getOrElse`, whose class decides whether it
+                // takes it (`transformers.scala:259-276`): from tree version 3 only out of range
+                // (the default is lazy), below it always (eager), so an in-range index on a
+                // specialised receiver with a default of another type fails below version 3
+                let index = index_v.try_extract_into::<i32>()?;
                 if ctx.tree_version() >= ErgoTreeVersion::V3 {
-                    val.map(Ok).unwrap_or_else(default_v)
+                    match item_at(normalized_input_vals, index) {
+                        Some(v) => Ok(v),
+                        None => get_or_else(normalized_input_vals, index, default_v()?),
+                    }
                 } else {
-                    Ok(val.unwrap_or(default_v()?))
+                    get_or_else(normalized_input_vals, index, default_v()?)
                 }
             }
             None => item_at(

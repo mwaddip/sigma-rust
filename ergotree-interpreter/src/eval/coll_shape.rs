@@ -2,6 +2,44 @@
 //! `CollsOverArrays.scala`): the class a collection's producer built decides how some operations
 //! answer
 
+use alloc::format;
+
+use ergotree_ir::mir::coll_value::CollValue;
+use ergotree_ir::mir::value::Value;
+
+use super::coll_by_index::item_at;
+use crate::eval::EvalError;
+
+/// `Coll.getOrElse` as the receiver's JVM class runs it: a specialised collection's bridge unboxes
+/// the default to its own item class, and a `PairOfCols`'s casts it to a pair, both before the
+/// index is looked at (`CollsOverArrays.scala:26`, `:309`); a generic collection returns the item
+/// or the default, whatever the default holds. Reached by the `getOrElse` method and by `ByIndex`
+/// with a default
+pub(crate) fn get_or_else<'ctx>(
+    coll: &CollValue<'ctx>,
+    index: i32,
+    default: Value<'ctx>,
+) -> Result<Value<'ctx>, EvalError> {
+    let takes_default = match coll {
+        CollValue::Bytes(_) => matches!(default, Value::Byte(_)),
+        CollValue::Booleans(_) => matches!(default, Value::Boolean(_)),
+        CollValue::Ints(_) => matches!(default, Value::Int(_)),
+        CollValue::Pairs { .. } => matches!(&default, Value::Tup(items) if items.len() == 2),
+        CollValue::Generic { .. } => true,
+    };
+    if !takes_default {
+        return Err(EvalError::UnexpectedValue(format!(
+            "getOrElse: a collection of {:?} held as {} cannot take the default {default:?}",
+            coll.elem_tpe(),
+            match coll {
+                CollValue::Pairs { .. } => "a PairOfCols",
+                _ => "a specialised array",
+            }
+        )));
+    }
+    Ok(item_at(coll, index).unwrap_or(default))
+}
+
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
 #[allow(clippy::unwrap_used, clippy::panic)]
@@ -418,8 +456,116 @@ pub(crate) mod santa_rows {
         );
     }
 
+    pub(crate) fn assert_errs(tree_hex: &str) {
+        let (res, _) = eval_row(tree_hex);
+        assert!(res.is_err(), "{tree_hex}: {res:?}");
+    }
+
+    fn pair(a: i32, b: i32) -> Value<'static> {
+        Value::Tup([Value::Int(a), Value::Int(b)].into())
+    }
+
     #[test]
-    #[ignore = "Task 5: getOrElse follows the collection class"]
+    fn get_or_else_specialised() {
+        // SANTA `Coll.specialisation_getorelse`, `Coll.runtime_shapes_methodcall` B,
+        // `Coll.producer_specialisation_witness`: a specialised receiver refuses a default of
+        // another type, at any index
+        for row in [
+            "0b0bdc0c020d030502040a0402",           // Z1
+            "0b0bdc0c020d03050204000402",           // Z2
+            "0b10dc0c02db0c0e0e0301020302040a0101", // I1
+            "0b10dc0c02db0c0e0e030102030204000101", // I2
+            "0b0cdc0c020e02010202040a0101",         // B1
+            "0b0cdc0c020e0201020204000101",         // B2
+            "0b0edc0c02db0407040a0204c6010402",     // H5
+            "0b0fdc0c02db06060601050204c6010101",   // H4
+            "0b0bdc0c02c3a70204c6010101",           // H1
+            "0b0bdc0c02c2a70204c6010101",           // H8
+            "0b0cdc0c02cbc3a70204c6010101",         // H9
+            "0b0fdc0c02db09060901050204c6010101",   // H12
+        ] {
+            assert_errs(row);
+        }
+        assert_row("0b0bdc0c0285030502040a0402", Value::Int(1), 79); // Z3
+        assert_row("0b0bdc0c028503050204000402", Value::Boolean(true), 79); // Z4
+        assert_row("0b0bdc0c020d030502040a0100", Value::Boolean(false), 49); // Z5
+        assert_row(
+            "0b11dc0c0283030404000402040402040a0101",
+            Value::Boolean(true),
+            79,
+        ); // I3
+        assert_row("0b11dc0c028303040400040204040204000101", Value::Int(0), 79); // I4
+        assert_row("0b10dc0c02db0c0e0e0301020302040a0412", Value::Int(9), 75); // I5
+        assert_row("0b0ddc0c028cc7a7020204c6010101", Value::Boolean(true), 80); // H2
+        assert_row("0b0fdc0c02db09060901050204c6010207", Value::Byte(7), 58); // H13
+    }
+
+    #[test]
+    fn get_or_else_pairs() {
+        // a `PairOfCols` refuses a default that is not a pair, at any index; a generic collection
+        // of pairs (after `map`) does not (SANTA `Coll.pair_shape_map`, `Coll.pair_shape_restored`)
+        for row in [
+            "0b0fdc0c020c58020204060802040a0101", // M1
+            "0b0fdc0c020c5802020406080204000101", // M2
+            "0b0edc0c0283015858020402040a0101",   // A1
+            "0b0edc0c028301585802040204000101",   // A2
+            "0b1fdc0c02dc0c0383030404000402040401d901010486027201720102040a0101", // Y1
+            "0b22dc0c02dc0c0f83030404000402040401d901010483015886027201720102040a0101", // Y3
+            "0b24dc0c02db0c1edc0c0383025886020402040486020406040801d9010158720102040a0101", // Y4
+        ] {
+            assert_errs(row);
+        }
+        assert_row("0b13dc0c020c58020204060802040a860204120412", pair(9, 9), 69); // M8
+        assert_row(
+            "0b1ddc0c02dc0c030c58020204060801d9010158720102040a860204120412",
+            pair(9, 9),
+            119,
+        ); // M9
+        assert_row(
+            "0b21dc0c02dc0c0383025886020402040486020406040801d9010158720102040a0101",
+            Value::Boolean(true),
+            164,
+        ); // M7
+        assert_row(
+            "0b23dc0c02dc0c0383030404000402040401d901010486027201720102040a860204120412",
+            pair(9, 9),
+            219,
+        ); // Y2
+    }
+
+    #[test]
+    fn by_index_default_four_way() {
+        // SANTA `ByIndex.default_specialisation`: below tree version 3 the default reaches the
+        // collection even in range; from 3 only out of range
+        for row in [
+            "00b20e030102030400010101",       // N1
+            "00b20e030102030412010101",       // N2
+            "0b0bb20e030102030412010101",     // N8
+            "0b0db20c580202040608040a010101", // M5
+        ] {
+            assert_errs(row);
+        }
+        assert_row("00b28303020201020202030400010101", Value::Byte(1), 75); // N3
+        assert_row("00b28303020201020202030412010101", Value::Boolean(true), 75); // N4
+        assert_row("00b20e030102030400010207", Value::Byte(1), 45); // N5
+        assert_row("00b28303020201020202030412010207", Value::Byte(7), 75); // N6
+        assert_row("0b0bb20e030102030400010101", Value::Byte(1), 40); // N7
+        assert_row("0b0fb28303020201020202030400010101", Value::Byte(1), 70); // N9
+        assert_row(
+            "0b0fb28303020201020202030412010101",
+            Value::Boolean(true),
+            75,
+        ); // N10
+        assert_row("0b0bb20e030102030400010207", Value::Byte(1), 40); // N11
+        assert_row("0b0fb28303020201020202030412010207", Value::Byte(7), 75); // N12
+        assert_row(
+            "0b17b2dc0c030c58020204060801d90101587201040a010101",
+            Value::Boolean(true),
+            95,
+        ); // M6
+    }
+
+    #[test]
     fn mapped_pairs_rows() {
         // M3/M4: `map` over a collection of pairs gives a generic collection of pairs
         let pair = |a, b| Value::Tup([Value::Int(a), Value::Int(b)].into());
