@@ -358,4 +358,36 @@ mod jvm_method_rows {
         assert_evaluator_refuses("0b0adb240283020404020404");
         assert_evaluator_refuses("0b0adb240383020404020404");
     }
+
+    #[test]
+    fn map_result_without_runtime_type_fails_on_empty() {
+        // sigmastate's `MapCollection.eval` and `map_eval` both convert the result's item type
+        // with `stypeToRType` before charging or mapping (v6.0.7 `transformers.scala:40-45`,
+        // `methods.scala:862-867`); it has no arm for a type variable or a function of other than
+        // one argument (`Evaluation.scala:51-55`), so an empty input fails too
+        for tree_hex in [
+            // Coll[Int]().map((x: Int) => (a: Int, b: Int) => a), the method
+            "0b12dc0c03100001d9010104d902020403047202",
+            // Map(Coll[Int](), (x: Int) => SELF.R4), the node: `R4`'s `Option[T]`
+            "0b0bad1000d9010104db630da7",
+            // Map(Coll[Int](), (x: Int) => SELF.getRegV5(4)), the node
+            "0b0ead1000d9010104dc6307a7010408",
+        ] {
+            let (_, res, _) = eval_v3_body(tree_hex);
+            let err = res.unwrap_err();
+            assert!(
+                alloc::format!("{err:?}").contains("no runtime type"),
+                "{tree_hex}: {err:?}"
+            );
+        }
+        // a function of one argument converts: Coll[Int]().map((x: Int) => (y: Int) => y), as
+        // the method and as the node
+        for tree_hex in [
+            "0b0fdc0c03100001d9010104d90102047202",
+            "0b0dad1000d9010104d90102047202",
+        ] {
+            let (_, res, _) = eval_v3_body(tree_hex);
+            assert!(res.is_ok(), "{tree_hex}: {res:?}");
+        }
+    }
 }

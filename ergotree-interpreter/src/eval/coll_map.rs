@@ -13,6 +13,24 @@ use crate::eval::EvalError;
 use crate::eval::Evaluable;
 use crate::eval::LambdaInvoker;
 
+/// Whether sigmastate's `stypeToRType` converts `tpe` (v6.0.7 `Evaluation.scala:22-55`): every
+/// type has an arm except a type variable and a function type with other than one argument or
+/// with type parameters, at any depth
+fn has_runtime_type(tpe: &SType) -> bool {
+    match tpe {
+        SType::STypeVar(_) => false,
+        SType::SColl(t) | SType::SOption(t) => has_runtime_type(t),
+        SType::STuple(t) => t.items.iter().all(has_runtime_type),
+        SType::SFunc(f) => {
+            f.t_dom.len() == 1
+                && f.tpe_params.is_empty()
+                && f.t_dom.iter().all(has_runtime_type)
+                && has_runtime_type(&f.t_range)
+        }
+        _ => true,
+    }
+}
+
 impl Evaluable for Map {
     fn eval<'ctx>(
         &self,
@@ -61,6 +79,13 @@ pub(crate) fn map_coll<'ctx>(
             input_v
         ))),
     }?;
+    // `stypeToRType(tRange)` before the charge, in `MapCollection.eval` and `map_eval` alike
+    if !has_runtime_type(&out_elem_tpe) {
+        return Err(EvalError::Misc(format!(
+            "map: the result's item type {out_elem_tpe:?} has no runtime type (a type variable, \
+             or a function of other than one argument)"
+        )));
+    }
     ctx.add_per_item_jit_cost(20, 1, 10, normalized_input_vals.len() as u32)?;
     normalized_input_vals
         .iter()

@@ -488,9 +488,8 @@ pub(crate) static GET_OR_ELSE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
 };
 
 /// `Coll.map` (id 3), as sigmastate's `map_eval` (`methods.scala:862-867`): the result's item
-/// type is the call's, `mc.tpe`; when the call's types didn't unify it still holds a type
-/// variable, which `stypeToRType` cannot convert, so sigmastate throws before charging or
-/// mapping
+/// type is the call's, `mc.tpe` (when the call's types didn't unify it still holds a type
+/// variable, which [`map_coll`] refuses before charging, as `stypeToRType` throws)
 pub(crate) static MAP_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     let SType::SColl(item_tpe) = &*mc.tpe().t_range else {
         return Err(EvalError::UnexpectedValue(format!(
@@ -498,27 +497,11 @@ pub(crate) static MAP_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
             mc.tpe().t_range
         )));
     };
-    if holds_type_var(item_tpe) {
-        return Err(EvalError::Misc(format!(
-            "map: the result's item type {item_tpe:?} holds a type variable"
-        )));
-    }
     let mapper = args
         .first()
         .ok_or_else(|| EvalError::UnexpectedValue("map: mapper argument not found".into()))?;
     map_coll(ctx, obj, mapper, (**item_tpe).clone())
 };
-
-/// Whether `tpe` holds a type variable at any depth
-fn holds_type_var(tpe: &SType) -> bool {
-    match tpe {
-        SType::STypeVar(_) => true,
-        SType::SColl(t) | SType::SOption(t) => holds_type_var(t),
-        SType::STuple(t) => t.items.iter().any(holds_type_var),
-        SType::SFunc(f) => f.t_dom.iter().any(holds_type_var) || holds_type_var(&f.t_range),
-        _ => false,
-    }
-}
 
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
