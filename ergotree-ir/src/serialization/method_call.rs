@@ -329,4 +329,111 @@ mod tests {
             "{parsed:?}"
         );
     }
+
+    /// `expr_hex` parses as an expression from tree version `since`, is written back as read,
+    /// and is refused below `since`
+    fn assert_expr_parses_from(expr_hex: &str, since: ErgoTreeVersion) {
+        use crate::serialization::SigmaSerializable;
+        let bytes = hex(expr_hex);
+        let expr = from_bytes(&bytes)
+            .with_tree_version(since, Expr::sigma_parse)
+            .map_err(|e| alloc::format!("{expr_hex}: {e:?}"))
+            .unwrap();
+        assert_eq!(expr.sigma_serialize_bytes().unwrap(), bytes, "{expr_hex}");
+        roundtrip_new_feature(&expr, since);
+    }
+
+    #[test]
+    fn scollection_v5_ids_parse_at_every_version() {
+        // SANTA `ErgoTree.scollection_methodcall_v5_ids.json`, the v0 unsized bodies: the JVM
+        // resolves ids 1-10 at every tree version (`methods.scala:821-945`)
+        for expr_hex in [
+            "db0c0183020404020404",                             // size
+            "dc0c028302040402040402040a0412",                   // getOrElse
+            "dc0c038302040402040401d90101049a72010402",         // map
+            "dc0c048302040402040401d90101049172010402",         // exists
+            "dc0c0583020404020404020400d902010402049a72017202", // fold
+            "dc0c068302040402040401d90101049172010400",         // forall
+            "dc0c078303040402040404060204020406",               // slice
+            "dc0c088302040402040401d90101049172010402",         // filter
+            "dc0c098301040402018301040404",                     // append
+            "dc0c0a83020404020404010402",                       // apply
+        ] {
+            assert_expr_parses_from(expr_hex, ErgoTreeVersion::V0);
+        }
+    }
+
+    #[test]
+    fn scollection_size_tree_parses() {
+        // sigmaProp(Coll(1, 2).size == 2), v0 unsized and v3 sized
+        assert_parsed_tree_round_trips("00d193db0c01830204040204040404");
+        assert_parsed_tree_round_trips("0b0ed193db0c01830204040204040404");
+    }
+
+    #[test]
+    fn to_big_int_parses_from_v3() {
+        // numeric id 5 is parser-visible from tree version 3 only, as ids 1-4 and 6-13
+        use crate::ergo_tree::{ErgoTree, ErgoTreeError};
+        use crate::serialization::{SigmaParsingError, SigmaSerializable};
+        use crate::types::smethod::MethodId;
+        assert_expr_parses_from("db04050402", ErgoTreeVersion::V3);
+        // sigmaProp(1.toBigInt == 1.toBigInt)
+        assert_parsed_tree_round_trips("0b0cd193db04050402db04050402");
+        let v2 = ErgoTree::sigma_parse_bytes(&hex("0a0cd193db04050402db04050402"));
+        assert!(
+            matches!(
+                v2,
+                Ok(ErgoTree::Unparsed {
+                    error: ErgoTreeError::SigmaParsingError(SigmaParsingError::UnknownMethodId(
+                        MethodId(5),
+                        4
+                    )),
+                    ..
+                })
+            ),
+            "{v2:?}"
+        );
+    }
+
+    #[test]
+    fn v5_ids_missing_in_rust_parse() {
+        // SANTA `ErgoTree.v5_methods_missing_in_rust.json`, v0 unsized and v3 sized: the JVM
+        // resolves GroupElement 3-4, Box 9-18 and Option 2-4 at every tree version
+        for tree_hex in [
+            "00cddc0703db6a01dd01060101", // proveDlog(g.exp(BigInt 1))
+            "0b0ccddc0703db6a01dd01060101",
+            "00cddc0704db6a01dd01db6a01dd", // proveDlog(g.multiply(g))
+            "0b0dcddc0704db6a01dd01db6a01dd",
+            "00d1e6db6309a7", // sigmaProp(SELF.R0.isDefined)
+            "0b06d1e6db6309a7",
+            "00d1e6db630da7", // sigmaProp(SELF.R4.isDefined)
+            "0b06d1e6db630da7",
+            "00d1db2402e30104", // sigmaProp(getVar[Int](1).isDefined)
+            "0b07d1db2402e30104",
+            "00d1db2403e30101", // sigmaProp(getVar[Boolean](1).get)
+            "0b07d1db2403e30101",
+            "00d1dc2404e30101010101", // sigmaProp(getVar[Boolean](1).getOrElse(true))
+            "0b0ad1dc2404e30101010101",
+        ] {
+            assert_parsed_tree_round_trips(tree_hex);
+        }
+        // SELF.R0 ... SELF.R9
+        for id in 0x09u8..=0x12 {
+            assert_expr_parses_from(&alloc::format!("db63{id:02x}a7"), ErgoTreeVersion::V0);
+        }
+    }
+
+    #[test]
+    fn sigmaprop_methods_parse() {
+        // SANTA `ErgoTree.sigmaprop_methodcall_ids.json`: the JVM resolves SSigmaProp 1-2
+        // (`propBytes`, `isProven`) at every tree version (`methods.scala:703-707`)
+        for tree_hex in [
+            "00d191b1db0801d101010400", // sigmaProp(sigmaProp(true).propBytes.size > 0)
+            "0b0bd191b1db0801d101010400",
+            "00d1db0802d10101", // sigmaProp(sigmaProp(true).isProven)
+            "0b07d1db0802d10101",
+        ] {
+            assert_parsed_tree_round_trips(tree_hex);
+        }
+    }
 }

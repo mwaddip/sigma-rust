@@ -5,12 +5,31 @@ use alloc::vec::Vec;
 use ergotree_ir::mir::coll_map::Map;
 use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
+use ergotree_ir::types::stype::SType;
 
 use crate::eval::env::Env;
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
 use crate::eval::LambdaInvoker;
+
+/// Whether sigmastate's `stypeToRType` converts `tpe` (v6.0.7 `Evaluation.scala:22-55`): every
+/// type has an arm except a type variable and a function type with other than one argument or
+/// with type parameters, at any depth
+fn has_runtime_type(tpe: &SType) -> bool {
+    match tpe {
+        SType::STypeVar(_) => false,
+        SType::SColl(t) | SType::SOption(t) => has_runtime_type(t),
+        SType::STuple(t) => t.items.iter().all(has_runtime_type),
+        SType::SFunc(f) => {
+            f.t_dom.len() == 1
+                && f.tpe_params.is_empty()
+                && f.t_dom.iter().all(has_runtime_type)
+                && has_runtime_type(&f.t_range)
+        }
+        _ => true,
+    }
+}
 
 impl Evaluable for Map {
     fn eval<'ctx>(
@@ -20,47 +39,63 @@ impl Evaluable for Map {
     ) -> Result<Value<'ctx>, EvalError> {
         let input_v = self.input.eval(env, ctx)?;
         let mapper_v = self.mapper.eval(env, ctx)?;
-        let input_v_clone = input_v.clone();
-        let mut invoker = match &mapper_v {
-            Value::Lambda(func_value) => {
-                func_value.args.first().ok_or_else(|| {
-                    EvalError::NotFound(
-                        "Map: evaluated mapper has empty arguments list".to_string(),
-                    )
-                })?;
-                // The body evaluates in the lambda's CAPTURED environment
-                // (JVM closure semantics) — not in the caller's env.
-                LambdaInvoker::new(func_value)
-            }
-            _ => {
-                return Err(EvalError::UnexpectedValue(format!(
-                    "expected mapper to be Value::FuncValue got: {0:?}",
-                    input_v_clone
-                )))
-            }
-        };
-        let mut mapper_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
-        // sigmastate reads no element type here: the mapper checks each element against its
-        // argument's type (v6.0.7 `transformers.scala:33-46`, `values.scala:1074`)
-        let normalized_input_vals: Vec<Value> = match input_v {
-            Value::Coll(coll) => Ok(coll.as_vec()),
-            _ => Err(EvalError::UnexpectedValue(format!(
-                "expected Map input to be Value::Coll, got: {0:?}",
-                input_v
-            ))),
-        }?;
-        ctx.add_per_item_jit_cost(20, 1, 10, normalized_input_vals.len() as u32)?;
-        normalized_input_vals
-            .iter()
-            .map(|item| mapper_call(item.clone()))
-            .collect::<Result<Arc<[Value]>, EvalError>>()
-            .map(|values| {
-                CollKind::from_collection(self.out_elem_tpe(), values)
-                    .map_err(EvalError::TryExtractFrom)
-            })
-            .and_then(|v| v) // flatten <Result<Result<Value, _>, _>
-            .map(Value::Coll)
+        map_coll(ctx, input_v, &mapper_v, self.out_elem_tpe())
     }
+}
+
+/// `MapCollection` once its input and mapper are evaluated, shared with the `Coll.map` method
+/// (sigmastate's `map_eval` charges the same per-item cost and maps the same way, v6.0.7
+/// `methods.scala:862-867`)
+pub(crate) fn map_coll<'ctx>(
+    ctx: &Context<'ctx>,
+    input_v: Value<'ctx>,
+    mapper_v: &Value<'ctx>,
+    out_elem_tpe: SType,
+) -> Result<Value<'ctx>, EvalError> {
+    let input_v_clone = input_v.clone();
+    let mut invoker = match &mapper_v {
+        Value::Lambda(func_value) => {
+            func_value.args.first().ok_or_else(|| {
+                EvalError::NotFound("Map: evaluated mapper has empty arguments list".to_string())
+            })?;
+            // The body evaluates in the lambda's CAPTURED environment
+            // (JVM closure semantics) — not in the caller's env.
+            LambdaInvoker::new(func_value)
+        }
+        _ => {
+            return Err(EvalError::UnexpectedValue(format!(
+                "expected mapper to be Value::FuncValue got: {0:?}",
+                input_v_clone
+            )))
+        }
+    };
+    let mut mapper_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
+    // sigmastate reads no element type here: the mapper checks each element against its
+    // argument's type (v6.0.7 `transformers.scala:33-46`, `values.scala:1074`)
+    let normalized_input_vals: Vec<Value> = match input_v {
+        Value::Coll(coll) => Ok(coll.as_vec()),
+        _ => Err(EvalError::UnexpectedValue(format!(
+            "expected Map input to be Value::Coll, got: {0:?}",
+            input_v
+        ))),
+    }?;
+    // `stypeToRType(tRange)` before the charge, in `MapCollection.eval` and `map_eval` alike
+    if !has_runtime_type(&out_elem_tpe) {
+        return Err(EvalError::Misc(format!(
+            "map: the result's item type {out_elem_tpe:?} has no runtime type (a type variable, \
+             or a function of other than one argument)"
+        )));
+    }
+    ctx.add_per_item_jit_cost(20, 1, 10, normalized_input_vals.len() as u32)?;
+    normalized_input_vals
+        .iter()
+        .map(|item| mapper_call(item.clone()))
+        .collect::<Result<Arc<[Value]>, EvalError>>()
+        .map(|values| {
+            CollKind::from_collection(out_elem_tpe, values).map_err(EvalError::TryExtractFrom)
+        })
+        .and_then(|v| v) // flatten <Result<Result<Value, _>, _>
+        .map(Value::Coll)
 }
 
 #[allow(clippy::panic)]

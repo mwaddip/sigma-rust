@@ -9,6 +9,12 @@ use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
 
+/// The item at `index`, or `None` out of range (a negative index included): `ByIndex`'s
+/// lookup, shared with the `Coll.apply` and `Coll.getOrElse` methods
+pub(crate) fn item_at<'ctx>(coll: &CollKind<Value<'ctx>>, index: i32) -> Option<Value<'ctx>> {
+    usize::try_from(index).ok().and_then(|i| coll.get_val(i))
+}
+
 impl Evaluable for ByIndex {
     fn eval<'ctx>(
         &self,
@@ -34,23 +40,24 @@ impl Evaluable for ByIndex {
                     crate::eval::check_value_of_type(&default.tpe(), &d, ctx.tree_version())?;
                     Ok(d)
                 };
-                let val =
-                    normalized_input_vals.get_val(index_v.try_extract_into::<i32>()? as usize);
+                let val = item_at(normalized_input_vals, index_v.try_extract_into::<i32>()?);
                 if ctx.tree_version() >= ErgoTreeVersion::V3 {
                     val.map(Ok).unwrap_or_else(default_v)
                 } else {
                     Ok(val.unwrap_or(default_v()?))
                 }
             }
-            None => normalized_input_vals
-                .get_val(index_v.clone().try_extract_into::<i32>()? as usize)
-                .ok_or_else(|| {
-                    EvalError::Misc(format!(
-                        "ByIndex: index {0:?} out of bounds for collection size {1:?}",
-                        index_v,
-                        normalized_input_vals.len()
-                    ))
-                }),
+            None => item_at(
+                normalized_input_vals,
+                index_v.clone().try_extract_into::<i32>()?,
+            )
+            .ok_or_else(|| {
+                EvalError::Misc(format!(
+                    "ByIndex: index {0:?} out of bounds for collection size {1:?}",
+                    index_v,
+                    normalized_input_vals.len()
+                ))
+            }),
         }
     }
 }

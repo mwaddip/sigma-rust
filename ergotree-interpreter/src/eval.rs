@@ -541,8 +541,25 @@ impl<'l, 'ctx> LambdaInvoker<'l, 'ctx> {
     }
 }
 
+/// A method call as its evaluator sees it: the (specialised) method and the call's argument
+/// expressions. sigmastate's `_eval` handlers receive the `MethodCall` node itself
+/// (`getOrElse_eval` reads `mc.args.last.tpe`, v6.0.7 `methods.scala:842`). It derefs to the
+/// method, which is all most evaluators need.
+pub(crate) struct MethodCallSite<'a> {
+    pub(crate) method: &'a SMethod,
+    /// the call's argument expressions; empty for a `PropertyCall`
+    pub(crate) args: &'a [Expr],
+}
+
+impl core::ops::Deref for MethodCallSite<'_> {
+    type Target = SMethod;
+    fn deref(&self) -> &SMethod {
+        self.method
+    }
+}
+
 type EvalFn = for<'ctx> fn(
-    mc: &SMethod,
+    mc: &MethodCallSite<'_>,
     env: &mut Env<'ctx>,
     ctx: &Context<'ctx>,
     Value<'ctx>,
@@ -621,6 +638,10 @@ fn smethod_eval_fn(method: &SMethod) -> Result<EvalFn, EvalError> {
             scoll::STARTS_WITH_METHOD_ID => self::scoll::STARTS_WITH_EVAL_FN,
             scoll::ENDS_WITH_METHOD_ID => self::scoll::ENDS_WITH_EVAL_FN,
             scoll::GET_METHOD_ID => self::scoll::GET_EVAL_FN,
+            scoll::SIZE_METHOD_ID => self::scoll::SIZE_EVAL_FN,
+            scoll::GET_OR_ELSE_METHOD_ID => self::scoll::GET_OR_ELSE_EVAL_FN,
+            scoll::MAP_METHOD_ID => self::scoll::MAP_EVAL_FN,
+            scoll::APPLY_METHOD_ID => self::scoll::APPLY_EVAL_FN,
             method_id => {
                 return Err(EvalError::NotFound(format!(
                     "Eval fn: unknown method id in SCollection: {:?}",
@@ -646,6 +667,8 @@ fn smethod_eval_fn(method: &SMethod) -> Result<EvalFn, EvalError> {
         soption::TYPE_CODE => match method.method_id() {
             soption::MAP_METHOD_ID => self::soption::map_eval,
             soption::FILTER_METHOD_ID => self::soption::filter_eval,
+            soption::IS_DEFINED_METHOD_ID => self::soption::IS_DEFINED_EVAL_FN,
+            soption::GET_METHOD_ID => self::soption::GET_EVAL_FN,
             method_id => {
                 return Err(EvalError::NotFound(format!(
                     "Eval fn: unknown method id in SOption: {:?}",

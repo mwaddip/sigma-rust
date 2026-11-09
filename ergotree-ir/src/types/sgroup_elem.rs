@@ -18,26 +18,25 @@ pub const TYPE_CODE: TypeCode = TypeCode::SGROUP_ELEMENT;
 pub static TYPE_NAME: &str = "GroupElement";
 /// GroupElement.getEncoded
 pub const GET_ENCODED_METHOD_ID: MethodId = MethodId(2);
-/// GroupElement.exponentiate
+/// GroupElement.exp
 pub const EXPONENTIATE_METHOD_ID: MethodId = MethodId(3);
 /// GroupElement.multiply
 pub const MULTIPLY_METHOD_ID: MethodId = MethodId(4);
 /// GroupElement.negate
 pub const NEGATE_METHOD_ID: MethodId = MethodId(5);
-/// GroupElement.exponentiate
+/// GroupElement.expUnsigned
 pub const EXPONENTIATE_UNSIGNED_METHOD_ID: MethodId = MethodId(6);
 
 lazy_static! {
     /// GroupElement method descriptors
     pub(crate) static ref METHOD_DESC: Vec<SMethodDesc> =
         vec![
+            // sigmastate's parser-visible ids: 2-5 at every tree version, 6 from version 3
+            // (v6.0.7 `methods.scala:677-689`)
             GET_ENCODED_METHOD_DESC.clone(),
+            EXPONENTIATE_METHOD_DESC.clone(),
+            MULTIPLY_METHOD_DESC.clone(),
             NEGATE_METHOD_DESC.clone(),
-            // expUnsigned (v6/V3): defined + evaluable, but previously absent from
-            // this registry, so `from_ids` rejected it (UnknownMethodId) and any
-            // ErgoTree using it failed to deserialize — while the JVM parses + evals
-            // it. (exponentiate/multiply are intentionally absent: they serialize as
-            // dedicated `Exponentiate`/`MultiplyGroup` ops, not method calls.)
             EXPONENTIATE_UNSIGNED_METHOD_DESC.clone(),
         ]
     ;
@@ -61,7 +60,7 @@ lazy_static! {
 lazy_static! {
     static ref EXPONENTIATE_METHOD_DESC: SMethodDesc = SMethodDesc {
         method_id: EXPONENTIATE_METHOD_ID,
-        name: "exponentiate",
+        name: "exp",
         tpe: SFunc::new(
             vec![SType::SGroupElement, SType::SBigInt],
             SType::SGroupElement,
@@ -106,7 +105,7 @@ lazy_static! {
 lazy_static! {
     static ref EXPONENTIATE_UNSIGNED_METHOD_DESC: SMethodDesc = SMethodDesc {
         method_id: EXPONENTIATE_UNSIGNED_METHOD_ID,
-        name: "exponentiate",
+        name: "expUnsigned",
         tpe: SFunc::new(
             vec![SType::SGroupElement, SType::SUnsignedBigInt],
             SType::SGroupElement,
