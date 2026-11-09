@@ -5,13 +5,13 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use ergotree_ir::mir::value::Value;
-use ergotree_ir::types::smethod::SMethod;
 
 use super::env::Env;
 use super::Context;
+use super::MethodCallSite;
 
 pub fn map_eval<'ctx>(
-    _mc: &SMethod,
+    _mc: &MethodCallSite<'_>,
     _env: &mut Env<'ctx>,
     ctx: &Context<'ctx>,
     obj: Value<'ctx>,
@@ -54,7 +54,7 @@ pub fn map_eval<'ctx>(
 }
 
 pub fn filter_eval<'ctx>(
-    _mc: &SMethod,
+    _mc: &MethodCallSite<'_>,
     _env: &mut Env<'ctx>,
     ctx: &Context<'ctx>,
     obj: Value<'ctx>,

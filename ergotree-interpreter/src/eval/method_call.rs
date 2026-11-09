@@ -7,6 +7,7 @@ use super::Context;
 use super::Env;
 use super::EvalError;
 use super::Evaluable;
+use super::MethodCallSite;
 use ergotree_ir::types::smethod::SMethod;
 use ergotree_ir::types::stype_companion::STypeCompanion;
 
@@ -22,7 +23,11 @@ impl Evaluable for MethodCall {
             self.args.iter().map(|arg| arg.eval(env, ectx)).collect();
         let argsv = argsv?;
         check_arity(&self.method, argsv.len())?;
-        smethod_eval_fn(&self.method)?(&self.method, env, ectx, ov, argsv)
+        let site = MethodCallSite {
+            method: &self.method,
+            args: &self.args,
+        };
+        smethod_eval_fn(&self.method)?(&site, env, ectx, ov, argsv)
     }
 }
 /// sigmastate parses a call of any arity, and its evaluator invokes the method with the
@@ -144,6 +149,157 @@ mod arity_tests {
             }
             .into();
             assert!(try_eval_out_wo_ctx::<Value>(&mc).is_err());
+        }
+    }
+}
+
+/// SANTA's eval-tier rows for the method ids sigmastate resolves (`Coll.methodcall_v5_ids.json`,
+/// `MethodCall.v5_methods_missing_in_rust.json`, `SigmaProp.methodcall_ids.json`), with the
+/// JVM's values and costs
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used, clippy::unreachable)]
+mod jvm_method_rows {
+    use alloc::vec::Vec;
+    use ergotree_ir::chain::context::Context;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::constant::TryExtractInto;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::value::Value;
+    use ergotree_ir::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
+    use ergotree_ir::serialization::SigmaSerializable;
+    use ergotree_ir::types::stype::SType;
+    use sigma_test_util::force_any_val;
+
+    use crate::eval::{Env, EvalError, Evaluable};
+
+    /// The root of SANTA's eval tree (a v3 sized tree whose root is the expression, read
+    /// without the tree's root-type check), and its value and JIT cost at activated version 3
+    fn eval_v3_body(tree_hex: &str) -> (Expr, Result<Value<'static>, EvalError>, u64) {
+        let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
+        assert_eq!(bytes[0], 0x0b, "{tree_hex}");
+        assert!(bytes[1] < 0x80, "{tree_hex}");
+        let expr = from_bytes(&bytes[2..])
+            .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
+            .unwrap();
+        let mut ctx = force_any_val::<Context>();
+        ctx.activated_script_version_byte = 3;
+        ctx.tree_version.set(ErgoTreeVersion::V3);
+        ctx.jit_cost.set(0);
+        let mut env = Env::empty();
+        let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
+        (expr, res, ctx.jit_cost_value())
+    }
+
+    fn assert_accepts(tree_hex: &str, expected: Value<'static>, cost: u64) {
+        let (_, res, c) = eval_v3_body(tree_hex);
+        assert_eq!(res.unwrap(), expected, "{tree_hex}");
+        assert_eq!(c, cost, "{tree_hex}");
+    }
+
+    /// the error under the span wrapper each eval node adds
+    fn innermost(e: &EvalError) -> &EvalError {
+        match e {
+            EvalError::Spanned(s) => innermost(&s.error),
+            e => e,
+        }
+    }
+
+    /// fails at eval in an evaluator, not for want of one
+    fn assert_evaluator_refuses(tree_hex: &str) {
+        let (_, res, _) = eval_v3_body(tree_hex);
+        let err = res.unwrap_err();
+        assert!(
+            !matches!(innermost(&err), EvalError::NotFound(_)),
+            "{tree_hex}: {err:?}"
+        );
+    }
+
+    #[test]
+    fn coll_v5_accept_rows() {
+        assert_accepts("0b0adb0c0183020404020404", Value::Int(2), 48);
+        assert_accepts("0b0fdc0c028302040402040402040a0412", Value::Int(9), 74);
+        assert_accepts("0b0fdc0c02830204040204040204000412", Value::Int(1), 74);
+        assert_accepts("0b0ddc0c0a83020404020404010402", Value::Int(2), 69);
+        let map = "0b14dc0c038302040402040401d90101049a72010402";
+        let (_, res, c) = eval_v3_body(map);
+        assert_eq!(res.unwrap().try_extract_into::<Vec<i32>>().unwrap(), [2, 3]);
+        assert_eq!(c, 120);
+    }
+
+    #[test]
+    fn coll_v5_errored_rows() {
+        // exists, forall, slice, filter, append, fold (2-arg op), fold (pair op): the JVM
+        // parses them and has no evaluator for any
+        for tree_hex in [
+            "0b14dc0c048302040402040401d90101049172010402",
+            "0b14dc0c068302040402040401d90101049172010400",
+            "0b11dc0c078303040402040404060204020406",
+            "0b14dc0c088302040402040401d90101049172010402",
+            "0b0edc0c098301040402018301040404",
+            "0b18dc0c0583020404020404020400d902010402049a72017202",
+            "0b1adc0c0583020404020404020400d90101589a8c7201018c720102",
+        ] {
+            assert!(eval_v3_body(tree_hex).1.is_err(), "{tree_hex}");
+        }
+    }
+
+    #[test]
+    fn coll_get_or_else_generic_default() {
+        // Coll(1, 2).getOrElse(i, true): the default's type is not the items', so the call's
+        // types don't unify and the method stays generic. sigmastate checks the default against
+        // its own type (`getOrElse_eval`, `mc.args.last.tpe`) and returns it out of range.
+        for (tree_hex, expected) in [
+            ("0b0fdc0c028302040402040402040a0101", Value::Boolean(true)),
+            ("0b0fdc0c02830204040204040204000101", Value::Int(1)),
+        ] {
+            let (expr, res, _) = eval_v3_body(tree_hex);
+            let Expr::MethodCall(mc) = &expr else {
+                unreachable!("{expr:?}")
+            };
+            assert!(
+                matches!(
+                    mc.expr().method.tpe().t_dom.last(),
+                    Some(SType::STypeVar(_))
+                ),
+                "{tree_hex}: {:?}",
+                mc.expr().method
+            );
+            assert_eq!(res.unwrap(), expected, "{tree_hex}");
+        }
+    }
+
+    #[test]
+    fn coll_map_generic_range_fails_on_empty() {
+        // Coll[Int]().map((x: Long) => x): the mapper doesn't unify with the items, so the
+        // result's item type is still `OV`, which `stypeToRType` can't convert: sigmastate
+        // throws before mapping, so no element (and no lambda argument check) is reached
+        let tree_hex = "0b0cdc0c03100001d90101057201";
+        let (_, res, _) = eval_v3_body(tree_hex);
+        let err = res.unwrap_err();
+        assert!(
+            alloc::format!("{err:?}").contains("type variable"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn coll_negative_index() {
+        assert_evaluator_refuses("0b0ddc0c0a83020404020404010401"); // apply(-1)
+        assert_accepts("0b0fdc0c02830204040204040204010412", Value::Int(9), 74);
+        // getOrElse(-1, 9)
+    }
+
+    #[test]
+    fn coll_new_evaluators_check_their_receiver() {
+        // size, apply(0), getOrElse(0, 9), map((x: Int) => x), each on the Int 1
+        for tree_hex in [
+            "0b05db0c010402",
+            "0b08dc0c0a0402010400",
+            "0b0adc0c0204020204000412",
+            "0b0cdc0c03040201d90101047201",
+        ] {
+            assert_evaluator_refuses(tree_hex);
         }
     }
 }

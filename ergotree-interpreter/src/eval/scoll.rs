@@ -8,13 +8,16 @@ use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::expr::Expr;
 use ergotree_ir::mir::value::CollKind;
 use ergotree_ir::mir::value::Value;
-use ergotree_ir::types::smethod::SMethod;
 use ergotree_ir::types::stuple::STuple;
+use ergotree_ir::types::stype::SType;
 use ergotree_ir::types::stype::SType::SInt;
 
+use super::coll_by_index::item_at;
+use super::coll_map::map_coll;
 use super::env::Env;
 use super::Context;
 use super::EvalFn;
+use super::MethodCallSite;
 use alloc::sync::Arc;
 use core::convert::TryFrom;
 
@@ -64,7 +67,7 @@ pub(crate) static INDEX_OF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 };
 
 pub(crate) fn flatmap_eval<'ctx>(
-    _mc: &SMethod,
+    _mc: &MethodCallSite<'_>,
     _env: &mut Env<'ctx>,
     ctx: &Context<'ctx>,
     obj: Value<'ctx>,
@@ -425,6 +428,97 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             .map(Box::new),
     ))
 };
+
+/// `Coll.size` (id 1): sigmastate calls `Coll.size` reflectively at `SizeOf`'s fixed cost
+/// (`invokeFixed`, v6.0.7 `methods.scala:821`)
+pub(crate) static SIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+    ctx.add_jit_cost(14)?;
+    let Value::Coll(coll) = obj else {
+        return Err(EvalError::UnexpectedValue(format!(
+            "size: expected Coll, found {obj:?}"
+        )));
+    };
+    Ok(Value::Int(coll.len() as i32))
+};
+
+/// `Coll.apply` (id 10): sigmastate calls `Coll.apply` reflectively at `ByIndex`'s fixed cost
+/// (`methods.scala:940`); out of range it throws
+pub(crate) static APPLY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    ctx.add_jit_cost(30)?;
+    let Value::Coll(coll) = obj else {
+        return Err(EvalError::UnexpectedValue(format!(
+            "apply: expected Coll, found {obj:?}"
+        )));
+    };
+    let index = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::UnexpectedValue("apply: index argument not found".into()))?
+        .try_extract_into::<i32>()?;
+    item_at(&coll, index).ok_or_else(|| {
+        EvalError::Misc(format!(
+            "apply: index {index} out of bounds for collection size {}",
+            coll.len()
+        ))
+    })
+};
+
+/// `Coll.getOrElse` (id 2), as sigmastate's `getOrElse_eval` (`methods.scala:839-844`):
+/// `ByIndex`'s cost, then the default, already evaluated with every other argument, is checked
+/// against the default ARGUMENT's declared type whatever the index (`mc.args.last.tpe`: the
+/// method's domain stays generic when the call's types don't unify), then the item or the
+/// default
+pub(crate) static GET_OR_ELSE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
+    ctx.add_jit_cost(30)?;
+    let Value::Coll(coll) = obj else {
+        return Err(EvalError::UnexpectedValue(format!(
+            "getOrElse: expected Coll, found {obj:?}"
+        )));
+    };
+    let [index, default]: [Value; 2] = args.try_into().map_err(|_| {
+        EvalError::UnexpectedValue("getOrElse: expected an index and a default".into())
+    })?;
+    let default_tpe = mc
+        .args
+        .get(1)
+        .ok_or_else(|| EvalError::UnexpectedValue("getOrElse: default argument not found".into()))?
+        .tpe();
+    crate::eval::check_value_of_type(&default_tpe, &default, ctx.tree_version())?;
+    Ok(item_at(&coll, index.try_extract_into::<i32>()?).unwrap_or(default))
+};
+
+/// `Coll.map` (id 3), as sigmastate's `map_eval` (`methods.scala:862-867`): the result's item
+/// type is the call's, `mc.tpe`; when the call's types didn't unify it still holds a type
+/// variable, which `stypeToRType` cannot convert, so sigmastate throws before charging or
+/// mapping
+pub(crate) static MAP_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
+    let SType::SColl(item_tpe) = &*mc.tpe().t_range else {
+        return Err(EvalError::UnexpectedValue(format!(
+            "map: expected a collection range, found {:?}",
+            mc.tpe().t_range
+        )));
+    };
+    if holds_type_var(item_tpe) {
+        return Err(EvalError::Misc(format!(
+            "map: the result's item type {item_tpe:?} holds a type variable"
+        )));
+    }
+    let mapper = args
+        .first()
+        .ok_or_else(|| EvalError::UnexpectedValue("map: mapper argument not found".into()))?;
+    map_coll(ctx, obj, mapper, (**item_tpe).clone())
+};
+
+/// Whether `tpe` holds a type variable at any depth
+fn holds_type_var(tpe: &SType) -> bool {
+    match tpe {
+        SType::STypeVar(_) => true,
+        SType::SColl(t) | SType::SOption(t) => holds_type_var(t),
+        SType::STuple(t) => t.items.iter().any(holds_type_var),
+        SType::SFunc(f) => f.t_dom.iter().any(holds_type_var) || holds_type_var(&f.t_range),
+        _ => false,
+    }
+}
 
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]

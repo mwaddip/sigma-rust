@@ -6,6 +6,7 @@ use super::Context;
 use super::Env;
 use super::EvalError;
 use super::Evaluable;
+use super::MethodCallSite;
 
 impl Evaluable for PropertyCall {
     fn eval<'ctx>(
@@ -17,7 +18,11 @@ impl Evaluable for PropertyCall {
         let ov = self.obj.eval(env, ectx)?;
         // a PropertyCall is sigmastate's MethodCall with no arguments (`values.scala:1351`)
         super::method_call::check_arity(&self.method, 0)?;
-        smethod_eval_fn(&self.method)?(&self.method, env, ectx, ov, vec![])
+        let site = MethodCallSite {
+            method: &self.method,
+            args: &[],
+        };
+        smethod_eval_fn(&self.method)?(&site, env, ectx, ov, vec![])
     }
 }
 
