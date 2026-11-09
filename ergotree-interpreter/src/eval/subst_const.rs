@@ -29,9 +29,11 @@ impl Evaluable for SubstConstants {
             .map(|i| i as usize)
             .collect();
 
-        let new_constants = if let Value::Coll(CollValue::Generic { items, .. }) = new_values_v {
+        // every item of the new values becomes a constant, whatever the collection's form
+        // (sigmastate's `toArrayOfConstants`, v6.0.7 `Extensions.scala:53-64`)
+        let new_constants = if let Value::Coll(coll) = new_values_v {
             let mut items_const = vec![];
-            for v in &*items {
+            for v in &coll.as_vec() {
                 let c = Constant::try_from(v.to_static()).map_err(EvalError::Misc)?;
                 items_const.push(c);
             }
@@ -97,10 +99,8 @@ mod tests {
         mir::{
             bin_op::{ArithOp, BinOp, BinOpKind},
             expr::Expr,
-            value::StoreWrapped,
         },
         serialization::SigmaSerializable,
-        types::stype::LiftIntoSType,
     };
     use proptest::prelude::*;
 
@@ -161,10 +161,19 @@ mod tests {
         assert_eq!(subst(0x0c, 1).unwrap(), template(0x0c));
     }
 
-    fn test_single_substitution<T: Clone + LiftIntoSType + StoreWrapped + Into<Constant>>(
-        original: T,
-        new: T,
-    ) {
+    #[test]
+    fn new_values_of_every_collection_form() {
+        // sigmastate lifts each item of the new values to a constant whatever the collection
+        // (`toArrayOfConstants`, v6.0.7 `Extensions.scala:53-64`): a `Coll[Boolean]` and a
+        // `Coll[Byte]`, both specialised, substitute as a generic collection does
+        test_single_substitution(true, false);
+        test_single_substitution(5i8, 7i8);
+    }
+
+    fn test_single_substitution<T: Clone + Into<Constant>>(original: T, new: T)
+    where
+        Vec<T>: Into<Constant>,
+    {
         let expr = Expr::Const(original.clone().into());
         let ergo_tree = ErgoTree::new(ErgoTreeHeader::v0(true), &expr).unwrap();
         assert_eq!(ergo_tree.constants_len().unwrap(), 1);
@@ -173,7 +182,7 @@ mod tests {
         let script_bytes =
             Expr::Const(Constant::from(ergo_tree.sigma_serialize_bytes().unwrap())).into();
         let positions = Expr::Const(Constant::from(vec![0])).into();
-        let new_values = Expr::Const(Constant::from(vec![new.clone()])).into();
+        let new_values = Expr::Const(vec![new.clone()].into()).into();
 
         let subst_const = Expr::SubstConstants(
             SubstConstants {

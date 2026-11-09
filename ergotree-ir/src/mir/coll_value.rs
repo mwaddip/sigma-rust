@@ -59,6 +59,27 @@ impl<'ctx> CollValue<'ctx> {
         }
     }
 
+    /// sigmastate's `Colls.fromArray` called at an abstract item type (v6.0.7
+    /// `CollsOverArrays.scala:226-232`): never specialised; a pair item type gives a `PairOfCols`
+    /// whose sides are built the same way from each component (`fromBoxedPairs`, `:205-215`), any
+    /// other item type a generic collection. A pair item type with an item that is not a pair is an
+    /// error, as the JVM's `asInstanceOf[(A, B)]` throws
+    pub fn from_array(
+        elem_tpe: SType,
+        items: Vec<Value<'ctx>>,
+    ) -> Result<Self, TryExtractFromError> {
+        match split_pairs(&elem_tpe, items) {
+            Ok((lt, rt, ls, rs)) => Ok(CollValue::pairs(
+                CollValue::from_array(lt, ls)?,
+                CollValue::from_array(rt, rs)?,
+            )),
+            Err(_) if pair_item_types(&elem_tpe).is_some() => Err(TryExtractFromError(format!(
+                "a collection of {elem_tpe:?} holds an item that is not a pair"
+            ))),
+            Err(items) => Ok(CollValue::generic(elem_tpe, items)),
+        }
+    }
+
     /// A `Coll[Byte]` of `items` as native bytes, any other item type generic
     pub fn from_collection(
         elem_tpe: SType,
@@ -137,6 +158,57 @@ impl<'ctx> CollValue<'ctx> {
     }
 }
 
+/// The two item types of a pair type
+fn pair_item_types(tpe: &SType) -> Option<(SType, SType)> {
+    match tpe {
+        SType::STuple(t) if t.items.len() == 2 => {
+            Some((t.items.get(0)?.clone(), t.items.get(1)?.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// A collection of pairs split into its sides: the sides' item types and items
+type Sides<'ctx> = (SType, SType, Vec<Value<'ctx>>, Vec<Value<'ctx>>);
+
+/// `items` split into two sides when `elem_tpe` is a pair type and every item is a pair; the items
+/// back, untouched, otherwise
+fn split_pairs<'ctx>(
+    elem_tpe: &SType,
+    items: Vec<Value<'ctx>>,
+) -> Result<Sides<'ctx>, Vec<Value<'ctx>>> {
+    let Some((lt, rt)) = pair_item_types(elem_tpe) else {
+        return Err(items);
+    };
+    if !items
+        .iter()
+        .all(|v| matches!(v, Value::Tup(pair) if pair.len() == 2))
+    {
+        return Err(items);
+    }
+    let mut ls = Vec::with_capacity(items.len());
+    let mut rs = Vec::with_capacity(items.len());
+    for item in items {
+        if let Value::Tup(pair) = item {
+            let mut pair = pair.to_vec().into_iter();
+            ls.extend(pair.next());
+            rs.extend(pair.next());
+        }
+    }
+    Ok((lt, rt, ls, rs))
+}
+
+/// Data items as the JVM's deserializer holds them, past its two specialised item types
+/// (`CoreDataSerializer.deserializeColl`'s generic branch, v6.0.7 `:175-191`): `fromArray` at an
+/// abstract type, as [`CollValue::from_array`]. Total: a pair-typed collection holding a non-pair
+/// item, which the parser never builds, stays generic
+fn from_data(elem_tpe: SType, items: Vec<Value<'static>>) -> CollValue<'static> {
+    match split_pairs(&elem_tpe, items) {
+        Ok((lt, rt, ls, rs)) => CollValue::pairs(from_data(lt, ls), from_data(rt, rs)),
+        Err(items) => CollValue::generic(elem_tpe, items),
+    }
+}
+
 impl PartialEq for CollValue<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -164,15 +236,31 @@ impl PartialEq for CollValue<'_> {
 
 impl Eq for CollValue<'_> {}
 
-/// Data (a constant, a register, a context variable) as a runtime collection
+/// Data (a constant, a register, a context variable) as a runtime collection, in the shape the
+/// JVM's deserializer builds (v6.0.7 `CoreDataSerializer.deserializeColl`): `Coll[Byte]` and
+/// `Coll[Boolean]` specialised (`:172`, `:174`), any other item type through `fromArray` at an
+/// abstract type. An inner collection is converted the same way, so it is specialised too
 impl From<CollKind<Literal>> for CollValue<'static> {
     fn from(coll: CollKind<Literal>) -> Self {
         match coll {
             CollKind::NativeColl(NativeColl::CollByte(bytes)) => CollValue::Bytes(bytes),
-            CollKind::WrappedColl { elem_tpe, items } => CollValue::Generic {
-                elem_tpe,
-                items: items.iter().cloned().map(Value::from).collect(),
-            },
+            CollKind::WrappedColl { elem_tpe, items } => {
+                let bits = (elem_tpe == SType::SBoolean)
+                    .then(|| {
+                        items
+                            .iter()
+                            .map(|l| match l {
+                                Literal::Boolean(b) => Some(*b),
+                                _ => None,
+                            })
+                            .collect::<Option<Arc<[bool]>>>()
+                    })
+                    .flatten();
+                match bits {
+                    Some(bits) => CollValue::Booleans(bits),
+                    None => from_data(elem_tpe, items.iter().cloned().map(Value::from).collect()),
+                }
+            }
         }
     }
 }
@@ -209,7 +297,7 @@ impl<'ctx> TryFrom<CollValue<'ctx>> for CollKind<Literal> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
@@ -311,6 +399,144 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert_eq!(p.get_val(0), Some(pair(0, 5)));
         assert_eq!(p.get_val(1), None);
+    }
+
+    /// Data collections, one per shape the JVM's deserializer builds, with their types
+    fn data_collections() -> Vec<(SType, Literal)> {
+        let int_pair = STuple::pair(SType::SInt, SType::SInt);
+        let tup = |l: Literal, r: Literal| Literal::Tup([l, r].into());
+        let wrapped = |elem_tpe: SType, items: Vec<Literal>| {
+            Literal::Coll(CollKind::WrappedColl {
+                elem_tpe,
+                items: items.into(),
+            })
+        };
+        let bytes = |b: &[i8]| Literal::Coll(CollKind::NativeColl(NativeColl::CollByte(b.into())));
+        let coll = |t: SType| SType::SColl(t.into());
+        vec![
+            (coll(SType::SByte), bytes(&[1, 2])),
+            (
+                coll(SType::SBoolean),
+                wrapped(
+                    SType::SBoolean,
+                    vec![Literal::Boolean(true), Literal::Boolean(false)],
+                ),
+            ),
+            (
+                coll(SType::SShort),
+                wrapped(SType::SShort, vec![Literal::Short(1)]),
+            ),
+            (
+                coll(SType::SInt),
+                wrapped(SType::SInt, vec![Literal::Int(1), Literal::Int(2)]),
+            ),
+            (
+                coll(SType::SLong),
+                wrapped(SType::SLong, vec![Literal::Long(1)]),
+            ),
+            (
+                coll(SType::STuple(int_pair.clone())),
+                wrapped(
+                    SType::STuple(int_pair.clone()),
+                    vec![
+                        tup(Literal::Int(1), Literal::Int(2)),
+                        tup(Literal::Int(3), Literal::Int(4)),
+                    ],
+                ),
+            ),
+            (
+                coll(SType::STuple(STuple::pair(SType::SByte, SType::SByte))),
+                wrapped(
+                    SType::STuple(STuple::pair(SType::SByte, SType::SByte)),
+                    vec![tup(Literal::Byte(1), Literal::Byte(2))],
+                ),
+            ),
+            (
+                coll(coll(SType::SByte)),
+                wrapped(coll(SType::SByte), vec![bytes(&[1]), bytes(&[])]),
+            ),
+            (
+                coll(SType::STuple(STuple::pair(
+                    SType::STuple(int_pair.clone()),
+                    SType::SInt,
+                ))),
+                wrapped(
+                    SType::STuple(STuple::pair(SType::STuple(int_pair), SType::SInt)),
+                    vec![tup(tup(Literal::Int(1), Literal::Int(2)), Literal::Int(3))],
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn data_takes_deserializer_shapes() {
+        use CollValue::*;
+        let is_generic =
+            |c: &CollValue, t: SType| matches!(c, Generic { elem_tpe, .. } if *elem_tpe == t);
+        let shapes: Vec<CollValue<'static>> = data_collections()
+            .into_iter()
+            .map(|(_, lit)| match Value::from(lit) {
+                Value::Coll(c) => c,
+                other => panic!("not a collection: {other:?}"),
+            })
+            .collect();
+        assert!(matches!(shapes[0], Bytes(_)), "{:?}", shapes[0]);
+        assert!(matches!(shapes[1], Booleans(_)), "{:?}", shapes[1]);
+        assert!(is_generic(&shapes[2], SType::SShort), "{:?}", shapes[2]);
+        assert!(is_generic(&shapes[3], SType::SInt), "{:?}", shapes[3]);
+        assert!(is_generic(&shapes[4], SType::SLong), "{:?}", shapes[4]);
+        assert!(
+            matches!(&shapes[5], Pairs { ls, rs } if is_generic(ls, SType::SInt) && is_generic(rs, SType::SInt)),
+            "{:?}",
+            shapes[5]
+        );
+        // a Byte SIDE is generic: `fromBoxedPairs` builds it at an abstract type
+        assert!(
+            matches!(&shapes[6], Pairs { ls, rs } if is_generic(ls, SType::SByte) && is_generic(rs, SType::SByte)),
+            "{:?}",
+            shapes[6]
+        );
+        // the inner collections of a `Coll[Coll[Byte]]` are specialised
+        assert!(
+            matches!(&shapes[7], Generic { items, .. }
+                if items.iter().all(|v| matches!(v, Value::Coll(Bytes(_))))),
+            "{:?}",
+            shapes[7]
+        );
+        assert!(
+            matches!(&shapes[8], Pairs { ls, rs }
+                if matches!(**ls, Pairs { .. }) && is_generic(rs, SType::SInt)),
+            "{:?}",
+            shapes[8]
+        );
+    }
+
+    #[test]
+    fn runtime_to_data_normalises() {
+        use crate::mir::constant::Constant;
+        use crate::serialization::SigmaSerializable;
+        for (tpe, lit) in data_collections() {
+            let Value::Coll(coll) = Value::from(lit.clone()) else {
+                panic!("not a collection")
+            };
+            let back = Literal::Coll(CollKind::try_from(coll).unwrap());
+            assert_eq!(back, lit);
+            let bytes = |v: Literal| {
+                Constant {
+                    tpe: tpe.clone(),
+                    v,
+                }
+                .sigma_serialize_bytes()
+                .unwrap()
+            };
+            assert_eq!(bytes(back), bytes(lit));
+        }
+        // a generic `Coll[Byte]` writes back as the native bytes it holds
+        let generic_bytes = generic(SType::SByte, vec![Value::Byte(1), Value::Byte(2)]);
+        assert_eq!(
+            CollKind::try_from(generic_bytes).unwrap(),
+            CollKind::NativeColl(NativeColl::CollByte([1i8, 2].as_slice().into()))
+        );
     }
 
     #[test]
