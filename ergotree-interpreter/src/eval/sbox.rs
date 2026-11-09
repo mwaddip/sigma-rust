@@ -163,10 +163,8 @@ pub(crate) static ID_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
 
 pub(crate) static CREATION_INFO_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(16)?; // ExtractCreationInfo = Fixed(16)
-    Ok(obj
-        .try_extract_into::<Ref<'_, ErgoBox>>()?
-        .creation_info()
-        .into())
+    let ergo_box = obj.try_extract_into::<Ref<'_, ErgoBox>>()?;
+    Ok(super::extract_creation_info::creation_info_value(&ergo_box))
 };
 
 #[allow(clippy::unwrap_used)]

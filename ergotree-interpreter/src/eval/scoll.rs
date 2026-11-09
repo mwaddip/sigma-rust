@@ -11,7 +11,6 @@ use ergotree_ir::mir::expr::Expr;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stuple::STuple;
 use ergotree_ir::types::stype::SType;
-use ergotree_ir::types::stype::SType::SInt;
 
 use super::coll_by_index::item_at;
 use super::coll_map::map_coll;
@@ -195,19 +194,13 @@ pub(crate) static INDICES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         ))),
     }?;
     ctx.add_per_item_jit_cost(20, 2, 16, input_len as u32)?;
-    let indices_i32 = (0..input_len)
-        .map(|i| Ok(Value::Int(i32::try_from(i)?)))
-        .collect::<Result<Arc<[_]>, core::num::TryFromIntError>>();
-    match indices_i32 {
-        Ok(vec_val) => match CollValue::from_collection(SInt, vec_val) {
-            Ok(coll) => Ok(Value::Coll(coll)),
-            Err(e) => Err(EvalError::TryExtractFrom(e)),
-        },
-        Err(e) => Err(EvalError::UnexpectedValue(format!(
-            "Coll length overflow: {0:?}",
-            e
-        ))),
-    }
+    // a specialised `Coll[Int]` from any receiver (`builder.fromArray(toArray.indices.toArray)`,
+    // v6.0.7 `CollsOverArrays.scala:68`)
+    let indices = (0..input_len)
+        .map(i32::try_from)
+        .collect::<Result<Arc<[_]>, core::num::TryFromIntError>>()
+        .map_err(|e| EvalError::UnexpectedValue(format!("Coll length overflow: {0:?}", e)))?;
+    Ok(Value::Coll(CollValue::Ints(indices)))
 };
 
 pub(crate) static PATCH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
