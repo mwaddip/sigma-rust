@@ -54,6 +54,9 @@ lazy_static! {
             CREATION_INFO_METHOD_DESC.clone(),
             TOKENS_METHOD_DESC.clone()
         ]
+        .into_iter()
+        .chain(register_method_descs())
+        .collect()
     ;
 }
 
@@ -200,6 +203,27 @@ lazy_static! {
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
     };
+}
+
+/// `R0` ... `R9`, ids 9-18 at every tree version (v6.0.7 `SBoxMethods.registers(8)`,
+/// `methods.scala:1273-1287`). Like `getRegV5` they carry no explicit type argument, so `T`
+/// stays unresolved; sigmastate parses them and cannot invoke them (its reflective lookup of
+/// a no-argument `R0()` finds nothing), so they have no evaluator.
+fn register_method_descs() -> impl Iterator<Item = SMethodDesc> {
+    ["R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9"]
+        .into_iter()
+        .zip(9u8..)
+        .map(|(name, id)| SMethodDesc {
+            method_id: MethodId(id),
+            name,
+            tpe: SFunc {
+                t_dom: vec![SType::SBox],
+                t_range: SType::SOption(Arc::new(STypeVar::t().into())).into(),
+                tpe_params: vec![],
+            },
+            explicit_type_args: vec![],
+            min_version: ErgoTreeVersion::V0,
+        })
 }
 
 lazy_static! {

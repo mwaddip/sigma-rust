@@ -20,15 +20,62 @@ pub static TYPE_NAME: &str = "Option";
 pub const MAP_METHOD_ID: MethodId = MethodId(7);
 /// Option.filter
 pub const FILTER_METHOD_ID: MethodId = MethodId(8);
+/// Option.isDefined
+pub const IS_DEFINED_METHOD_ID: MethodId = MethodId(2);
+/// Option.get
+pub const GET_METHOD_ID: MethodId = MethodId(3);
+/// Option.getOrElse
+pub const GET_OR_ELSE_METHOD_ID: MethodId = MethodId(4);
 
 lazy_static! {
     /// Option method descriptors
     pub(crate) static ref METHOD_DESC: Vec<SMethodDesc> =
         vec![
+            IS_DEFINED_METHOD_DESC.clone(),
+            GET_METHOD_DESC.clone(),
+            GET_OR_ELSE_METHOD_DESC.clone(),
             MAP_METHOD_DESC.clone(),
             FILTER_METHOD_DESC.clone(),
         ]
     ;
+}
+
+/// `Option[T]` (sigmastate's `SOptionMethods.ThisType`)
+fn option_t() -> SType {
+    SType::SOption(SType::STypeVar(STypeVar::t()).into())
+}
+
+lazy_static! {
+    // sigmastate's `SOptionMethods` ids 2-4, at every tree version (v6.0.7 `methods.scala:750-774`)
+    static ref IS_DEFINED_METHOD_DESC: SMethodDesc = SMethodDesc {
+        method_id: IS_DEFINED_METHOD_ID,
+        name: "isDefined",
+        tpe: SFunc::new(vec![option_t()], SType::SBoolean),
+        explicit_type_args: vec![],
+        min_version: ErgoTreeVersion::V0
+    };
+    static ref GET_METHOD_DESC: SMethodDesc = SMethodDesc {
+        method_id: GET_METHOD_ID,
+        name: "get",
+        tpe: SFunc::new(vec![option_t()], STypeVar::t().into()),
+        explicit_type_args: vec![],
+        min_version: ErgoTreeVersion::V0
+    };
+    static ref GET_OR_ELSE_METHOD_DESC: SMethodDesc = SMethodDesc {
+        method_id: GET_OR_ELSE_METHOD_ID,
+        name: "getOrElse",
+        tpe: SFunc::new(vec![option_t(), STypeVar::t().into()], STypeVar::t().into()),
+        explicit_type_args: vec![],
+        min_version: ErgoTreeVersion::V0
+    };
+    /// Option.isDefined
+    pub static ref IS_DEFINED_METHOD: SMethod =
+        SMethod::new(STypeCompanion::Option, IS_DEFINED_METHOD_DESC.clone());
+    /// Option.get
+    pub static ref GET_METHOD: SMethod = SMethod::new(STypeCompanion::Option, GET_METHOD_DESC.clone());
+    /// Option.getOrElse
+    pub static ref GET_OR_ELSE_METHOD: SMethod =
+        SMethod::new(STypeCompanion::Option, GET_OR_ELSE_METHOD_DESC.clone());
 }
 
 lazy_static! {

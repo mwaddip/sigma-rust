@@ -394,4 +394,32 @@ mod tests {
             "{v2:?}"
         );
     }
+
+    #[test]
+    fn v5_ids_missing_in_rust_parse() {
+        // SANTA `ErgoTree.v5_methods_missing_in_rust.json`, v0 unsized and v3 sized: the JVM
+        // resolves GroupElement 3-4, Box 9-18 and Option 2-4 at every tree version
+        for tree_hex in [
+            "00cddc0703db6a01dd01060101", // proveDlog(g.exp(BigInt 1))
+            "0b0ccddc0703db6a01dd01060101",
+            "00cddc0704db6a01dd01db6a01dd", // proveDlog(g.multiply(g))
+            "0b0dcddc0704db6a01dd01db6a01dd",
+            "00d1e6db6309a7", // sigmaProp(SELF.R0.isDefined)
+            "0b06d1e6db6309a7",
+            "00d1e6db630da7", // sigmaProp(SELF.R4.isDefined)
+            "0b06d1e6db630da7",
+            "00d1db2402e30104", // sigmaProp(getVar[Int](1).isDefined)
+            "0b07d1db2402e30104",
+            "00d1db2403e30101", // sigmaProp(getVar[Boolean](1).get)
+            "0b07d1db2403e30101",
+            "00d1dc2404e30101010101", // sigmaProp(getVar[Boolean](1).getOrElse(true))
+            "0b0ad1dc2404e30101010101",
+        ] {
+            assert_parsed_tree_round_trips(tree_hex);
+        }
+        // SELF.R0 ... SELF.R9
+        for id in 0x09u8..=0x12 {
+            assert_expr_parses_from(&alloc::format!("db63{id:02x}a7"), ErgoTreeVersion::V0);
+        }
+    }
 }
