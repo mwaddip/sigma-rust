@@ -15,16 +15,21 @@ impl Evaluable for OptionGet {
     ) -> Result<Value<'ctx>, EvalError> {
         ctx.add_jit_cost(15)?; // OptionGet = Fixed(15)
         let v = self.input.eval(env, ctx)?;
-        match v {
-            Value::Opt(opt_v) => opt_v
-                .as_deref()
-                .ok_or_else(|| EvalError::NotFound("calling Option.get on None".to_string()))
-                .cloned(),
-            _ => Err(EvalError::UnexpectedExpr(format!(
-                "Don't know how to eval OptM: {0:?}",
-                self
-            ))),
-        }
+        option_get(v)
+    }
+}
+
+/// `OptionGet`'s value: the option's value, failing on `None`; shared with the `Option.get`
+/// method
+pub(crate) fn option_get<'ctx>(v: Value<'ctx>) -> Result<Value<'ctx>, EvalError> {
+    match v {
+        Value::Opt(opt_v) => opt_v
+            .as_deref()
+            .ok_or_else(|| EvalError::NotFound("calling Option.get on None".to_string()))
+            .cloned(),
+        _ => Err(EvalError::UnexpectedValue(format!(
+            "Option.get: expected Option, found {v:?}"
+        ))),
     }
 }
 

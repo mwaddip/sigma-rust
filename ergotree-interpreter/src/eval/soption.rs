@@ -7,8 +7,29 @@ use alloc::vec::Vec;
 use ergotree_ir::mir::value::Value;
 
 use super::env::Env;
+use super::option_get::option_get;
 use super::Context;
+use super::EvalFn;
 use super::MethodCallSite;
+
+/// `Option.isDefined` (id 2): sigmastate calls `Option.isDefined` reflectively at
+/// `OptionIsDefined`'s fixed cost (`invokeFixed`, v6.0.7 `methods.scala:750`)
+pub(crate) static IS_DEFINED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+    ctx.add_jit_cost(10)?;
+    match obj {
+        Value::Opt(opt) => Ok(Value::Boolean(opt.is_some())),
+        _ => Err(EvalError::UnexpectedValue(format!(
+            "isDefined: expected Option, found {obj:?}"
+        ))),
+    }
+};
+
+/// `Option.get` (id 3): sigmastate calls `Option.get` reflectively at `OptionGet`'s fixed cost
+/// (`methods.scala:758`); on `None` it throws
+pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+    ctx.add_jit_cost(15)?;
+    option_get(obj)
+};
 
 pub fn map_eval<'ctx>(
     _mc: &MethodCallSite<'_>,

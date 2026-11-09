@@ -667,6 +667,8 @@ fn smethod_eval_fn(method: &SMethod) -> Result<EvalFn, EvalError> {
         soption::TYPE_CODE => match method.method_id() {
             soption::MAP_METHOD_ID => self::soption::map_eval,
             soption::FILTER_METHOD_ID => self::soption::filter_eval,
+            soption::IS_DEFINED_METHOD_ID => self::soption::IS_DEFINED_EVAL_FN,
+            soption::GET_METHOD_ID => self::soption::GET_EVAL_FN,
             method_id => {
                 return Err(EvalError::NotFound(format!(
                     "Eval fn: unknown method id in SOption: {:?}",

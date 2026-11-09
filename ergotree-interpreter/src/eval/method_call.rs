@@ -302,4 +302,60 @@ mod jvm_method_rows {
             assert_evaluator_refuses(tree_hex);
         }
     }
+
+    #[test]
+    fn v5_missing_accept_rows() {
+        use ergo_chain_types::EcPoint;
+        // groupGenerator.exp(BigInt 5) @928, groupGenerator.multiply(groupGenerator) @82
+        for (tree_hex, point_hex, cost) in [
+            (
+                "0b0bdc0703db6a01dd01060105",
+                "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+                928,
+            ),
+            (
+                "0b0cdc0704db6a01dd01db6a01dd",
+                "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+                82,
+            ),
+        ] {
+            let (_, res, c) = eval_v3_body(tree_hex);
+            let point = res.unwrap().try_extract_into::<EcPoint>().unwrap();
+            assert_eq!(
+                base16::encode_lower(&point.sigma_serialize_bytes().unwrap()),
+                point_hex
+            );
+            assert_eq!(c, cost, "{tree_hex}");
+        }
+        // Global.some[Int](5).isDefined, Global.none[Int].isDefined, Global.some[Int](5).get
+        assert_accepts("0b0bdb2402dc6a09dd01040a04", Value::Boolean(true), 33);
+        assert_accepts("0b08db2402db6a0add04", Value::Boolean(false), 28);
+        assert_accepts("0b0bdb2403dc6a09dd01040a04", Value::Int(5), 38);
+    }
+
+    #[test]
+    fn v5_missing_and_sigmaprop_errored_rows() {
+        // SELF.R0.isDefined, SELF.R4.isDefined (no `R0()` to invoke), none.get (throws
+        // inside), some(5).getOrElse(9), none.getOrElse(9) (no `getOrElse(int)`), propBytes,
+        // isProven (no `_eval`), 1.toBigInt (no cost kind)
+        for tree_hex in [
+            "0b05e6db6309a7",
+            "0b05e6db630da7",
+            "0b08db2403db6a0add04",
+            "0b0edc2404dc6a09dd01040a04010412",
+            "0b0bdc2404db6a0add04010412",
+            "0b0bd191b1db0801d101010400",
+            "0b07d1db0802d10101",
+            "0b05db04050402",
+        ] {
+            assert!(eval_v3_body(tree_hex).1.is_err(), "{tree_hex}");
+        }
+    }
+
+    #[test]
+    fn option_new_evaluators_check_their_receiver() {
+        // isDefined and get on Coll(1, 2)
+        assert_evaluator_refuses("0b0adb240283020404020404");
+        assert_evaluator_refuses("0b0adb240383020404020404");
+    }
 }
