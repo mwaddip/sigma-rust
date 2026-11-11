@@ -1,6 +1,6 @@
 use crate::eval::EvalError;
 use alloc::boxed::Box;
-use alloc::{string::ToString, sync::Arc};
+use alloc::string::ToString;
 
 use ergo_chain_types::autolykos_pow_scheme::{decode_compact_bits, encode_compact_bits};
 use ergotree_ir::mir::constant::literal_of_type;
@@ -21,10 +21,6 @@ use crate::eval::Vec;
 use ergo_chain_types::{autolykos_pow_scheme::AutolykosPowScheme, ec_point::generator};
 use ergotree_ir::bigint256::BigInt256;
 use ergotree_ir::types::stype::SType;
-
-fn helper_xor(x: &[i8], y: &[i8]) -> Arc<[i8]> {
-    x.iter().zip(y.iter()).map(|(x1, x2)| *x1 ^ *x2).collect()
-}
 
 pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(10)?;
@@ -54,20 +50,9 @@ pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::NotFound("xor: missing left arg".to_string()))?;
 
-    // the bytes of any `Coll[Byte]`, specialised or generic (sigmastate reads `toArray`)
-    match (
-        left_v.clone().try_extract_into::<Vec<i8>>(),
-        right_v.clone().try_extract_into::<Vec<i8>>(),
-    ) {
-        (Ok(l_byte), Ok(r_byte)) => {
-            let xor = helper_xor(&l_byte, &r_byte);
-            Ok(CollValue::Bytes(xor).into())
-        }
-        _ => Err(EvalError::UnexpectedValue(format!(
-            "expected Xor input to be byte array, got: {0:?}",
-            (left_v, right_v)
-        ))),
-    }
+    // `xor_eval` is `Xor.xorWithCosting` (v6.0.6 `methods.scala:1917-1920`): the node's reading
+    // of its operands
+    Ok(CollValue::Bytes(super::xor::xor_colls(&left_v, &right_v)?).into())
 };
 
 pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
