@@ -785,8 +785,10 @@ pub mod test_util {
     ) -> (Expr, Result<Value<'static>, EvalError>, u64) {
         let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
         assert_eq!(bytes[0], 0x0b, "{tree_hex}");
-        assert!(bytes[1] < 0x80, "{tree_hex}");
-        let expr = from_bytes(&bytes[2..])
+        // the size: one VLQ byte, or two
+        let root = if bytes[1] < 0x80 { 2 } else { 3 };
+        assert!(bytes[root - 1] < 0x80, "{tree_hex}");
+        let expr = from_bytes(&bytes[root..])
             .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
             .unwrap();
         ctx.activated_script_version_byte = 3;

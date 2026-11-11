@@ -7,7 +7,7 @@ use ergotree_ir::mir::constant::literal_of_type;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
 use ergotree_ir::unsignedbigint256::UnsignedBigInt;
 use ergotree_ir::{
-    mir::{coll_value::CollValue, constant::TryExtractInto, value::Value},
+    mir::{constant::TryExtractInto, value::Value},
     serialization::{
         data::DataSerializer,
         sigma_byte_reader::{self, SigmaByteRead},
@@ -34,7 +34,6 @@ pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args|
 };
 
 pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(10)?;
     if obj != Value::Global {
         return Err(EvalError::UnexpectedValue(format!(
             "sglobal.xor expected obj to be Value::Global, got {:?}",
@@ -50,9 +49,9 @@ pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::NotFound("xor: missing left arg".to_string()))?;
 
-    // `xor_eval` is `Xor.xorWithCosting` (v6.0.6 `methods.scala:1917-1920`): the node's reading
-    // of its operands
-    Ok(CollValue::Bytes(super::xor::xor_colls(&left_v, &right_v)?).into())
+    // `xor_eval` is `Xor.xorWithCosting` (v6.0.6 `methods.scala:1917-1920`): the node's cost
+    // and its reading of its operands
+    super::xor::xor_with_costing(ctx, &left_v, &right_v)
 };
 
 pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {

@@ -14,12 +14,7 @@ use crate::eval::Evaluable;
 /// collection passes, a tuple of bytes (a `Coll[Any]`) included, where the hashes need a
 /// `byte[]`; `zip` cuts both to the shorter length, and each paired item is unboxed as a `Byte`,
 /// so another item among those is an error (SANTA `Tuple.non_pair_value_ops` #36-#39)
-pub(crate) fn xor_colls(left: &Value<'_>, right: &Value<'_>) -> Result<Arc<[i8]>, EvalError> {
-    let (Value::Coll(left), Value::Coll(right)) = (left, right) else {
-        return Err(EvalError::UnexpectedValue(format!(
-            "Xor: expected two collections, got: {left:?} and {right:?}"
-        )));
-    };
+fn xor_colls(left: &CollValue<'_>, right: &CollValue<'_>) -> Result<Arc<[i8]>, EvalError> {
     let byte = |coll: &CollValue<'_>, i: usize| match coll.get_val(i) {
         Some(Value::Byte(b)) => Ok(b),
         other => Err(EvalError::UnexpectedValue(format!(
@@ -31,6 +26,25 @@ pub(crate) fn xor_colls(left: &Value<'_>, right: &Value<'_>) -> Result<Arc<[i8]>
         .collect()
 }
 
+/// sigmastate's `Xor.xorWithCosting` (v6.0.6 `trees.scala:1021-1025`), which the `Xor` node and
+/// the `Global.xor` method share (`xorMethod`'s cost kind is `Xor.costKind`,
+/// `methods.scala:1876-1877`, and `xor_eval` calls it, `:1917-1920`): the per-item cost
+/// `PerItemCost(10, 2, 128)` on the SHORTER operand's length, then [`xor_colls`]. SANTA
+/// `Xor.per_item_cost_base`: 129 bytes against 1 costs what 1 against 129 does
+pub(crate) fn xor_with_costing<'ctx>(
+    ctx: &Context<'ctx>,
+    left: &Value<'ctx>,
+    right: &Value<'ctx>,
+) -> Result<Value<'ctx>, EvalError> {
+    let (Value::Coll(left), Value::Coll(right)) = (left, right) else {
+        return Err(EvalError::UnexpectedValue(format!(
+            "Xor: expected two collections, got: {left:?} and {right:?}"
+        )));
+    };
+    ctx.add_per_item_jit_cost(10, 2, 128, left.len().min(right.len()) as u32)?;
+    Ok(CollValue::Bytes(xor_colls(left, right)?).into())
+}
+
 impl Evaluable for Xor {
     fn eval<'ctx>(
         &self,
@@ -39,13 +53,7 @@ impl Evaluable for Xor {
     ) -> Result<Value<'ctx>, EvalError> {
         let left_v = self.left.eval(env, ctx)?;
         let right_v = self.right.eval(env, ctx)?;
-        let left_len = match &left_v {
-            Value::Coll(coll) => coll.len(),
-            _ => 0,
-        };
-        let xor = xor_colls(&left_v, &right_v)?;
-        ctx.add_per_item_jit_cost(10, 2, 128, left_len as u32)?;
-        Ok(CollValue::Bytes(xor).into())
+        xor_with_costing(ctx, &left_v, &right_v)
     }
 }
 
@@ -79,15 +87,54 @@ mod interface_rows {
 
     #[test]
     fn global_xor_reads_a_tuple_of_bytes() {
-        // Global.xor over the same operands, in both argument positions: the value. Its cost
-        // is not asserted here: SANTA's sweep measured 31, and the method's cost base is its
-        // own change
+        // Global.xor over the same operands, in both argument positions, at the plain
+        // collection's cost (SANTA's sweep: 31)
         for tree_hex in [
             "0b11dc6a02dd02480202020102030e03090909",
             "0b11dc6a02dd020e0309090948020202010203",
         ] {
-            let (_, res, _) = eval_v3_body(tree_hex);
-            assert_eq!(res.unwrap(), bytes(&[8, 11, 10]), "{tree_hex}");
+            assert_accepts(tree_hex, bytes(&[8, 11, 10]), 31);
+        }
+    }
+
+    /// A v3 tree whose root is `prefix` followed by two `Coll[Byte]` constants: `left` bytes of
+    /// 1 and `right` bytes of 2
+    fn xor_tree(prefix: &str, left: usize, right: usize) -> alloc::string::String {
+        let coll = |len: usize, byte: &str| {
+            let size = if len < 0x80 {
+                alloc::format!("{len:02x}")
+            } else {
+                alloc::format!("{:02x}{:02x}", (len & 0x7f) | 0x80, len >> 7)
+            };
+            alloc::format!("0e{size}{}", byte.repeat(len))
+        };
+        let body = alloc::format!("{prefix}{}{}", coll(left, "01"), coll(right, "02"));
+        let len = body.len() / 2;
+        let size = if len < 0x80 {
+            alloc::format!("{len:02x}")
+        } else {
+            alloc::format!("{:02x}{:02x}", (len & 0x7f) | 0x80, len >> 7)
+        };
+        alloc::format!("0b{size}{body}")
+    }
+
+    #[test]
+    fn the_per_item_cost_is_on_the_shorter_operand() {
+        // SANTA `Xor.per_item_cost_base` (sigma-state 6.0.7): one chunk of 128 bytes; the node
+        // 22 up to 128 and 24 from 129, the method 9 above it; 129 against 1 costs what 1
+        // against 129 does, in both forms
+        assert_eq!(xor_tree("9b", 1, 1), "0b079b0e01010e0102");
+        assert_eq!(xor_tree("dc6a02dd02", 1, 1), "0b0bdc6a02dd020e01010e0102");
+        for (left, right, node, method) in [
+            (1, 1, 22, 31),
+            (128, 128, 22, 31),
+            (129, 129, 24, 33),
+            (129, 1, 22, 31),
+            (1, 129, 22, 31),
+        ] {
+            let threes = alloc::vec![3i8; left.min(right)];
+            assert_accepts(&xor_tree("9b", left, right), bytes(&threes), node);
+            assert_accepts(&xor_tree("dc6a02dd02", left, right), bytes(&threes), method);
         }
     }
 }
