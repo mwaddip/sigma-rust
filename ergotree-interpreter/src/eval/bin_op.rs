@@ -67,22 +67,76 @@ where
         .map(|t| t.into()) // convert T to Value
 }
 
+/// `/` and `%` as the operand type's entry of sigmastate's table does them (`Division`:
+/// `impl.i.quot`, `Modulo`: `impl.i.divisionRemainder`, v6.0.6 `trees.scala:792`, `:809`).
+/// `None` is the JVM's throw
+trait JvmDivision: Sized {
+    fn jvm_quot(&self, divisor: &Self) -> Option<Self>;
+    fn jvm_rem(&self, divisor: &Self) -> Option<Self>;
+}
+
+/// `Byte`, `Short`, `Int` and `Long` divide with Scala's own `Integral.quot` and `rem`: their
+/// `ExactIntegral` instances override neither (`ExactIntegral.scala:22`, `:30`, the instances
+/// from `:36`). That is the JVM's plain division: only a zero divisor throws, `MIN / -1` wraps
+/// to `MIN` and `MIN % -1` is 0 (SANTA `ArithOp.division_overflow`). The zero check comes
+/// first: Rust's wrapping division panics on a zero divisor
+macro_rules! impl_jvm_division_fixed_width {
+    ($($t:ty),*) => {$(
+        impl JvmDivision for $t {
+            fn jvm_quot(&self, divisor: &Self) -> Option<Self> {
+                if *divisor == 0 {
+                    return None;
+                }
+                Some(self.wrapping_div(*divisor))
+            }
+            fn jvm_rem(&self, divisor: &Self) -> Option<Self> {
+                if *divisor == 0 {
+                    return None;
+                }
+                Some(self.wrapping_rem(*divisor))
+            }
+        }
+    )*};
+}
+impl_jvm_division_fixed_width!(i8, i16, i32, i64);
+
+/// `BigInt` has its own `quot` and `divisionRemainder` (`BigIntegerOps.scala:81`, `:97`), kept
+/// in `BigInt256`'s checked operations
+impl JvmDivision for BigInt256 {
+    fn jvm_quot(&self, divisor: &Self) -> Option<Self> {
+        self.checked_div(divisor)
+    }
+    fn jvm_rem(&self, divisor: &Self) -> Option<Self> {
+        self.checked_rem(divisor)
+    }
+}
+
+/// `UnsignedBigInt` has its own too (`UnsignedBigIntegerOps.scala:71`, `:87`)
+impl JvmDivision for UnsignedBigInt {
+    fn jvm_quot(&self, divisor: &Self) -> Option<Self> {
+        self.checked_div(divisor)
+    }
+    fn jvm_rem(&self, divisor: &Self) -> Option<Self> {
+        self.checked_rem(divisor)
+    }
+}
+
 fn eval_div<'ctx, T>(lv_raw: T, rv_raw: T) -> Result<Value<'ctx>, EvalError>
 where
-    T: Num + CheckedDiv + Into<Value<'ctx>> + core::fmt::Display,
+    T: Num + JvmDivision + Into<Value<'ctx>> + core::fmt::Display,
 {
     lv_raw
-        .checked_div(&rv_raw)
+        .jvm_quot(&rv_raw)
         .ok_or_else(|| arithmetic_err("/", lv_raw, rv_raw, "exception"))
         .map(|t| t.into()) // convert T to Value
 }
 
 fn eval_mod<'ctx, T>(lv_raw: T, rv_raw: T) -> Result<Value<'ctx>, EvalError>
 where
-    T: Num + CheckedRem + Into<Value<'ctx>> + core::fmt::Display,
+    T: Num + JvmDivision + Into<Value<'ctx>> + core::fmt::Display,
 {
     lv_raw
-        .checked_rem(&rv_raw)
+        .jvm_rem(&rv_raw)
         .ok_or_else(|| arithmetic_err("%", lv_raw, rv_raw, "exception"))
         .map(|t| t.into()) // convert T to Value
 }
@@ -143,8 +197,7 @@ where
         + CheckedAdd
         + CheckedSub
         + CheckedMul
-        + CheckedDiv
-        + CheckedRem
+        + JvmDivision
         + Ord
         + TryExtractFrom<Value<'ctx>>
         + Into<Value<'ctx>>
@@ -164,7 +217,6 @@ where
         ArithOp::Plus => eval_plus(lv_raw, rv_raw),
         ArithOp::Minus => eval_minus(lv_raw, rv_raw),
         ArithOp::Multiply => eval_mul(lv_raw, rv_raw),
-        // MIN / -1 can overflow
         ArithOp::Divide => eval_div(lv_raw, rv_raw),
         ArithOp::Modulo => eval_mod(lv_raw, rv_raw),
         ArithOp::Max => Ok(lv_raw.max(rv_raw).into()),
@@ -380,6 +432,130 @@ mod arith_op_type_tests {
             ("009d04020400", None),
             ("0b0e9a04feffffffffffffffff010402", None),
             ("009a04feffffffffffffffff010402", None),
+        ]);
+    }
+
+    #[test]
+    fn santa_division_overflow_rows() {
+        // SANTA `ArithOp.division_overflow` (`67da856`, sigma-state 6.0.7), each script as a v3
+        // sized tree and a v0 tree: the fixed-width types divide with the JVM's plain division,
+        // so `MIN / -1` is `MIN`, `MIN % -1` is 0, and only a zero divisor throws
+        assert_trees(&[
+            // Q0 `7 / 2`, the control
+            ("0b059d040e0404", Some((Value::Int(3), 25))),
+            ("009d040e0404", Some((Value::Int(3), 25))),
+            // Q1 `Int.MinValue / -1`
+            (
+                "0b0e9d04ffffffffffffffffff010401",
+                Some((Value::Int(i32::MIN), 25)),
+            ),
+            (
+                "009d04ffffffffffffffffff010401",
+                Some((Value::Int(i32::MIN), 25)),
+            ),
+            // Q2 `Int.MinValue % -1`
+            (
+                "0b0e9e04ffffffffffffffffff010401",
+                Some((Value::Int(0), 25)),
+            ),
+            ("009e04ffffffffffffffffff010401", Some((Value::Int(0), 25))),
+            // Q3 `Long.MinValue / -1L`
+            (
+                "0b0e9d05ffffffffffffffffff010501",
+                Some((Value::Long(i64::MIN), 25)),
+            ),
+            (
+                "009d05ffffffffffffffffff010501",
+                Some((Value::Long(i64::MIN), 25)),
+            ),
+            // Q5 `Long.MinValue % -1L`
+            (
+                "0b0e9e05ffffffffffffffffff010501",
+                Some((Value::Long(0), 25)),
+            ),
+            ("009e05ffffffffffffffffff010501", Some((Value::Long(0), 25))),
+            // Q4 `(-128: Byte) / (-1: Byte)`
+            ("0b059d028002ff", Some((Value::Byte(i8::MIN), 25))),
+            ("009d028002ff", Some((Value::Byte(i8::MIN), 25))),
+            // Q6 `(-128: Byte) % (-1: Byte)`
+            ("0b059e028002ff", Some((Value::Byte(0), 25))),
+            ("009e028002ff", Some((Value::Byte(0), 25))),
+            // Q7 `Short.MinValue / (-1: Short)`
+            ("0b079d03ffff030301", Some((Value::Short(i16::MIN), 25))),
+            ("009d03ffff030301", Some((Value::Short(i16::MIN), 25))),
+            // Q8 `Short.MinValue % (-1: Short)`
+            ("0b079e03ffff030301", Some((Value::Short(0), 25))),
+            ("009e03ffff030301", Some((Value::Short(0), 25))),
+            // Z1 `7 / 0`
+            ("0b059d040e0400", None),
+            ("009d040e0400", None),
+            // Z2 `7 % 0`
+            ("0b059e040e0400", None),
+            ("009e040e0400", None),
+        ]);
+    }
+
+    #[test]
+    fn a_zero_divisor_is_an_error_at_every_width() {
+        // By reading: the JVM's division throws `ArithmeticException` on a zero divisor whatever
+        // the dividend (SANTA measured `7 / 0` and `7 % 0`). `MIN / 0` and `MIN % 0` at each
+        // width: an error here, and not the panic of a wrapping division by zero
+        assert_trees(&[
+            // Byte
+            ("0b059d02800200", None),
+            ("009d02800200", None),
+            ("0b059e02800200", None),
+            ("009e02800200", None),
+            // Short
+            ("0b079d03ffff030300", None),
+            ("009d03ffff030300", None),
+            ("0b079e03ffff030300", None),
+            ("009e03ffff030300", None),
+            // Int
+            ("0b0e9d04ffffffffffffffffff010400", None),
+            ("009d04ffffffffffffffffff010400", None),
+            ("0b0e9e04ffffffffffffffffff010400", None),
+            ("009e04ffffffffffffffffff010400", None),
+            // Long
+            ("0b0e9d05ffffffffffffffffff010500", None),
+            ("009d05ffffffffffffffffff010500", None),
+            ("0b0e9e05ffffffffffffffffff010500", None),
+            ("009e05ffffffffffffffffff010500", None),
+        ]);
+    }
+
+    #[test]
+    fn division_keeps_its_other_values() {
+        // sigma-rust's own values and costs at `e922604d`, not JVM measurements: every pair
+        // other than `(MIN, -1)` divides as it did
+        let i = |v, cost| Some((Value::Int(v), cost));
+        assert_trees(&[
+            // `Int.MinValue / 1`
+            ("0b0e9d04ffffffffffffffffff010402", i(i32::MIN, 25)),
+            // `Int.MinValue % 1`
+            ("0b0e9e04ffffffffffffffffff010402", i(0, 25)),
+            // `-1 / Int.MinValue`
+            ("0b0e9d040104ffffffffffffffffff01", i(0, 25)),
+            // `Int.MinValue / Int.MinValue`
+            (
+                "0b179d04ffffffffffffffffff0104ffffffffffffffffff01",
+                i(1, 25),
+            ),
+            // `Int.MinValue % Int.MinValue`
+            (
+                "0b179e04ffffffffffffffffff0104ffffffffffffffffff01",
+                i(0, 25),
+            ),
+            // `-7 / 2`
+            ("0b059d040d0404", i(-3, 25)),
+            // `-7 % 2`
+            ("0b059e040d0404", i(-1, 25)),
+            // `7 % -2`
+            ("0b059e040e0403", i(1, 25)),
+            // `7 / -1`
+            ("0b059d040e0401", i(-7, 25)),
+            // `7 % -1`
+            ("0b059e040e0401", i(0, 25)),
         ]);
     }
 
@@ -892,6 +1068,24 @@ mod tests {
     }
 
     #[test]
+    fn the_minimum_divided_by_minus_one_wraps_at_every_width() {
+        // SANTA `ArithOp.division_overflow` (sigma-state 6.0.7): the JVM returns `MIN` and 0 at
+        // `Byte`, `Short`, `Int` and `Long`. The zero divisor is by reading at `MIN`
+        macro_rules! check {
+            ($t:ty) => {{
+                assert_eq!(eval_arith_op(ArithOp::Divide, <$t>::MIN, -1), Ok(<$t>::MIN));
+                assert_eq!(eval_arith_op(ArithOp::Modulo, <$t>::MIN, -1), Ok(0));
+                assert!(eval_arith_op(ArithOp::Divide, <$t>::MIN, 0).is_err());
+                assert!(eval_arith_op(ArithOp::Modulo, <$t>::MIN, 0).is_err());
+            }};
+        }
+        check!(i8);
+        check!(i16);
+        check!(i32);
+        check!(i64);
+    }
+
+    #[test]
     fn test_bigint_extremes() {
         let b = BigInt256::from;
         // Our BigInt should behave like a 256 bit signed (two's complement) integer according to
@@ -954,8 +1148,8 @@ mod tests {
             prop_assert_eq!(eval_arith_op(ArithOp::Plus, l, r).ok(), l.checked_add(r));
             prop_assert_eq!(eval_arith_op(ArithOp::Minus, l, r).ok(), l.checked_sub(r));
             prop_assert_eq!(eval_arith_op(ArithOp::Multiply, l, r).ok(), l.checked_mul(r));
-            prop_assert_eq!(eval_arith_op(ArithOp::Divide, l, r).ok(), l.checked_div(r));
-            prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), l.checked_rem(r));
+            prop_assert_eq!(eval_arith_op(ArithOp::Divide, l, r).ok(), (r != 0).then(|| l.wrapping_div(r)));
+            prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), (r != 0).then(|| l.wrapping_rem(r)));
             prop_assert_eq!(eval_arith_op::<i64>(ArithOp::Max, l, r).unwrap(), l.max(r));
             prop_assert_eq!(eval_arith_op::<i64>(ArithOp::Min, l, r).unwrap(), l.min(r));
 
@@ -971,8 +1165,8 @@ mod tests {
             prop_assert_eq!(eval_arith_op(ArithOp::Plus, l, r).ok(), l.checked_add(r));
             prop_assert_eq!(eval_arith_op(ArithOp::Minus, l, r).ok(), l.checked_sub(r));
             prop_assert_eq!(eval_arith_op(ArithOp::Multiply, l, r).ok(), l.checked_mul(r));
-            prop_assert_eq!(eval_arith_op(ArithOp::Divide, l, r).ok(), l.checked_div(r));
-            prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), l.checked_rem(r));
+            prop_assert_eq!(eval_arith_op(ArithOp::Divide, l, r).ok(), (r != 0).then(|| l.wrapping_div(r)));
+            prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), (r != 0).then(|| l.wrapping_rem(r)));
             prop_assert_eq!(eval_arith_op::<i32>(ArithOp::Max, l, r).unwrap(), l.max(r));
             prop_assert_eq!(eval_arith_op::<i32>(ArithOp::Min, l, r).unwrap(), l.min(r));
 
@@ -988,8 +1182,8 @@ mod tests {
             prop_assert_eq!(eval_arith_op(ArithOp::Plus, l, r).ok(), l.checked_add(r));
             prop_assert_eq!(eval_arith_op(ArithOp::Minus, l, r).ok(), l.checked_sub(r));
             prop_assert_eq!(eval_arith_op(ArithOp::Multiply, l, r).ok(), l.checked_mul(r));
-            prop_assert_eq!(eval_arith_op(ArithOp::Divide, l, r).ok(), l.checked_div(r));
-            prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), l.checked_rem(r));
+            prop_assert_eq!(eval_arith_op(ArithOp::Divide, l, r).ok(), (r != 0).then(|| l.wrapping_div(r)));
+            prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), (r != 0).then(|| l.wrapping_rem(r)));
             prop_assert_eq!(eval_arith_op::<i16>(ArithOp::Max, l, r).unwrap(), l.max(r));
             prop_assert_eq!(eval_arith_op::<i16>(ArithOp::Min, l, r).unwrap(), l.min(r));
 
@@ -1005,8 +1199,8 @@ mod tests {
             prop_assert_eq!(eval_arith_op(ArithOp::Plus, l, r).ok(), l.checked_add(r));
             prop_assert_eq!(eval_arith_op(ArithOp::Minus, l, r).ok(), l.checked_sub(r));
             prop_assert_eq!(eval_arith_op(ArithOp::Multiply, l, r).ok(), l.checked_mul(r));
-            prop_assert_eq!(eval_arith_op(ArithOp::Divide, l, r).ok(), l.checked_div(r));
-            prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), l.checked_rem(r));
+            prop_assert_eq!(eval_arith_op(ArithOp::Divide, l, r).ok(), (r != 0).then(|| l.wrapping_div(r)));
+            prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), (r != 0).then(|| l.wrapping_rem(r)));
             prop_assert_eq!(eval_arith_op::<i8>(ArithOp::Max, l, r).unwrap(), l.max(r));
             prop_assert_eq!(eval_arith_op::<i8>(ArithOp::Min, l, r).unwrap(), l.min(r));
 
