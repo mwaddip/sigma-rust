@@ -5,7 +5,6 @@ use core::fmt::Display;
 use ergotree_ir::ergo_tree::ErgoTree;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::constant::TryExtractInto;
-use ergotree_ir::serialization::SigmaSerializable;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
 use snumeric::numeric_method_evalfn;
 
@@ -332,13 +331,15 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
     // This is the rare path — most scripts don't have deserialize nodes.
     if tree.has_deserialize() {
         // The JVM charges the deserialize-substitution pass proportionally to
-        // the serialized tree size: `ergoTree.bytes.length * CostPerTreeByte(2)`
-        // block cost (`Interpreter.reductionWithDeserialize`). The charge is
+        // the tree's size: `ergoTree.bytes.length * CostPerTreeByte(2)`
+        // block cost (`Interpreter.reductionWithDeserialize`, `Interpreter.scala:246`).
+        // `ergoTree.bytes` is the bytes the tree was read from, whatever their
+        // encoding (`ErgoTree.scala:123-130`), not the tree written again. The charge is
         // limit-checked in all eras; since V6 activation it is also included
         // in the reported cost, while pre-V6 the JVM excludes it from the
         // result (it passes the un-bumped context on) — mirror by rolling the
         // accumulator back after the limit check.
-        let subst_cost_jit = tree.sigma_serialize_bytes()?.len() as u64 * 20; // 2 block × 10 jit/block
+        let subst_cost_jit = tree.bytes()?.len() as u64 * 20; // 2 block × 10 jit/block
         ctx.add_jit_cost(subst_cost_jit)?;
         if ctx.activated_script_version() < ErgoTreeVersion::V3 {
             ctx.jit_cost

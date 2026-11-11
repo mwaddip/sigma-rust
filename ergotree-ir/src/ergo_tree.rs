@@ -15,6 +15,7 @@ use crate::types::stype::SType;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use sigma_ser::vlq_encode::WriteSigmaVlqExt;
@@ -39,6 +40,24 @@ pub struct ParsedErgoTree {
     root: Expr,
     #[cfg(feature = "std")]
     has_deserialize: OnceLock<bool>,
+    /// The bytes this tree was read from; a tree built in memory has none
+    kept: Option<KeptBytes>,
+}
+
+/// The bytes a parsed tree was read from, from its first byte to the end of its body:
+/// sigmastate's `ErgoTree.propositionBytes` (v6.0.6 `ErgoTreeSerializer.scala:178-185`). They are
+/// no part of a tree's identity (`ErgoTree.scala:219-225`), and clones share them.
+#[derive(PartialEq, Eq, Clone)]
+struct KeptBytes {
+    bytes: Arc<[u8]>,
+    /// Offset in `bytes` of the root's first byte, after the header, the size and the constants
+    root_start: usize,
+}
+
+impl core::fmt::Debug for KeptBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "KeptBytes({} bytes)", self.bytes.len())
+    }
 }
 
 impl ParsedErgoTree {
@@ -49,8 +68,10 @@ impl ParsedErgoTree {
         if let Some(old_constant) = self.constants.get(index) {
             if constant.tpe == old_constant.tpe {
                 let _ = core::mem::replace(&mut new_constants[index], constant);
+                // a changed tree is no longer the one that was read
                 Ok(Self {
                     constants: new_constants,
+                    kept: None,
                     ..self
                 })
             } else {
@@ -68,8 +89,14 @@ impl ParsedErgoTree {
         }
     }
 
+    /// The root as the tree's writer writes it, under the tree's own version: what sigmastate's
+    /// `template` cuts out of the bytes of a tree built in memory (`ErgoTree.scala:95`,
+    /// `:168-171`)
     fn template_bytes(&self) -> Result<Vec<u8>, ErgoTreeError> {
-        Ok(self.root.sigma_serialize_bytes()?)
+        let mut data = Vec::new();
+        let mut w = SigmaByteWriter::new(&mut data, None);
+        w.with_tree_version(self.header.version(), |w| self.root.sigma_serialize(w))?;
+        Ok(data)
     }
 }
 
@@ -154,12 +181,13 @@ impl ErgoTree {
         r: &mut R,
         header: ErgoTreeHeader,
         check_root_tpe: bool,
-    ) -> Result<ParsedErgoTree, ErgoTreeError> {
+    ) -> Result<(ParsedErgoTree, u64), ErgoTreeError> {
         let constants = if header.is_constant_segregation() {
             ErgoTree::sigma_parse_constants(r)?
         } else {
             vec![]
         };
+        let root_pos = r.position()?;
         let previous_store =
             core::mem::replace(r.constant_store(), ConstantStore::new(constants.clone()));
         let was_deserialize = r.was_deserialize();
@@ -180,13 +208,15 @@ impl ErgoTree {
             }
         }
         r.set_constant_store(previous_store);
-        Ok(ParsedErgoTree {
+        let tree = ParsedErgoTree {
             header,
             constants,
             root,
             #[cfg(feature = "std")]
             has_deserialize: has_deserialize.into(),
-        })
+            kept: None,
+        };
+        Ok((tree, root_pos))
     }
 
     /// Shared parse body for [`ErgoTree::sigma_parse`] (strict, `check_root_tpe =
@@ -234,7 +264,20 @@ impl ErgoTree {
                 ErgoTree::sigma_parse_body(r, header, check_root_tpe),
                 tree_size,
             ) {
-                (Ok(parsed_tree), _) => Ok(parsed_tree.into()),
+                (Ok((mut parsed_tree, root_pos)), _) => {
+                    // sigmastate reads the tree's own span back once the body parsed, from the
+                    // tree's first byte to where the body ended (`:178-181`). The declared
+                    // size plays no part in it.
+                    let end_pos = r.position()?;
+                    r.seek(io::SeekFrom::Start(start_pos))?;
+                    let mut bytes = vec![0; end_pos.saturating_sub(start_pos) as usize];
+                    r.get_bytes_into(&mut bytes)?;
+                    parsed_tree.kept = Some(KeptBytes {
+                        bytes: bytes.into(),
+                        root_start: root_pos.saturating_sub(start_pos) as usize,
+                    });
+                    Ok(parsed_tree.into())
+                }
                 // An unsized tree cannot degrade (`:204-207`). An error that is no
                 // `ValidationException` rejects it as it is; a `ValidationException`, a root
                 // that is not a `SigmaProp` included (rule 1001), becomes sigmastate's
@@ -376,6 +419,7 @@ impl ErgoTree {
                 root: parsed_expr,
                 #[cfg(feature = "std")]
                 has_deserialize: OnceLock::new(),
+                kept: None,
             })
         } else {
             ErgoTree::Parsed(ParsedErgoTree {
@@ -384,8 +428,26 @@ impl ErgoTree {
                 root: expr.clone(),
                 #[cfg(feature = "std")]
                 has_deserialize: OnceLock::new(),
+                kept: None,
             })
         })
+    }
+
+    /// The tree's bytes as sigmastate's `ErgoTree.bytes` gives them (v6.0.6
+    /// `ErgoTree.scala:123-130`): the bytes a parsed tree was read from, whatever their
+    /// encoding; the written tree for one built in memory; the raw bytes of a tree that
+    /// degraded. A script reads these (`Box.propositionBytes`, R1). A writer does not: it
+    /// builds the bytes again ([`SigmaSerializable::sigma_serialize`], sigmastate's
+    /// `serializeErgoTree`), so a box, an id or a transaction that a writer builds never
+    /// carries them.
+    pub fn bytes(&self) -> Result<Vec<u8>, SigmaSerializationError> {
+        match self {
+            ErgoTree::Parsed(ParsedErgoTree {
+                kept: Some(kept), ..
+            }) => Ok(kept.bytes.to_vec()),
+            ErgoTree::Parsed(_) => self.sigma_serialize_bytes(),
+            ErgoTree::Unparsed { tree_bytes, .. } => Ok(tree_bytes.clone()),
+        }
     }
 
     /// A tree's read window, from its first byte (sigmastate
@@ -485,9 +547,64 @@ impl ErgoTree {
     }
 
     /// Serialized proposition expression of SigmaProp type with
-    /// ConstantPlaceholder nodes instead of Constant nodes
+    /// ConstantPlaceholder nodes instead of Constant nodes.
+    ///
+    /// sigmastate's `template` (v6.0.6 `ErgoTree.scala:168-171`): what follows the constants
+    /// in the tree's bytes ([`ErgoTree::bytes`]). For a parsed tree that is its root in the
+    /// encoding it was read in; for a tree built in memory, the written root; for a tree that
+    /// degraded, its raw bytes after the constants, or the error if its constants do not read.
     pub fn template_bytes(&self) -> Result<Vec<u8>, ErgoTreeError> {
-        self.clone().parsed_tree()?.template_bytes()
+        match self {
+            ErgoTree::Parsed(ParsedErgoTree {
+                kept: Some(kept), ..
+            }) => Ok(kept
+                .bytes
+                .get(kept.root_start..)
+                .unwrap_or_default()
+                .to_vec()),
+            ErgoTree::Parsed(parsed) => parsed.template_bytes(),
+            ErgoTree::Unparsed { tree_bytes, .. } => {
+                let (_, _, root_start) = ErgoTree::read_header_and_constants(tree_bytes, None)?;
+                Ok(tree_bytes.get(root_start..).unwrap_or_default().to_vec())
+            }
+        }
+    }
+
+    /// Reads a tree's header, size slot and constants and returns the header, the constants
+    /// and the offset at which the root starts: sigmastate's `deserializeHeaderWithTreeBytes`
+    /// (`ErgoTreeSerializer.scala:269-274`). The size is read and not used. The constants are
+    /// read under `versions` (activated, tree), or under the header's own tree version when
+    /// there are none.
+    fn read_header_and_constants(
+        bytes: &[u8],
+        versions: Option<(ErgoTreeVersion, ErgoTreeVersion)>,
+    ) -> Result<(ErgoTreeHeader, Vec<Constant>, usize), ErgoTreeError> {
+        fn size_and_constants<R: SigmaByteRead>(
+            r: &mut R,
+            header: &ErgoTreeHeader,
+        ) -> Result<(Vec<Constant>, usize), SigmaParsingError> {
+            if header.has_size() {
+                let _ = r.get_u32()?;
+            }
+            let constants = if header.is_constant_segregation() {
+                ErgoTree::sigma_parse_constants(r)?
+            } else {
+                Vec::new()
+            };
+            let root_start = r.position()? as usize;
+            Ok((constants, root_start))
+        }
+        let mut r = SigmaByteReader::new(Cursor::new(bytes), ConstantStore::empty());
+        let header = ErgoTreeHeader::sigma_parse(&mut r)?;
+        let (constants, root_start) = match versions {
+            Some((activated_version, tree_version)) => {
+                r.with_versions(activated_version, tree_version, |r| {
+                    size_and_constants(r, &header)
+                })?
+            }
+            None => r.with_tree_version(header.version(), |r| size_and_constants(r, &header))?,
+        };
+        Ok((header, constants, root_start))
     }
 
     /// Replaces constants at the given `positions` with `new_values` in a
@@ -515,38 +632,20 @@ impl ErgoTree {
         tree_version: ErgoTreeVersion,
     ) -> Result<(Vec<u8>, usize), ErgoTreeError> {
         use core3::io::Write;
-        use sigma_ser::vlq_encode::ReadSigmaVlqExt;
         // Parse only the header + constants segment; keep the body raw.
-        let (header, mut constants, body_start) = {
-            let mut r =
-                SigmaByteReader::new(Cursor::new(script_bytes.as_slice()), ConstantStore::empty());
-            let header = ErgoTreeHeader::sigma_parse(&mut r)?;
-            let (constants, body_start) = r.with_versions(
-                // Parse the template's constants under the OUTER evaluation's versions,
-                // not the template header's own version. The JVM's
-                // `ErgoTreeSerializer.substituteConstants` reuses the outer
-                // `VersionContext` (no inner re-entry), so a v3-only constant
-                // (e.g. an Option) is accepted iff the OUTER tree is v3 — over- or
-                // under-accepting otherwise — and a Box constant's tree is compared with
-                // the activated version. The template's own header version governs only
-                // the re-emitted header byte (written verbatim below).
-                activated_version,
-                tree_version,
-                |r| -> Result<(Vec<Constant>, usize), SigmaParsingError> {
-                    if header.has_size() {
-                        let _ = r.get_u32()?;
-                    }
-                    let constants = if header.is_constant_segregation() {
-                        ErgoTree::sigma_parse_constants(r)?
-                    } else {
-                        Vec::new()
-                    };
-                    let body_start = r.position()? as usize;
-                    Ok((constants, body_start))
-                },
-            )?;
-            (header, constants, body_start)
-        };
+        //
+        // The template's constants are parsed under the OUTER evaluation's versions,
+        // not the template header's own version. The JVM's
+        // `ErgoTreeSerializer.substituteConstants` reuses the outer
+        // `VersionContext` (no inner re-entry), so a v3-only constant
+        // (e.g. an Option) is accepted iff the OUTER tree is v3 — over- or
+        // under-accepting otherwise — and a Box constant's tree is compared with
+        // the activated version. The template's own header version governs only
+        // the re-emitted header byte (written verbatim below).
+        let (header, mut constants, body_start) = ErgoTree::read_header_and_constants(
+            &script_bytes,
+            Some((activated_version, tree_version)),
+        )?;
         let num_constants = constants.len();
         let tree_bytes = script_bytes.get(body_start..).unwrap_or_default().to_vec();
 
@@ -906,10 +1005,8 @@ mod tests {
             bytes,
             "serialization should return original bytes"
         );
-        assert!(
-            tree.template_bytes().is_err(),
-            "template bytes should not be parsed"
-        );
+        // an unsegregated tree that degraded: sigmastate's `template` is the body
+        assert_eq!(tree.template_bytes().unwrap(), [107, 1]);
         // parsing via sigma_parse should fail as well
         let mut reader = SigmaByteReader::new(Cursor::new(&bytes), ConstantStore::empty());
         let tree = ErgoTree::sigma_parse(&mut reader).unwrap();
@@ -919,10 +1016,7 @@ mod tests {
             bytes,
             "serialization should return original bytes"
         );
-        assert!(
-            tree.template_bytes().is_err(),
-            "template bytes should not be parsed"
-        );
+        assert_eq!(tree.template_bytes().unwrap(), [107, 1]);
     }
 
     #[test]
@@ -1627,6 +1721,233 @@ mod depth_limit_tests {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
+mod kept_bytes_tests {
+    //! JVM parity: sigmastate keeps the bytes a tree was parsed from (`ErgoTree.bytes`, v6.0.6
+    //! `ErgoTree.scala:123-130`, set at `ErgoTreeSerializer.scala:178-185`) and builds them
+    //! again only in its writers (`serializeErgoTree`, `:105-121`). The rows are SANTA's
+    //! (`santa.spike.KeptTreeBytesProbe`, sigma-state 6.0.7, and `sized-tree-output-bytes`).
+    use super::*;
+    use crate::chain::ergo_box::ErgoBox;
+    use crate::serialization::sigma_byte_reader::from_bytes;
+    use sigma_ser::vlq_encode::ReadSigmaVlqExt;
+
+    /// Segregated: two `Int` 1 constants, `sigmaProp(c0 == c1)`
+    const SEG: &str = "100204020402d19373007301";
+    /// `SEG` with its constants count written as the two-byte VLQ `82 00`
+    const SEG_OVERLONG: &str = "10820004020402d19373007301";
+    /// `sigmaProp(1 == 1 && true)` with `true` as the legacy leaf `7f`
+    const PLAIN_7F: &str = "00d1ed93040204027f";
+    /// `sigmaProp(1 == 1 || false)` with `false` as the legacy leaf `80`
+    const PLAIN_80: &str = "00d1ec930402040280";
+    /// `SEG` size-flagged, its 11-byte body declared as 11, 12 and 10
+    const SIZED_TRUE: &str = "180b0204020402d19373007301";
+    const SIZED_OVER: &str = "180c0204020402d19373007301";
+    const SIZED_UNDER: &str = "180a0204020402d19373007301";
+    /// Size-flagged `sigmaProp(true)`, its 2-byte body declared as 2, 3 and 1
+    const SMALL_TRUE: &str = "080208d3";
+    const SMALL_OVER: &str = "080308d3";
+    const SMALL_UNDER: &str = "080108d3";
+    /// `sigmaProp(1 == 1)`, constants inline
+    const PLAIN: &str = "00d19304020402";
+    /// Size-flagged, an unknown opcode `fe` in the body: degrades, its constants read
+    const DEGRADED_CONSTS_READ: &str = "18080204020402fe0000";
+    /// Size-flagged, an unknown type code in the constants: degrades, its constants do not read
+    const DEGRADED_CONSTS_FAIL: &str = "18080299999999999999";
+
+    /// (as read, as written again)
+    const ROWS: [(&str, &str); 13] = [
+        (SEG, SEG),
+        (SEG_OVERLONG, SEG),
+        (PLAIN_7F, "00d1ed93040204020101"),
+        (PLAIN_80, "00d1ec93040204020100"),
+        (SIZED_TRUE, SIZED_TRUE),
+        (SIZED_OVER, SIZED_TRUE),
+        (SIZED_UNDER, SIZED_TRUE),
+        (SMALL_TRUE, SMALL_TRUE),
+        (SMALL_OVER, SMALL_TRUE),
+        (SMALL_UNDER, SMALL_TRUE),
+        (PLAIN, PLAIN),
+        (DEGRADED_CONSTS_READ, DEGRADED_CONSTS_READ),
+        (DEGRADED_CONSTS_FAIL, DEGRADED_CONSTS_FAIL),
+    ];
+
+    fn hex(s: &str) -> Vec<u8> {
+        base16::decode(s.as_bytes()).unwrap()
+    }
+
+    fn parse(s: &str) -> ErgoTree {
+        ErgoTree::sigma_parse_bytes(&hex(s)).unwrap()
+    }
+
+    #[test]
+    fn parsed_tree_keeps_its_span() {
+        for (read, written) in ROWS {
+            let tree = parse(read);
+            assert_eq!(tree.bytes().unwrap(), hex(read), "{read}");
+            assert_eq!(
+                tree.sigma_serialize_bytes().unwrap(),
+                hex(written),
+                "{read}"
+            );
+        }
+    }
+
+    #[test]
+    fn span_ends_where_the_body_ends() {
+        for read in [SEG_OVERLONG, SIZED_OVER, SIZED_UNDER, PLAIN_7F] {
+            let mut bytes = hex(read);
+            bytes.push(0xff);
+            let mut r = from_bytes(&bytes);
+            let tree = ErgoTree::sigma_parse(&mut r).unwrap();
+            assert_eq!(tree.bytes().unwrap(), hex(read), "{read}");
+            assert_eq!(r.get_u8().unwrap(), 0xff, "{read}");
+        }
+    }
+
+    #[test]
+    fn tree_inside_a_box_keeps_its_span() {
+        // the box's tree `09 03 08 d3` declares 3 for its 2-byte body: the tree keeps its own
+        // four bytes of the box, and the box is written again with the real size
+        let b = ErgoBox::sigma_parse_bytes(&super::declared_size_tests::box_bytes(3)).unwrap();
+        assert_eq!(b.ergo_tree.bytes().unwrap(), [0x09, 0x03, 0x08, 0xd3]);
+        assert_eq!(
+            b.sigma_serialize_bytes().unwrap(),
+            super::declared_size_tests::box_bytes(2)
+        );
+    }
+
+    #[test]
+    fn built_tree_has_no_span() {
+        let expr = parse(SEG).proposition().unwrap();
+        for header in [ErgoTreeHeader::v0(true), ErgoTreeHeader::v1(true)] {
+            let tree = ErgoTree::new(header, &expr).unwrap();
+            assert_eq!(tree.bytes().unwrap(), tree.sigma_serialize_bytes().unwrap());
+        }
+    }
+
+    #[test]
+    fn with_constant_drops_the_span() {
+        let tree = parse(SEG_OVERLONG).with_constant(0, 5i32.into()).unwrap();
+        assert_eq!(tree.bytes().unwrap(), hex("1002040a0402d19373007301"));
+        assert_eq!(tree.bytes().unwrap(), tree.sigma_serialize_bytes().unwrap());
+    }
+
+    #[test]
+    fn equality_ignores_the_span() {
+        assert_eq!(parse(SEG_OVERLONG), parse(SEG));
+        assert_eq!(parse(SMALL_OVER), parse(SMALL_TRUE));
+        assert_eq!(
+            parse(SEG),
+            parse(SEG).with_constant(0, 1i32.into()).unwrap()
+        );
+    }
+
+    #[test]
+    fn degraded_tree_bytes_are_raw() {
+        for read in [DEGRADED_CONSTS_READ, DEGRADED_CONSTS_FAIL] {
+            let tree = parse(read);
+            assert!(matches!(tree, ErgoTree::Unparsed { .. }), "{read}");
+            assert_eq!(tree.bytes().unwrap(), hex(read), "{read}");
+        }
+    }
+
+    #[test]
+    fn clone_keeps_the_span() {
+        #[allow(clippy::redundant_clone)]
+        let tree = parse(SEG_OVERLONG).clone();
+        assert_eq!(tree.bytes().unwrap(), hex(SEG_OVERLONG));
+    }
+
+    #[test]
+    fn template_rows() {
+        // sigmastate's `template` re-reads the kept bytes and returns everything after the
+        // constants (`ErgoTree.scala:168-171`, `ErgoTreeSerializer.scala:269-274`): the root in
+        // the encoding it was read in, whatever size the tree declares
+        for (read, template) in [
+            (SEG, "d19373007301"),
+            (SEG_OVERLONG, "d19373007301"),
+            (PLAIN_7F, "d1ed93040204027f"),
+            (PLAIN_80, "d1ec930402040280"),
+            (SIZED_TRUE, "d19373007301"),
+            (SIZED_OVER, "d19373007301"),
+            (SIZED_UNDER, "d19373007301"),
+            // no segregation: the whole body, constants inline
+            (PLAIN, "d19304020402"),
+            // a tree that degraded and whose constants read: the body after them
+            (DEGRADED_CONSTS_READ, "fe0000"),
+        ] {
+            assert_eq!(
+                parse(read).template_bytes().unwrap(),
+                hex(template),
+                "{read}"
+            );
+        }
+        // a tree that degraded and whose constants do not read: sigmastate throws
+        assert!(parse(DEGRADED_CONSTS_FAIL).template_bytes().is_err());
+        // a tree without kept bytes: the written root
+        let built = parse(SEG).with_constant(0, 1i32.into()).unwrap();
+        assert_eq!(built.template_bytes().unwrap(), hex("d19373007301"));
+    }
+
+    #[test]
+    fn template_of_a_tree_inside_a_box_starts_at_its_own_root() {
+        // `09 03 08 d3` follows the box's 3-byte value: its root is 2 bytes into the tree and
+        // 5 into the box
+        let b = ErgoBox::sigma_parse_bytes(&super::declared_size_tests::box_bytes(3)).unwrap();
+        assert_eq!(b.ergo_tree.template_bytes().unwrap(), [0x08, 0xd3]);
+    }
+
+    #[test]
+    fn built_tree_template_is_the_tail_of_the_written_tree() {
+        // sigmastate cuts `template` out of the bytes its writer gives a tree built in memory
+        // (`ErgoTree.scala:95`, `:168-171`), and the writer writes the root at the tree's own
+        // version: below version 3 an `Upcast` of a constant is written as the constant alone
+        // (`ValueSerializer.scala:157-169`)
+        use crate::mir::bin_op::{BinOp, BinOpKind, RelationOp};
+        use crate::mir::bool_to_sigma::BoolToSigmaProp;
+        use crate::mir::upcast::Upcast;
+        let root: Expr = BoolToSigmaProp {
+            input: Box::new(
+                BinOp {
+                    kind: BinOpKind::Relation(RelationOp::Eq),
+                    left: Box::new(
+                        Upcast::new(Expr::Const(1i32.into()), SType::SLong)
+                            .unwrap()
+                            .into(),
+                    ),
+                    right: Box::new(Expr::Const(1i64.into())),
+                }
+                .into(),
+            ),
+        }
+        .into();
+        for header in [ErgoTreeHeader::v0(false), ErgoTreeHeader::v1(false)] {
+            let tree = ErgoTree::new(header.clone(), &root).unwrap();
+            let written = tree.sigma_serialize_bytes().unwrap();
+            let body_start = if header.has_size() { 2 } else { 1 };
+            assert_eq!(tree.template_bytes().unwrap(), written[body_start..]);
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn lenient_entries_keep_the_span() {
+        let tree = ErgoTree::sigma_parse_bytes_lenient(&hex(SEG_OVERLONG)).unwrap();
+        assert_eq!(tree.bytes().unwrap(), hex(SEG_OVERLONG));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn lenient_from_unsized_span_is_the_rebuilt_tree() {
+        // the fixture form drops the size bit and slot of a v1 tree; the span is the tree
+        // that function rebuilds and parses, `09 02 08 d3`
+        let tree = ErgoTree::sigma_parse_bytes_lenient_from_unsized(&hex("0108d3")).unwrap();
+        assert_eq!(tree.bytes().unwrap(), hex("090208d3"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod declared_size_tests {
     //! JVM parity: sigmastate parses a size-flagged tree's body on the box's own reader
     //! and carries on wherever the body ends. The declared size only bounds the raw bytes
@@ -1642,7 +1963,7 @@ mod declared_size_tests {
 
     /// SANTA `Box.sized_tree_declared_size`: a box whose tree `09 02 08 d3` (v1,
     /// size-flagged, `sigmaProp(true)`) declares its size as `declared`.
-    fn box_bytes(declared: u8) -> Vec<u8> {
+    pub(super) fn box_bytes(declared: u8) -> Vec<u8> {
         let hex = format!(
             "c0843d09{declared:02x}08d3010000\
              cb56144443fa2e5da7c7da46a8fcb044f30c5161d9d4a3c83ee41c1faf3a65e500"

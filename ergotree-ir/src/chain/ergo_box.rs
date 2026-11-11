@@ -249,8 +249,9 @@ impl ErgoBox {
         Ok(match id {
             RegisterId::MandatoryRegisterId(id) => match id {
                 MandatoryRegisterId::R0 => Some(self.value.into()),
-                // the tree is written again, which fails for one sigmastate reads and cannot
-                // write (a 0/1-item tuple type, v6.0.7 `TypeSerializer.scala:94-95`)
+                // the bytes the tree was read from (`ErgoBoxCandidate.scala:72`). Only a tree
+                // built in memory is written here, which fails for one sigmastate cannot write
+                // (a 0/1-item tuple type, v6.0.7 `TypeSerializer.scala:94-95`).
                 MandatoryRegisterId::R1 => Some(
                     self.script_bytes()
                         .map_err(|e| RegisterValueError::Invalid(e.to_string()))?
@@ -273,9 +274,12 @@ impl ErgoBox {
             .collect()
     }
 
-    /// Returns serialized ergo_tree guarding this box
+    /// The bytes of the tree guarding this box as a script reads them, sigmastate's
+    /// `propositionBytes` (v6.0.6 `ErgoBoxCandidate.scala:50`): the bytes the tree was read
+    /// from ([`ErgoTree::bytes`]), which are those a writer gives only for a tree in the
+    /// writer's own form. `Box.propositionBytes`, R1 and the output script-size rule read them.
     pub fn script_bytes(&self) -> Result<Vec<i8>, SigmaSerializationError> {
-        Ok(self.ergo_tree.sigma_serialize_bytes()?.as_vec_i8())
+        Ok(self.ergo_tree.bytes()?.as_vec_i8())
     }
 
     /// Tuple of height when block got included into the blockchain and transaction identifier with
@@ -1159,10 +1163,10 @@ mod small_tuple_tests {
     }
 
     #[test]
-    fn r1_of_a_wire_box_whose_tree_cannot_be_written_is_an_error() {
-        // a box read off the wire keeps its bytes, so its tree need not be writable. R1 writes the
-        // tree again here, so reading it fails, as an error. (sigmastate returns the tree's own
-        // bytes, `ErgoTree.scala:123-126`: the R1 output-bytes class, out of this change's scope.)
+    fn r1_of_a_wire_box_whose_tree_cannot_be_written_is_its_kept_bytes() {
+        // a box read off the wire keeps its bytes, so its tree need not be writable. R1 is the
+        // tree's own bytes, as it was read (`ErgoBoxCandidate.scala:72`, `ErgoTree.scala:123-130`),
+        // so reading it does not write the tree.
         let bytes = ErgoBox::new(
             BoxValue::SAFE_USER_MIN,
             tree(),
@@ -1188,7 +1192,12 @@ mod small_tuple_tests {
             wire.extend(base16::decode(small).unwrap());
             wire.extend(&bytes[at + 3..]);
             let b = ErgoBox::sigma_parse_bytes(&wire).unwrap();
-            assert!(b.get_register(RegisterId::R1).is_err(), "{small}");
+            let kept = base16::decode(small).unwrap().as_vec_i8();
+            assert_eq!(
+                b.get_register(RegisterId::R1).unwrap(),
+                Some(kept.into()),
+                "{small}"
+            );
         }
     }
 
@@ -1213,5 +1222,90 @@ mod small_tuple_tests {
         assert!(b.sigma_serialize_bytes().is_err());
         #[cfg(feature = "json")]
         assert!(serde_json::to_string(&b).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod kept_tree_bytes_tests {
+    //! `Box.propositionBytes` and R1 are the tree's kept bytes (sigmastate v6.0.6
+    //! `ErgoBoxCandidate.scala:50`, `:72`); the box's own bytes and its id come from the writer,
+    //! which builds the tree again (`:142`). SANTA `sized-tree-output-bytes`: size-flagged
+    //! `sigmaProp(true)` whose 2-byte body is declared as 3 (`08 03 08 d3`) and as 2.
+    use super::*;
+
+    const OVER: &str = "080308d3";
+    const TRUE: &str = "080208d3";
+
+    fn box_over(tree: &str) -> ErgoBox {
+        ErgoBox::new(
+            BoxValue::SAFE_USER_MIN,
+            ErgoTree::sigma_parse_bytes(&base16::decode(tree).unwrap()).unwrap(),
+            None,
+            NonMandatoryRegisters::empty(),
+            1,
+            TxId::zero(),
+            0,
+        )
+        .unwrap()
+    }
+
+    fn kept() -> Vec<i8> {
+        base16::decode(OVER).unwrap().as_vec_i8()
+    }
+
+    #[test]
+    fn script_bytes_and_r1_are_the_kept_bytes() {
+        let (over, truth) = (box_over(OVER), box_over(TRUE));
+        assert_eq!(over.script_bytes().unwrap(), kept());
+        assert_eq!(
+            over.get_register(RegisterId::R1).unwrap(),
+            Some(kept().into())
+        );
+        // the writers build the tree again: the box and its id are those of the true size
+        assert_eq!(
+            over.sigma_serialize_bytes().unwrap(),
+            truth.sigma_serialize_bytes().unwrap()
+        );
+        assert_eq!(over.bytes().unwrap(), truth.bytes().unwrap());
+        assert_eq!(over.box_id(), truth.box_id());
+    }
+
+    #[test]
+    fn bytes_without_ref_is_rewritten() {
+        // `bytesWithNoRef` is the candidate writer (`ErgoBoxCandidate.scala:54`)
+        let (over, truth) = (box_over(OVER), box_over(TRUE));
+        assert_eq!(
+            over.bytes_without_ref(ErgoTreeVersion::V0).unwrap(),
+            truth.bytes_without_ref(ErgoTreeVersion::V0).unwrap()
+        );
+        // a candidate made from the box carries the tree, kept bytes included, and is written
+        // as the true size
+        let candidate = ErgoBoxCandidate::from(over);
+        assert_eq!(
+            candidate.ergo_tree.bytes().unwrap(),
+            base16::decode(OVER).unwrap()
+        );
+        assert_eq!(
+            candidate.sigma_serialize_bytes().unwrap(),
+            ErgoBoxCandidate::from(truth)
+                .sigma_serialize_bytes()
+                .unwrap()
+        );
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_tree_keeps_span_writes_rewritten() {
+        // a tree read from JSON is parsed from the hex it holds (`JsonCodecs.scala:290`) and
+        // written again by the writer (`:285`); the box's id hashes the written box
+        let truth = box_over(TRUE);
+        let mut json = serde_json::to_value(&truth).unwrap();
+        assert_eq!(json["ergoTree"], TRUE);
+        json["ergoTree"] = OVER.into();
+        let over: ErgoBox = serde_json::from_value(json).unwrap();
+        assert_eq!(over.script_bytes().unwrap(), kept());
+        assert_eq!(over.box_id(), truth.box_id());
+        assert_eq!(serde_json::to_value(&over).unwrap()["ergoTree"], TRUE);
     }
 }

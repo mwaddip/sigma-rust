@@ -995,6 +995,32 @@ mod tests {
     }
 
     #[test]
+    fn tx_output_keeps_span_and_rewritten_id() {
+        // SANTA `sized-tree-output-bytes` #0: output 0's tree `08 03 08 d3` declares 3 for its
+        // 2-byte body. Inside the transaction its `propositionBytes` is the tree as received
+        // (`ErgoBoxCandidate.scala:50`); the output's bytes and id, and the transaction's own
+        // bytes and id, are written again with the true size (`:142`).
+        let tx_hex = "0199509187fae8656914d07649bcefe907fafd4e1878291df38b94ddba482429a8388de1bbf72f7ed248fdd915ce98851730a2e17b8182ea81213804f1afd7288c06c0e6470c4554fe6e69bc3a064ac039236676d0381e97a95300000002c0843d080308d3010000c08faedc030008d3010000";
+        assert_eq!(tx_hex.matches("c0843d080308d3").count(), 1);
+        let rewritten_hex = tx_hex.replace("c0843d080308d3", "c0843d080208d3");
+        let tx = Transaction::sigma_parse_bytes(&base16::decode(tx_hex).unwrap()).unwrap();
+        let rewritten =
+            Transaction::sigma_parse_bytes(&base16::decode(&rewritten_hex).unwrap()).unwrap();
+        let out = tx.outputs.first();
+        assert_eq!(
+            out.script_bytes().unwrap(),
+            vec![0x08, 0x03, 0x08, 0xd3u8 as i8]
+        );
+        assert_eq!(out.bytes().unwrap()[3..7], [0x08, 0x02, 0x08, 0xd3]);
+        assert_eq!(out.box_id(), rewritten.outputs.first().box_id());
+        assert_eq!(
+            base16::encode_lower(&tx.sigma_serialize_bytes().unwrap()),
+            rewritten_hex
+        );
+        assert_eq!(tx.id(), rewritten.id());
+    }
+
+    #[test]
     fn output_tree_header_bits_reach_the_tx_id() {
         // SANTA `Transaction.tree_header_bits`: sigmastate writes an output tree's header
         // byte back whole, bits 5-7 included, so the id hashes the output as received. The

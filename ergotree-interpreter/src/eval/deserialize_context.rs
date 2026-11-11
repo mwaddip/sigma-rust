@@ -135,6 +135,80 @@ mod tests {
         );
     }
 
+    // The substitution charge measures `ergoTree.bytes` (`Interpreter.scala:246`), the bytes
+    // the tree was read from (`ErgoTree.scala:123-130`), not the tree as a writer builds it
+    // again. Two encodings of one tree therefore cost differently: a constants count written
+    // as the two-byte VLQ `81 00` is one byte longer than the writer's `01`, and the legacy
+    // leaf `7f` is one byte shorter than the writer's `01 01`. SANTA
+    // `kept-tree-bytes-substitution-cost` measures the same on a size slot written in one and
+    // in five bytes: 12130 and 12138, 2 per byte.
+    #[test]
+    fn substitution_cost_counts_the_kept_bytes() {
+        use ergotree_ir::mir::bin_op::{BinOp, BinOpKind, LogicalOp};
+        use ergotree_ir::mir::bool_to_sigma::BoolToSigmaProp;
+
+        // `sigmaProp(executeFromVar[Boolean](1) && true)`
+        let expr: Expr = BoolToSigmaProp {
+            input: Box::new(
+                BinOp {
+                    kind: BinOpKind::Logical(LogicalOp::And),
+                    left: Box::new(Expr::from(DeserializeContext {
+                        tpe: SType::SBoolean,
+                        id: 1,
+                    })),
+                    right: Box::new(true.into()),
+                }
+                .into(),
+            ),
+        }
+        .into();
+        let inner_expr: Expr = true.into();
+        let ctx_ext = ContextExtension {
+            values: [(1u8, inner_expr.sigma_serialize_bytes().unwrap().into())]
+                .iter()
+                .cloned()
+                .collect(),
+        };
+        let cost = |tree: &ErgoTree| -> (u64, u64) {
+            let mut ctx = force_any_val::<Context>().with_extension(&ctx_ext);
+            ctx.activated_script_version_byte = 3;
+            ctx.jit_cost.set(0);
+            let res = reduce_to_crypto(tree, &ctx).unwrap();
+            assert_eq!(res.sigma_prop, true.into());
+            (ctx.jit_cost_value(), res.cost)
+        };
+        let written = |segregated: bool| -> Vec<u8> {
+            ErgoTree::new(ErgoTreeHeader::v0(segregated), &expr)
+                .unwrap()
+                .sigma_serialize_bytes()
+                .unwrap()
+        };
+        let parse = |bytes: &[u8]| ErgoTree::sigma_parse_bytes(bytes).unwrap();
+
+        // one byte longer than the writer's form: the constants count as `81 00`
+        let canon_bytes = written(true);
+        assert_eq!(canon_bytes[..2], [0x10, 0x01]);
+        let mut overlong_bytes = vec![0x10, 0x81, 0x00];
+        overlong_bytes.extend(&canon_bytes[2..]);
+        let (canon, overlong) = (parse(&canon_bytes), parse(&overlong_bytes));
+        assert_eq!(overlong, canon);
+        let ((jit_canon, cost_canon), (jit_overlong, cost_overlong)) =
+            (cost(&canon), cost(&overlong));
+        assert_eq!(jit_overlong - jit_canon, 20);
+        assert_eq!(cost_overlong - cost_canon, 2);
+
+        // one byte shorter: the root's `true` as the legacy leaf `7f`
+        let canon_bytes = written(false);
+        assert!(canon_bytes.ends_with(&[0x01, 0x01]));
+        let mut short_bytes = canon_bytes[..canon_bytes.len() - 2].to_vec();
+        short_bytes.push(0x7f);
+        let (canon, short) = (parse(&canon_bytes), parse(&short_bytes));
+        assert_eq!(short, canon);
+        let ((jit_canon, cost_canon), (jit_short, cost_short)) = (cost(&canon), cost(&short));
+        assert_eq!(jit_canon - jit_short, 20);
+        assert_eq!(cost_canon - cost_short, 2);
+    }
+
     // Each actually-substituted var charges the JVM's deserialization
     // complexity — `scriptBytes.length × CostPerByteDeserialized(2)` block =
     // bytes × 20 JitCost (`Interpreter.deserializeMeasured`). On this branch
