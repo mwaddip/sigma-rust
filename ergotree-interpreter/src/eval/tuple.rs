@@ -291,13 +291,15 @@ mod non_pair_value_rows {
 
     #[test]
     fn a_pair_collection_s_side_keeps_the_tuple_item_type() {
-        // by reading: sigmaProp(Coll[((Int,Int,Int), Int)](((1,2,3), 4)) ==
+        // sigmaProp(Coll[((Int,Int,Int), Int)](((1,2,3), 4)) ==
         // ConcreteCollection(((1,2,3), 4))). The constant's left side is built at the tuple
         // type (`fromBoxedPairs`), as the in-script collection's is, so the item types agree
-        // and the items compare
-        let (_, res, _) =
-            eval_v3_body("0b1dd1930c4c48040404010204060883014c480404044c4804040402040608");
-        assert_eq!(res.unwrap(), true_prop());
+        // and the items compare (SANTA's tuple-values-3 reply, V1: true @91)
+        assert_accepts(
+            "0b1dd1930c4c48040404010204060883014c480404044c4804040402040608",
+            true_prop(),
+            91,
+        );
     }
 
     #[test]

@@ -531,11 +531,11 @@ mod script_value_tests {
 
     #[test]
     fn a_collection_expression_of_tuples_keeps_the_tuple_item_type() {
-        // by reading: `ConcreteCollection.value` builds its collection at
-        // `stypeToRType(elementType)` (`values.scala:879-884`), a tuple type for tuples of three,
-        // while the data decoder builds the same constant at `Coll[Any]`
-        // (`CoreDataSerializer.scala:160-163`). The items are the same `Coll[Any]`s, and equality
-        // compares the item types first
+        // `ConcreteCollection.value` builds its collection at `stypeToRType(elementType)`
+        // (`values.scala:879-884`), a tuple type for tuples of three, while the data decoder
+        // builds the same constant at `Coll[Any]` (`CoreDataSerializer.scala:160-163`). The items
+        // are the same `Coll[Any]`s, and equality compares the item types first (SANTA's
+        // tuple-values-3 reply, section 1, measured)
         let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
         let expression = parse("83014804040448040404020406")
             .to_script_value()

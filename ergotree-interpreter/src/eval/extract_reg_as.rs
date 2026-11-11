@@ -142,6 +142,25 @@ pub(crate) mod register_conversion_tests {
     }
 
     #[test]
+    fn a_register_collection_s_item_type_follows_its_producer() {
+        // SANTA's tuple-values-3 reply, V2 and V3: SELF.R4[Coll[(Int,Int,Int)]].get ==
+        // Coll((1, 2, 3)). R4 as the collection EXPRESSION is built at the tuple item type, the
+        // constant it is compared with at `Coll[Any]`: false @81, the comparison stopping at the
+        // item types. R4 as the CONSTANT: true @119
+        use crate::eval::test_util::eval_v3_body_in;
+        use ergotree_ir::mir::value::Value;
+        let tree = "0b1393e4c6a7040c480404040c4804040401020406";
+        for (r4, equal, cost) in [
+            ("83014804040448040404020406", false, 81),
+            ("0c4804040401020406", true, 119),
+        ] {
+            let (_, res, c) = eval_v3_body_in(ctx_with_r4(r4), tree);
+            assert_eq!(res.unwrap(), Value::Boolean(equal), "{r4}");
+            assert_eq!(c, cost, "{r4}");
+        }
+    }
+
+    #[test]
     fn a_register_read_converts_every_register_of_the_box() {
         // SANTA V10: R4 = `Tuple(1, HEIGHT)` fails the read of R5; its twin, R4 = `Tuple(1, 2)`,
         // does not; and C1 as R4, a `Coll[(Int, Int)]` holding a tuple expression, fails it
