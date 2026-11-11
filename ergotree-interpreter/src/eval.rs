@@ -806,6 +806,43 @@ pub mod test_util {
         assert_eq!(c, cost, "{tree_hex}");
     }
 
+    /// The value and JIT cost of a SANTA eval tree at activated version 3: a v3 sized tree
+    /// (`0b`, [`eval_v3_body`]) or a v0 tree (`00`), whose root is the expression
+    #[cfg(test)]
+    pub(crate) fn eval_tree(tree_hex: &str) -> (Result<Value<'static>, EvalError>, u64) {
+        if tree_hex.starts_with("0b") {
+            let (_, res, cost) = eval_v3_body(tree_hex);
+            return (res, cost);
+        }
+        let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
+        assert_eq!(bytes[0], 0x00, "{tree_hex}");
+        let expr = from_bytes(&bytes[1..])
+            .with_tree_version(ErgoTreeVersion::V0, Expr::sigma_parse)
+            .unwrap();
+        let mut ctx = force_any_val::<Context>();
+        ctx.activated_script_version_byte = 3;
+        ctx.tree_version.set(ErgoTreeVersion::V0);
+        ctx.jit_cost.set(0);
+        let mut env = Env::empty();
+        let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
+        (res, ctx.jit_cost_value())
+    }
+
+    /// Each tree's value and cost, or that it errors where no value is given
+    #[cfg(test)]
+    pub(crate) fn assert_trees(rows: &[(&str, Option<(Value<'static>, u64)>)]) {
+        for (tree_hex, expected) in rows {
+            let (res, cost) = eval_tree(tree_hex);
+            match expected {
+                Some((value, expected_cost)) => {
+                    assert_eq!(res.as_ref().ok(), Some(value), "{tree_hex}: {res:?}");
+                    assert_eq!(cost, *expected_cost, "{tree_hex}");
+                }
+                None => assert!(res.is_err(), "{tree_hex}: {res:?}"),
+            }
+        }
+    }
+
     /// the error under the span wrapper each eval node adds
     #[cfg(test)]
     fn innermost(e: &EvalError) -> &EvalError {
