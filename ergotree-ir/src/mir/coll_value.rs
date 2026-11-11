@@ -159,7 +159,7 @@ impl<'ctx> CollValue<'ctx> {
             CollValue::Ints(items) => items.get(index).map(|&i| Value::Int(i)),
             CollValue::Generic { items, .. } => items.get(index).cloned(),
             CollValue::Pairs { ls, rs } => {
-                Some(Value::Tup([ls.get_val(index)?, rs.get_val(index)?].into()))
+                Some(Value::pair(ls.get_val(index)?, rs.get_val(index)?))
             }
         }
     }
@@ -175,7 +175,7 @@ impl<'ctx> CollValue<'ctx> {
                 .as_vec()
                 .into_iter()
                 .zip(rs.as_vec())
-                .map(|(l, r)| Value::Tup([l, r].into()))
+                .map(|(l, r)| Value::pair(l, r))
                 .collect(),
         }
     }
@@ -216,19 +216,16 @@ fn split_pairs<'ctx>(
     let Some((lt, rt)) = pair_item_types(elem_tpe) else {
         return Err(items);
     };
-    if !items
-        .iter()
-        .all(|v| matches!(v, Value::Tup(pair) if pair.len() == 2))
-    {
+    if !items.iter().all(|v| matches!(v, Value::Pair(_))) {
         return Err(items);
     }
     let mut ls = Vec::with_capacity(items.len());
     let mut rs = Vec::with_capacity(items.len());
     for item in items {
-        if let Value::Tup(pair) = item {
-            let mut pair = pair.to_vec().into_iter();
-            ls.extend(pair.next());
-            rs.extend(pair.next());
+        if let Value::Pair(pair) = item {
+            let (l, r) = *pair;
+            ls.push(l);
+            rs.push(r);
         }
     }
     Ok((lt, rt, ls, rs))
@@ -364,7 +361,7 @@ mod tests {
     }
 
     fn pair(a: i32, b: i32) -> Value<'static> {
-        Value::Tup([Value::Int(a), Value::Int(b)].into())
+        Value::pair(Value::Int(a), Value::Int(b))
     }
 
     #[test]
@@ -401,8 +398,8 @@ mod tests {
         let spec = Value::Coll(bytes(&[1]));
         let gen = Value::Coll(generic(SType::SByte, vec![Value::Byte(1)]));
         assert_eq!(
-            Value::Tup([spec.clone(), Value::Int(1)].into()),
-            Value::Tup([gen.clone(), Value::Int(1)].into())
+            Value::pair(spec.clone(), Value::Int(1)),
+            Value::pair(gen.clone(), Value::Int(1))
         );
         assert_eq!(
             Value::Opt(Some(spec.clone().into())),

@@ -409,12 +409,11 @@ impl<'ctx> TryFrom<Value<'ctx>> for Literal {
                 }
                 None => Ok(Literal::Opt(None)),
             },
-            Value::Tup(t) => {
-                if let Ok(t) = t.try_mapped::<_, _, String>(Literal::try_from) {
-                    Ok(Literal::Tup(t))
-                } else {
-                    Err("Can't convert Value:Tup element".into())
-                }
+            Value::Pair(pair) => {
+                let (l, r) = *pair;
+                Ok(Literal::Tup(
+                    [Literal::try_from(l)?, Literal::try_from(r)?].into(),
+                ))
             }
             Value::AvlTree(a) => Ok(Literal::from(*a)),
             Value::String(s) => Ok(Literal::from(s)),
@@ -480,8 +479,9 @@ pub fn literal_of_type(value: Value<'_>, tpe: &SType) -> Result<Literal, String>
                     .collect::<Result<Arc<[Literal]>, String>>()?,
             })),
         },
-        (SType::STuple(t), Value::Tup(items)) if items.len() == t.items.len() => {
-            tuple(items.to_vec(), t)
+        (SType::STuple(t), Value::Pair(pair)) if t.items.len() == 2 => {
+            let (l, r) = *pair;
+            tuple(alloc::vec![l, r], t)
         }
         (SType::STuple(t), Value::Coll(coll))
             if coll.elem_tpe() == SType::SAny && coll.len() == t.items.len() =>

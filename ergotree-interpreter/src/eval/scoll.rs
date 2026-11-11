@@ -454,16 +454,12 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     ))
 };
 
-/// The receiver as sigmastate's `Coll` methods see it: a collection, or a tuple of other than
-/// two items, which sigmastate holds as a `Coll[Any]` (`Tuple.value`, v6.0.7
-/// `values.scala:818-822`). Anything else, a pair (a `Tuple2`) included, is not a `Coll`, and
-/// the reflective call fails.
-fn jvm_coll<'ctx>(obj: Value<'ctx>, method: &str) -> Result<CollValue<'ctx>, EvalError> {
+/// The receiver as sigmastate's `Coll` methods see it: a collection, which a tuple of other
+/// than two items is (a `Coll[Any]`, `Tuple.value`, v6.0.7 `values.scala:818-822`). Anything
+/// else, a pair (a `Tuple2`) included, is not a `Coll`, and the reflective call fails.
+fn coll_receiver<'ctx>(obj: Value<'ctx>, method: &str) -> Result<CollValue<'ctx>, EvalError> {
     match obj {
         Value::Coll(coll) => Ok(coll),
-        Value::Tup(items) if items.len() != 2 => {
-            Ok(CollValue::generic(SType::SAny, items.to_vec()))
-        }
         _ => Err(EvalError::UnexpectedValue(format!(
             "{method}: expected Coll, found {obj:?}"
         ))),
@@ -474,7 +470,7 @@ fn jvm_coll<'ctx>(obj: Value<'ctx>, method: &str) -> Result<CollValue<'ctx>, Eva
 /// (`invokeFixed`, v6.0.7 `methods.scala:821`)
 pub(crate) static SIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(14)?;
-    let coll = jvm_coll(obj, "size")?;
+    let coll = coll_receiver(obj, "size")?;
     Ok(Value::Int(coll.len() as i32))
 };
 
@@ -482,7 +478,7 @@ pub(crate) static SIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
 /// (`methods.scala:940`); out of range it throws
 pub(crate) static APPLY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     ctx.add_jit_cost(30)?;
-    let coll = jvm_coll(obj, "apply")?;
+    let coll = coll_receiver(obj, "apply")?;
     let index = args
         .first()
         .cloned()
@@ -503,7 +499,7 @@ pub(crate) static APPLY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 /// default
 pub(crate) static GET_OR_ELSE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     ctx.add_jit_cost(30)?;
-    let coll = jvm_coll(obj, "getOrElse")?;
+    let coll = coll_receiver(obj, "getOrElse")?;
     let [index, default]: [Value; 2] = args.try_into().map_err(|_| {
         EvalError::UnexpectedValue("getOrElse: expected an index and a default".into())
     })?;
@@ -532,7 +528,7 @@ pub(crate) static MAP_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::UnexpectedValue("map: mapper argument not found".into()))?;
     map_coll(
         ctx,
-        Value::Coll(jvm_coll(obj, "map")?),
+        Value::Coll(coll_receiver(obj, "map")?),
         mapper,
         (**item_tpe).clone(),
     )

@@ -358,8 +358,7 @@ mod jvm_method_rows {
     #[test]
     fn coll_runtime_shapes_rows() {
         // SANTA `Coll.runtime_shapes_methodcall.json` (bar the two `Coll[Byte]`-constant rows)
-        use ergotree_ir::types::stuple::TupleItems;
-        let pair = |a: i32, b: i32| Value::Tup(TupleItems::from([Value::Int(a), Value::Int(b)]));
+        let pair = |a: i32, b: i32| Value::pair(Value::Int(a), Value::Int(b));
         // a collection of pairs is a `PairOfCols` on the JVM: the `Coll.getOrElse` bridge
         // casts the default to `Tuple2` whatever the index (`CollsOverArrays.scala:309-315`)
         assert_evaluator_refuses("0b0edc0c0283015858020402040a0101"); // getOrElse(5, true)

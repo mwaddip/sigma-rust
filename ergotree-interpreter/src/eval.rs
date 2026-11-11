@@ -220,16 +220,11 @@ pub(crate) fn check_value_of_type(
         SType::SGroupElement => matches!(value, Value::GroupElement(_)),
         SType::SSigmaProp => matches!(value, Value::SigmaProp(_)),
         SType::SBox => matches!(value, Value::CBox(_)),
-        // a tuple of three or more items is a `Coll[Any]` in sigmastate (`TupleData`,
-        // `package.scala:67`, `Evaluation.scala:99-102`), so it passes as a collection
-        SType::SColl(_) => {
-            matches!(value, Value::Coll(_))
-                || matches!(value, Value::Tup(items) if items.len() != 2)
-        }
+        // a tuple of other than two items is a `Coll[Any]` in sigmastate (`TupleData`,
+        // `package.scala:67`, `Evaluation.scala:99-102`) and here, so it passes as a collection
+        SType::SColl(_) => matches!(value, Value::Coll(_)),
         SType::SOption(_) => matches!(value, Value::Opt(_)),
-        SType::STuple(t) if t.items.len() == 2 => {
-            matches!(value, Value::Tup(items) if items.len() == 2)
-        }
+        SType::STuple(t) if t.items.len() == 2 => matches!(value, Value::Pair(_)),
         SType::STuple(_) => return Err(EvalError::Misc(format!("Unsupported tuple type {tpe:?}"))),
         SType::SFunc(f) if f.t_dom.len() == 1 => {
             matches!(value, Value::Lambda(l) if l.args.len() == 1)
@@ -1429,6 +1424,7 @@ mod value_check_tests {
     use ergotree_ir::mir::coll_by_index::ByIndex;
     use ergotree_ir::mir::coll_fold::Fold;
     use ergotree_ir::mir::coll_size::SizeOf;
+    use ergotree_ir::mir::coll_value::CollValue;
     use ergotree_ir::mir::collection::Collection;
     use ergotree_ir::mir::constant::{Constant, Literal};
     use ergotree_ir::mir::func_value::{FuncArg, FuncValue};
@@ -1743,10 +1739,7 @@ mod value_check_tests {
                 SType::SOption(SType::SInt.into()),
                 Value::Opt(Some(Box::new(Value::Int(1)))),
             ),
-            (
-                pair_type(),
-                Value::Tup(vec![Value::Int(1), Value::Int(2)].try_into().unwrap()),
-            ),
+            (pair_type(), Value::pair(Value::Int(1), Value::Int(2))),
             (
                 SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)),
                 a_lambda.clone(),
@@ -1794,11 +1787,11 @@ mod value_check_tests {
         }
         // a tuple other than a pair and a function of other than one argument throw
         let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
-        let three = Value::Tup(
-            vec![Value::Int(1), Value::Int(2), Value::Int(3)]
-                .try_into()
-                .unwrap(),
-        );
+        // a tuple of three as it is held: a collection of `Any`
+        let three = Value::Coll(CollValue::generic(
+            SType::SAny,
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+        ));
         assert!(check_value_of_type(&triple, &three, v3).is_err());
         let binary = SType::SFunc(SFunc::new(vec![SType::SInt, SType::SInt], SType::SInt));
         assert!(check_value_of_type(&binary, &a_lambda, v3).is_err());
@@ -1828,12 +1821,12 @@ mod value_check_tests {
         // `package.scala:67`; `Evaluation.toDslTuple`, `Evaluation.scala:99-102`), so it passes
         // the collection arm (`SType.scala:198`); a pair is a `Tuple2`, which does not
         let coll_type = SType::SColl(SType::SInt.into());
-        let three = Value::Tup(
-            vec![Value::Int(1), Value::Int(2), Value::Int(3)]
-                .try_into()
-                .unwrap(),
-        );
-        let pair = Value::Tup(vec![Value::Int(1), Value::Int(2)].try_into().unwrap());
+        // a tuple of three as it is held: a collection of `Any`
+        let three = Value::Coll(CollValue::generic(
+            SType::SAny,
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+        ));
+        let pair = Value::pair(Value::Int(1), Value::Int(2));
         assert!(check_value_of_type(&coll_type, &three, ErgoTreeVersion::V3).is_ok());
         assert!(check_value_of_type(&coll_type, &pair, ErgoTreeVersion::V3).is_err());
         // `{ (x: Coll[Int]) => true }((1, 2, 3))`: neither parser checks the argument's type

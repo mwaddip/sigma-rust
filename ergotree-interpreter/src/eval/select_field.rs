@@ -17,15 +17,14 @@ impl Evaluable for SelectField {
         // sigmastate selects only from a pair, its `Tuple2`; it holds every other tuple as a
         // `Coll[Any]` and raises a type error there (v6.0.7 `transformers.scala:297-307`)
         match input_v {
-            Value::Tup(items) if items.len() == 2 => items
-                .get(self.field_index.zero_based_index())
-                .cloned()
-                .ok_or_else(|| {
-                    EvalError::NotFound(format!(
-                        "SelectField field index is out of bounds. Index: {0:?}, tuple: {1:?}",
-                        self.field_index, items
-                    ))
-                }),
+            Value::Pair(pair) => match (self.field_index.zero_based_index(), *pair) {
+                (0, (first, _)) => Ok(first),
+                (1, (_, second)) => Ok(second),
+                (_, pair) => Err(EvalError::NotFound(format!(
+                    "SelectField field index is out of bounds. Index: {0:?}, pair: {1:?}",
+                    self.field_index, pair
+                ))),
+            },
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected SelectField input to be a pair, got: {0:?}",
                 input_v

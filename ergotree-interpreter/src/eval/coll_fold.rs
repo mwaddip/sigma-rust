@@ -46,7 +46,7 @@ impl Evaluable for Fold {
         ctx.add_per_item_jit_cost(3, 1, 10, n_items)?;
         match input_v {
             Value::Coll(coll) => coll.as_vec().into_iter().try_fold(zero_v, |acc, item| {
-                let tup_arg = Value::Tup([acc, item].into());
+                let tup_arg = Value::pair(acc, item);
                 fold_op_call(tup_arg)
             }),
             _ => Err(EvalError::UnexpectedValue(format!(

@@ -1,3 +1,4 @@
+use ergotree_ir::mir::expr::Expr;
 use ergotree_ir::mir::tuple::Tuple;
 use ergotree_ir::mir::value::Value;
 
@@ -21,27 +22,25 @@ impl Evaluable for Tuple {
         // items), so without this guard it accepts tuples of other arities
         // the JVM rejects — a consensus accept/reject divergence (sigma-rust
         // would accept a spend the JVM rejects). Mirror the JVM: reject non-pairs.
-        if self.items.len() != 2 {
+        let [first, second] = self.items.as_slice() else {
             return Err(EvalError::Misc(format!(
                 "Tuple: sigma-state allows only 2-element tuples, got {}",
                 self.items.len()
             )));
-        }
+        };
         ctx.add_jit_cost(15)?; // Tuple = Fixed(15)
-        let items_v = self
-            .items
-            .try_mapped_ref(|i| -> Result<Value<'ctx>, EvalError> {
-                // Mirror the JVM Tuple eval, which `checkType`s each item's value after
-                // evaluating it (`values.scala:828-833`): an item whose type is an
-                // unsupported tuple (arity != 2) is rejected ("Unsupported tuple
-                // type", SType.scala:200), which catches an arity-3 tuple constant
-                // carried as a pair item; so is a pair item whose value is not a pair,
-                // the data of a pair tuple expression.
-                let v = i.eval(env, ctx)?;
-                crate::eval::check_value_of_type(&i.tpe(), &v, ctx.tree_version())?;
-                Ok(v)
-            });
-        Ok(Value::Tup(items_v?))
+                               // Mirror the JVM Tuple eval, which `checkType`s each item's value after
+                               // evaluating it (`values.scala:828-833`): an item whose type is an
+                               // unsupported tuple (arity != 2) is rejected ("Unsupported tuple
+                               // type", SType.scala:200), which catches an arity-3 tuple constant
+                               // carried as a pair item; so is a pair item whose value is not a pair,
+                               // the data of a pair tuple expression.
+        let mut item_v = |i: &Expr| -> Result<Value<'ctx>, EvalError> {
+            let v = i.eval(env, ctx)?;
+            crate::eval::check_value_of_type(&i.tpe(), &v, ctx.tree_version())?;
+            Ok(v)
+        };
+        Ok(Value::pair(item_v(first)?, item_v(second)?))
     }
 }
 
@@ -276,7 +275,7 @@ mod tests {
         let exprs = vec![e1, e2];
         let tuple: Expr = Tuple::new(exprs).unwrap().into();
         let res = eval_out_wo_ctx::<Value>(&tuple);
-        assert!(matches!(res, Value::Tup(_)));
+        assert!(matches!(res, Value::Pair(_)));
     }
 
     #[test]
