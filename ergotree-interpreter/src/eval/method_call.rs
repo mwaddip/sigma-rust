@@ -353,6 +353,16 @@ mod jvm_method_rows {
     }
 
     #[test]
+    fn global_serialize_writes_a_tuple_by_its_type() {
+        // SANTA's tuple-values reply, W1 and W2: Global.serialize((1, 2, 3)) writes the items
+        // with no length, Global.serialize(Coll((1, 2, 3))) the collection's length and the items
+        use ergotree_ir::mir::coll_value::CollValue;
+        let bytes = |b: &[i8]| Value::Coll(CollValue::Bytes(b.into()));
+        assert_accepts("0b0cdc6a03dd0148040404020406", bytes(&[2, 4, 6]), 33);
+        assert_accepts("0b0edc6a03dd010c4804040401020406", bytes(&[1, 2, 4, 6]), 36);
+    }
+
+    #[test]
     fn option_new_evaluators_check_their_receiver() {
         // isDefined and get on Coll(1, 2)
         assert_evaluator_refuses("0b0adb240283020404020404");

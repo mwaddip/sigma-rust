@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use alloc::{string::ToString, sync::Arc};
 
 use ergo_chain_types::autolykos_pow_scheme::{decode_compact_bits, encode_compact_bits};
-use ergotree_ir::mir::constant::Literal;
+use ergotree_ir::mir::constant::literal_of_type;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
 use ergotree_ir::unsignedbigint256::UnsignedBigInt;
 use ergotree_ir::{
@@ -196,7 +196,7 @@ pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     )?))
 };
 
-pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     // Scala `serialize_eval` charges SigmaByteWriter.StartWriterCost = FixedCost(JitCost(10))
     // up front, then each writer `put`'s cost during DataSerializer.serialize.
     ctx.add_jit_cost(10)?;
@@ -206,11 +206,11 @@ pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             obj
         )));
     }
-    let arg: Literal = args
-        .first()
-        .ok_or_else(|| EvalError::NotFound("serialize: missing first arg".into()))?
-        .to_static()
-        .try_into()
+    // sigmastate writes the value by the argument expression's type
+    // (`DataSerializer.serialize(value, mc.args(0).tpe, w)`, v6.0.6 `methods.scala:1982`)
+    let missing = || EvalError::NotFound("serialize: missing first arg".into());
+    let arg_tpe = mc.args.first().ok_or_else(missing)?.tpe();
+    let arg = literal_of_type(args.first().ok_or_else(missing)?.to_static(), &arg_tpe)
         .map_err(EvalError::UnexpectedValue)?;
 
     let mut buf = vec![];
