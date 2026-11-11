@@ -19,7 +19,6 @@ use num_traits::Num;
 
 use crate::eval::env::Env;
 use crate::eval::unevaluated::not_evaluated;
-use crate::eval::upcast::{coerce_numeric_to, numeric_width};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -36,55 +35,50 @@ fn arithmetic_err<T: core::fmt::Display>(
     ))
 }
 
-fn eval_plus<'ctx, T>(lv_raw: T, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError>
+fn eval_plus<'ctx, T>(lv_raw: T, rv_raw: T) -> Result<Value<'ctx>, EvalError>
 where
-    T: Num + CheckedAdd + TryExtractFrom<Value<'ctx>> + Into<Value<'ctx>> + core::fmt::Display,
+    T: Num + CheckedAdd + Into<Value<'ctx>> + core::fmt::Display,
 {
-    let rv_raw = rv.try_extract_into::<T>()?;
     lv_raw
         .checked_add(&rv_raw)
         .ok_or_else(|| arithmetic_err("+", lv_raw, rv_raw, "overflow"))
         .map(|t| t.into()) // convert T to Value
 }
 
-fn eval_minus<'ctx, T>(lv_raw: T, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError>
+fn eval_minus<'ctx, T>(lv_raw: T, rv_raw: T) -> Result<Value<'ctx>, EvalError>
 where
-    T: Num + CheckedSub + TryExtractFrom<Value<'ctx>> + Into<Value<'ctx>> + core::fmt::Display,
+    T: Num + CheckedSub + Into<Value<'ctx>> + core::fmt::Display,
 {
-    let rv_raw = rv.try_extract_into::<T>()?;
     lv_raw
         .checked_sub(&rv_raw)
         .ok_or_else(|| arithmetic_err("-", lv_raw, rv_raw, "overflow"))
         .map(|t| t.into()) // convert T to Value
 }
 
-fn eval_mul<'ctx, T>(lv_raw: T, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError>
+fn eval_mul<'ctx, T>(lv_raw: T, rv_raw: T) -> Result<Value<'ctx>, EvalError>
 where
-    T: Num + CheckedMul + TryExtractFrom<Value<'ctx>> + Into<Value<'ctx>> + core::fmt::Display,
+    T: Num + CheckedMul + Into<Value<'ctx>> + core::fmt::Display,
 {
-    let rv_raw = rv.try_extract_into::<T>()?;
     lv_raw
         .checked_mul(&rv_raw)
         .ok_or_else(|| arithmetic_err("*", lv_raw, rv_raw, "overflow"))
         .map(|t| t.into()) // convert T to Value
 }
 
-fn eval_div<'ctx, T>(lv_raw: T, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError>
+fn eval_div<'ctx, T>(lv_raw: T, rv_raw: T) -> Result<Value<'ctx>, EvalError>
 where
-    T: Num + CheckedDiv + TryExtractFrom<Value<'ctx>> + Into<Value<'ctx>> + core::fmt::Display,
+    T: Num + CheckedDiv + Into<Value<'ctx>> + core::fmt::Display,
 {
-    let rv_raw = rv.try_extract_into::<T>()?;
     lv_raw
         .checked_div(&rv_raw)
         .ok_or_else(|| arithmetic_err("/", lv_raw, rv_raw, "exception"))
         .map(|t| t.into()) // convert T to Value
 }
 
-fn eval_mod<'ctx, T>(lv_raw: T, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError>
+fn eval_mod<'ctx, T>(lv_raw: T, rv_raw: T) -> Result<Value<'ctx>, EvalError>
 where
-    T: Num + CheckedRem + TryExtractFrom<Value<'ctx>> + Into<Value<'ctx>> + core::fmt::Display,
+    T: Num + CheckedRem + Into<Value<'ctx>> + core::fmt::Display,
 {
-    let rv_raw = rv.try_extract_into::<T>()?;
     lv_raw
         .checked_rem(&rv_raw)
         .ok_or_else(|| arithmetic_err("%", lv_raw, rv_raw, "exception"))
@@ -159,20 +153,49 @@ fn eval_le<'ctx>(lv: Value<'ctx>, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalEr
     }
 }
 
-fn eval_max<'ctx, T>(lv_raw: T, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError>
+/// An arithmetic operation at `T`, the Rust type of the left operand's static type. sigmastate
+/// charges the operation's cost for that type, then casts BOTH operand values to it (v6.0.6
+/// `trees.scala:729-739`): a value of another type, numeric or not, is an error. `bigint`: only
+/// `SBigInt` has costs of its own (every `ArithOpCompanion.costKind`, `:746-848`)
+fn eval_arith<'ctx, T>(
+    op: ArithOp,
+    lv: Value<'ctx>,
+    rv: Value<'ctx>,
+    bigint: bool,
+    ctx: &Context<'ctx>,
+) -> Result<Value<'ctx>, EvalError>
 where
-    T: Num + Ord + TryExtractFrom<Value<'ctx>> + Into<Value<'ctx>>,
+    T: Num
+        + CheckedAdd
+        + CheckedSub
+        + CheckedMul
+        + CheckedDiv
+        + CheckedRem
+        + Ord
+        + TryExtractFrom<Value<'ctx>>
+        + Into<Value<'ctx>>
+        + core::fmt::Display,
 {
+    ctx.add_jit_cost(match (op, bigint) {
+        (ArithOp::Plus | ArithOp::Minus, false) => 15,
+        (ArithOp::Plus | ArithOp::Minus, true) => 20,
+        (ArithOp::Multiply | ArithOp::Divide | ArithOp::Modulo, false) => 15,
+        (ArithOp::Multiply | ArithOp::Divide | ArithOp::Modulo, true) => 25,
+        (ArithOp::Max | ArithOp::Min, false) => 5,
+        (ArithOp::Max | ArithOp::Min, true) => 10,
+    })?;
+    let lv_raw = lv.try_extract_into::<T>()?;
     let rv_raw = rv.try_extract_into::<T>()?;
-    Ok((lv_raw.max(rv_raw)).into())
-}
-
-fn eval_min<'ctx, T>(lv_raw: T, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError>
-where
-    T: Num + Ord + TryExtractFrom<Value<'ctx>> + Into<Value<'ctx>>,
-{
-    let rv_raw = rv.try_extract_into::<T>()?;
-    Ok((lv_raw.min(rv_raw)).into())
+    match op {
+        ArithOp::Plus => eval_plus(lv_raw, rv_raw),
+        ArithOp::Minus => eval_minus(lv_raw, rv_raw),
+        ArithOp::Multiply => eval_mul(lv_raw, rv_raw),
+        // MIN / -1 can overflow
+        ArithOp::Divide => eval_div(lv_raw, rv_raw),
+        ArithOp::Modulo => eval_mod(lv_raw, rv_raw),
+        ArithOp::Max => Ok(lv_raw.max(rv_raw).into()),
+        ArithOp::Min => Ok(lv_raw.min(rv_raw).into()),
+    }
 }
 
 impl Evaluable for BinOp {
@@ -188,8 +211,7 @@ impl Evaluable for BinOp {
         }
         let lv = self.left.eval(env, ctx)?;
         match self.kind {
-            // Arith cost is charged below, after operand coercion: it keys off
-            // the WIDER operand type and adds the Upcast cost on a type mismatch.
+            // The arithmetic cost is charged in `eval_arith`, by the left operand's static type
             BinOpKind::Arith(_) => {}
             BinOpKind::Relation(op) => match op {
                 // Eq/NEq cost is charged by eq_with_cost during the eval
@@ -259,167 +281,22 @@ impl Evaluable for BinOp {
                 let rv = rv()?;
                 // sigmastate looks the operation up by the LEFT operand's static type, once both
                 // operands are evaluated (`ArithOp.impls(tpe.typeCode)`, `tpe = left.tpe`, v6.0.6
-                // `trees.scala:707`, `:722-725`, `:734`, `:861-869`): a type with no arithmetic,
-                // such as the `Any` of a tuple's item read by index, throws there whatever the
-                // values are (SANTA's tuple-values reply, N14: `KeyNotFoundException: key 97`)
+                // `trees.scala:703-739`, the table `:861-869`): a type with no arithmetic, such as
+                // the `Any` of a tuple's item read by index, throws there whatever the values are
+                // (SANTA's tuple-values reply, N14: `KeyNotFoundException: key 97`). The
+                // implementation found there casts both values to its own type, at every tree
+                // version (SANTA `ArithOp.mixed_width`)
                 let op_tpe = self.left.tpe();
-                if !has_arithmetic(&op_tpe) {
-                    return Err(EvalError::UnexpectedValue(format!(
+                match op_tpe {
+                    SType::SByte => eval_arith::<i8>(op, lv, rv, false, ctx),
+                    SType::SShort => eval_arith::<i16>(op, lv, rv, false, ctx),
+                    SType::SInt => eval_arith::<i32>(op, lv, rv, false, ctx),
+                    SType::SLong => eval_arith::<i64>(op, lv, rv, false, ctx),
+                    SType::SBigInt => eval_arith::<BigInt256>(op, lv, rv, true, ctx),
+                    SType::SUnsignedBigInt => eval_arith::<UnsignedBigInt>(op, lv, rv, false, ctx),
+                    _ => Err(EvalError::UnexpectedValue(format!(
                         "{op:?}: no arithmetic for the left operand's type {op_tpe:?}"
-                    )));
-                }
-                // sigma-state silently coerces mismatched numeric operands to the
-                // WIDER type (Byte<Short<Int<Long<BigInt) and computes there with
-                // checked (addExact) semantics, rejecting ONLY on genuine wider-type
-                // overflow. Verified vs sigma-state 6.0.3: Plus(Int 1, Long 2) ->
-                // Long 3 (both orders); IntMax + Long 1 -> Long 2147483648 (no Int
-                // wrap); LongMax + Int 1 -> reject. Cost keys off the wider type and
-                // adds the Upcast cost (bigint=30 else 10) for the narrower operand;
-                // same-type arith (including UnsignedBigInt) is unchanged.
-                let lw = numeric_width(&lv);
-                let rw = numeric_width(&rv);
-                let target = match (lw, rw) {
-                    (Some(l), Some(r)) if l != r => Some(l.max(r)),
-                    _ => None,
-                };
-                let (lv, rv, op_bigint) = match target {
-                    Some(w) => {
-                        ctx.add_jit_cost(if w == 4 { 30 } else { 10 })?;
-                        // Coerce ONLY the narrower operand; the wider one already has
-                        // width `w`. (Avoids the Upcast V3 guard that rejects a
-                        // BigInt->BigInt no-op upcast on pre-V3 trees.)
-                        let lv = if lw == Some(w) {
-                            lv
-                        } else {
-                            coerce_numeric_to(lv, w, ctx)?
-                        };
-                        let rv = if rw == Some(w) {
-                            rv
-                        } else {
-                            coerce_numeric_to(rv, w, ctx)?
-                        };
-                        (lv, rv, w == 4)
-                    }
-                    None => {
-                        // Scala's arith cost table special-cases ONLY `SBigInt`
-                        // (every `ArithOpCompanion.costKind` in trees.scala is
-                        // `case SBigInt => …; case _ => …`), so UnsignedBigInt
-                        // arithmetic rides the default arm — 15/15/5, not the
-                        // BigInt 20/25/10.
-                        let bigint = matches!(lv, Value::BigInt(_));
-                        (lv, rv, bigint)
-                    }
-                };
-                let op_cost: u64 = match op {
-                    ArithOp::Plus | ArithOp::Minus => {
-                        if op_bigint {
-                            20
-                        } else {
-                            15
-                        }
-                    }
-                    ArithOp::Multiply | ArithOp::Divide | ArithOp::Modulo => {
-                        if op_bigint {
-                            25
-                        } else {
-                            15
-                        }
-                    }
-                    ArithOp::Max | ArithOp::Min => {
-                        if op_bigint {
-                            10
-                        } else {
-                            5
-                        }
-                    }
-                };
-                ctx.add_jit_cost(op_cost)?;
-                match op {
-                    ArithOp::Plus => match lv {
-                        Value::Byte(lv_raw) => eval_plus(lv_raw, rv),
-                        Value::Short(lv_raw) => eval_plus(lv_raw, rv),
-                        Value::Int(lv_raw) => eval_plus(lv_raw, rv),
-                        Value::Long(lv_raw) => eval_plus(lv_raw, rv),
-                        Value::BigInt(lv_raw) => eval_plus(lv_raw, rv),
-                        Value::UnsignedBigInt(lv_raw) => eval_plus(lv_raw, rv),
-                        _ => Err(EvalError::UnexpectedValue(format!(
-                            "expected BinOp::left to be numeric value, got {0:?}",
-                            lv
-                        ))),
-                    },
-                    ArithOp::Minus => match lv {
-                        Value::Byte(lv_raw) => eval_minus(lv_raw, rv),
-                        Value::Short(lv_raw) => eval_minus(lv_raw, rv),
-                        Value::Int(lv_raw) => eval_minus(lv_raw, rv),
-                        Value::Long(lv_raw) => eval_minus(lv_raw, rv),
-                        Value::BigInt(lv_raw) => eval_minus(lv_raw, rv),
-                        Value::UnsignedBigInt(lv_raw) => eval_minus(lv_raw, rv),
-                        _ => Err(EvalError::UnexpectedValue(format!(
-                            "expected BinOp::left to be numeric value, got {0:?}",
-                            lv
-                        ))),
-                    },
-                    ArithOp::Multiply => match lv {
-                        Value::Byte(lv_raw) => eval_mul(lv_raw, rv),
-                        Value::Short(lv_raw) => eval_mul(lv_raw, rv),
-                        Value::Int(lv_raw) => eval_mul(lv_raw, rv),
-                        Value::Long(lv_raw) => eval_mul(lv_raw, rv),
-                        Value::BigInt(lv_raw) => eval_mul(lv_raw, rv),
-                        Value::UnsignedBigInt(lv_raw) => eval_mul(lv_raw, rv),
-                        _ => Err(EvalError::UnexpectedValue(format!(
-                            "expected BinOp::left to be numeric value, got {0:?}",
-                            lv
-                        ))),
-                    },
-                    ArithOp::Divide => match lv {
-                        Value::Byte(lv_raw) => eval_div(lv_raw, rv),
-                        Value::Short(lv_raw) => eval_div(lv_raw, rv),
-                        Value::Int(lv_raw) => eval_div(lv_raw, rv),
-                        Value::Long(lv_raw) => eval_div(lv_raw, rv),
-                        // MIN / -1  can actually overflow
-                        Value::BigInt(lv_raw) => eval_div(lv_raw, rv),
-                        Value::UnsignedBigInt(lv_raw) => eval_div(lv_raw, rv),
-                        _ => Err(EvalError::UnexpectedValue(format!(
-                            "expected BinOp::left to be numeric value, got {0:?}",
-                            lv
-                        ))),
-                    },
-                    ArithOp::Max => match lv {
-                        Value::Byte(lv_raw) => eval_max(lv_raw, rv),
-                        Value::Short(lv_raw) => eval_max(lv_raw, rv),
-                        Value::Int(lv_raw) => eval_max(lv_raw, rv),
-                        Value::Long(lv_raw) => eval_max(lv_raw, rv),
-                        Value::BigInt(lv_raw) => eval_max(lv_raw, rv),
-                        Value::UnsignedBigInt(lv_raw) => eval_max(lv_raw, rv),
-                        _ => Err(EvalError::UnexpectedValue(format!(
-                            "expected BinOp::left to be numeric value, got {0:?}",
-                            lv
-                        ))),
-                    },
-                    ArithOp::Min => match lv {
-                        Value::Byte(lv_raw) => eval_min(lv_raw, rv),
-                        Value::Short(lv_raw) => eval_min(lv_raw, rv),
-                        Value::Int(lv_raw) => eval_min(lv_raw, rv),
-                        Value::Long(lv_raw) => eval_min(lv_raw, rv),
-                        Value::BigInt(lv_raw) => eval_min(lv_raw, rv),
-                        Value::UnsignedBigInt(lv_raw) => eval_min(lv_raw, rv),
-                        _ => Err(EvalError::UnexpectedValue(format!(
-                            "expected BinOp::left to be numeric value, got {0:?}",
-                            lv
-                        ))),
-                    },
-                    ArithOp::Modulo => match lv {
-                        Value::Byte(lv_raw) => eval_mod(lv_raw, rv),
-                        Value::Short(lv_raw) => eval_mod(lv_raw, rv),
-                        Value::Int(lv_raw) => eval_mod(lv_raw, rv),
-                        Value::Long(lv_raw) => eval_mod(lv_raw, rv),
-                        Value::BigInt(lv_raw) => eval_mod(lv_raw, rv),
-                        Value::UnsignedBigInt(lv_raw) => eval_mod(lv_raw, rv),
-                        _ => Err(EvalError::UnexpectedValue(format!(
-                            "expected BinOp::left to be numeric value, got {0:?}",
-                            lv
-                        ))),
-                    },
+                    ))),
                 }
             }
             BinOpKind::Bit(_) => Err(not_evaluated("BitOp")),
@@ -427,26 +304,226 @@ impl Evaluable for BinOp {
     }
 }
 
-/// The types sigmastate has arithmetic for (`ArithOp.impls`, v6.0.6 `trees.scala:861-869`)
-fn has_arithmetic(tpe: &SType) -> bool {
-    matches!(
-        tpe,
-        SType::SByte
-            | SType::SShort
-            | SType::SInt
-            | SType::SLong
-            | SType::SBigInt
-            | SType::SUnsignedBigInt
-    )
-}
-
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
 #[allow(clippy::unwrap_used)]
 mod arith_op_type_tests {
+    use alloc::boxed::Box;
+    use ergotree_ir::bigint256::BigInt256;
+    use ergotree_ir::chain::context::Context;
+    use ergotree_ir::chain::context_extension::ContextExtension;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::bin_op::{ArithOp, BinOp};
+    use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::value::Value;
+    use ergotree_ir::serialization::sigma_byte_reader::from_bytes;
+    use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
+    use ergotree_ir::serialization::SigmaSerializable;
+    use ergotree_ir::unsignedbigint256::UnsignedBigInt;
+    use sigma_test_util::force_any_val;
 
-    use crate::eval::test_util::{assert_accepts, eval_v3_body};
+    use crate::eval::env::Env;
+    use crate::eval::test_util::{
+        assert_accepts, eval_v3_body, try_eval_out_wo_ctx, try_eval_with_deserialize,
+    };
+    use crate::eval::EvalError;
+    use crate::eval::Evaluable;
+
+    /// The value and JIT cost of a SANTA eval tree at activated version 3: a v3 sized tree
+    /// (`0b`, [`eval_v3_body`]) or a v0 tree (`00`), whose root is the expression
+    fn eval_tree(tree_hex: &str) -> (Result<Value<'static>, EvalError>, u64) {
+        if tree_hex.starts_with("0b") {
+            let (_, res, cost) = eval_v3_body(tree_hex);
+            return (res, cost);
+        }
+        let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
+        assert_eq!(bytes[0], 0x00, "{tree_hex}");
+        let expr = from_bytes(&bytes[1..])
+            .with_tree_version(ErgoTreeVersion::V0, Expr::sigma_parse)
+            .unwrap();
+        let mut ctx = force_any_val::<Context>();
+        ctx.activated_script_version_byte = 3;
+        ctx.tree_version.set(ErgoTreeVersion::V0);
+        ctx.jit_cost.set(0);
+        let mut env = Env::empty();
+        let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
+        (res, ctx.jit_cost_value())
+    }
+
+    /// Each tree's value and cost, or that it errors where no value is given
+    fn check(rows: &[(&str, Option<(Value<'static>, u64)>)]) {
+        for (tree_hex, expected) in rows {
+            let (res, cost) = eval_tree(tree_hex);
+            match expected {
+                Some((value, expected_cost)) => {
+                    assert_eq!(res.as_ref().ok(), Some(value), "{tree_hex}: {res:?}");
+                    assert_eq!(cost, *expected_cost, "{tree_hex}");
+                }
+                None => assert!(res.is_err(), "{tree_hex}: {res:?}"),
+            }
+        }
+    }
+
+    fn bigint(n: i32) -> Value<'static> {
+        Value::BigInt(BigInt256::from(n))
+    }
+
+    #[test]
+    fn santa_mixed_width_rows() {
+        // SANTA `ArithOp.mixed_width` (sigma-state 6.0.7), each script as a v3 sized tree and
+        // as a v0 tree. sigmastate takes the implementation of the LEFT operand's static type
+        // and casts both values to it (v6.0.6 `trees.scala:703-739`): a value of another
+        // numeric type throws `ClassCastException`. Below tree version 3 the parser wraps the
+        // narrower of two operands of different static types in an `Upcast`, which costs 10,
+        // or 30 to `BigInt` (`SigmaBuilder.scala:674-683`, `:757-763`, `CostKind.scala:60-65`)
+        check(&[
+            // A1, A2: `1L + 2L`, the control
+            ("0b059a05020504", Some((Value::Long(3), 25))),
+            ("009a05020504", Some((Value::Long(3), 25))),
+            // A3, A4: `1L + 2`
+            ("0b059a05020404", None),
+            ("009a05020404", Some((Value::Long(3), 35))),
+            // A5, A6: `1L + ByIndex((1, 2, 3), 0)`, an `Any` holding an `Int`: nothing to upcast
+            ("0b0e9a0502b248040404020406040000", None),
+            ("009a0502b248040404020406040000", None),
+            // B1, B2: `2 + 1L`, the `Long` is cast down to the left operand's `Int`
+            ("0b059a04040502", None),
+            ("009a04040502", Some((Value::Long(3), 35))),
+            // B3, B4: `BigInt(1) + 2L`
+            ("0b069a0601010504", None),
+            ("009a0601010504", Some((bigint(3), 60))),
+            // C1, C2: `BigInt(1) + BigInt(2)`, the control for the 30
+            ("0b079a060101060102", Some((bigint(3), 30))),
+            ("009a060101060102", Some((bigint(3), 30))),
+            // B5, B6: `If(false, 1L, 2)` alone: typed by its true branch, the value an `Int`
+            ("0b0795010005020404", Some((Value::Int(2), 20))),
+            ("0095010005020404", Some((Value::Int(2), 20))),
+            // B7, B8: `1L + If(false, 1L, 2)`: the static types agree, the right value is narrow
+            ("0b0a9a050295010005020404", None),
+            ("009a050295010005020404", None),
+            // B9, B10: `If(false, 1L, 2) + 2`: the left value is narrower than its static type
+            ("0b0a9a950100050204040404", None),
+            ("009a950100050204040404", None),
+        ]);
+    }
+
+    #[test]
+    fn every_operation_takes_the_static_type() {
+        // The refusals are by reading (the one table serves every operation, `min`/`max`
+        // through its ordering, `trees.scala:746-848`), except `min` of two narrow values,
+        // which SANTA measured (`Comparison.mixed_width` R8: throws at both versions). The
+        // values and costs are sigma-rust's own at `a7656774`, not JVM measurements;
+        // sigma-state 6.0.3 measured the mirrored v0 pairs (`Int * Long`, `max(Int, Long)`,
+        // `min(Int, Long)`, in `arith_mismatched_numeric_coercion_vectors`) at the same costs
+        check(&[
+            // `1L * 2`
+            ("0b059c05020404", None),
+            ("009c05020404", Some((Value::Long(2), 35))),
+            // `max(1L, 2)`
+            ("0b05a205020404", None),
+            ("00a205020404", Some((Value::Long(2), 25))),
+            // `min(1L, 2)`
+            ("0b05a105020404", None),
+            ("00a105020404", Some((Value::Long(1), 25))),
+            // `min(If(false, 1L, 2), If(false, 1L, 3))`
+            ("0b0fa19501000502040495010005020406", None),
+            ("00a19501000502040495010005020406", None),
+            // `If(false, 1L, 2) + 2L`: a narrow left value, the right one fits
+            ("0b0a9a950100050204040504", None),
+            ("009a950100050204040504", None),
+            // `(2 + 1L) * 2`: below v3 two `Upcast`s, the outer by the inner sum's static type
+            ("0b089c9a040405020404", None),
+            ("009c9a040405020404", Some((Value::Long(6), 65))),
+            // `UnsignedBigInt`: the default cost (only `SBigInt` is special); no mixing with
+            // `BigInt` in either order
+            (
+                "0b079a090101090102",
+                Some((Value::UnsignedBigInt(UnsignedBigInt::from(3u64)), 25)),
+            ),
+            ("0b079a060101090102", None),
+            ("0b079a090101060102", None),
+            // `1 / 0` and `Int.MaxValue + 1` stay errors
+            ("0b059d04020400", None),
+            ("009d04020400", None),
+            ("0b0e9a04feffffffffffffffff010402", None),
+            ("009a04feffffffffffffffff010402", None),
+        ]);
+    }
+
+    #[test]
+    fn producers_keep_their_arithmetic() {
+        // An operand whose static type comes from another node keeps its arithmetic. Values and
+        // costs are sigma-rust's own at `a7656774`, not JVM measurements: a regression guard
+        // for a static type that disagrees with the value it types
+        check(&[
+            // `ByIndex(Coll[Long](1, 2), 0) + 1L`
+            ("0b0b9ab2110202040400000502", Some((Value::Long(2), 60))),
+            ("009ab2110202040400000502", Some((Value::Long(2), 60))),
+            // `(1L, 2L)._1 + 1L`
+            ("0b089a8c590204010502", Some((Value::Long(2), 35))),
+            // `{ val x = 1L; x + x }`
+            ("0b0bd801d60105029a72017201", Some((Value::Long(2), 37))),
+            // `Coll[Long](1, 2).fold(0L, { (p: (Long, Long)) => p._1 + p._2 })`
+            (
+                "0b14b0110202040500d90101599a8c7201018c720102",
+                Some((Value::Long(3), 119)),
+            ),
+            // `SizeOf(Coll[Long](1, 2)) + 1`, and the same through the `size` property
+            ("0b089ab1110202040402", Some((Value::Int(3), 39))),
+            ("0b0a9adb0c01110202040402", Some((Value::Int(3), 43))),
+            // `OptionGet(Some(1L)) + 1L`
+            ("0b079ae42901020502", Some((Value::Long(2), 40))),
+        ]);
+    }
+
+    #[test]
+    fn a_substituted_operand_keeps_the_parser_s_upcast() {
+        // By reading, not measured (SANTA's eval tier binds no context variable). Below tree
+        // version 3 the parser wraps `executeFromVar[Int](1)` in an `Upcast` to `Long` when it
+        // builds the sum. The substitution at spend replaces the node under that `Upcast` and
+        // rebuilds its ancestors through their constructors, not the builder (v6.0.7
+        // `Rewriter.scala:241-260`), so the `Upcast` stays and no new one is inserted. From
+        // v3 there is none, and the `Int` meets the `Long` implementation
+        fn sum(version: ErgoTreeVersion, body_hex: &str, var_hex: &str) -> Result<i64, EvalError> {
+            let body = base16::decode(body_hex.as_bytes()).unwrap();
+            let expr = from_bytes(&body)
+                .with_tree_version(version, Expr::sigma_parse)
+                .unwrap();
+            let var = base16::decode(var_hex.as_bytes()).unwrap();
+            let ext = ContextExtension {
+                values: [(1u8, var.into())].iter().cloned().collect(),
+            };
+            let mut ctx = force_any_val::<Context>().with_extension(&ext);
+            ctx.activated_script_version_byte = 3;
+            ctx.tree_version.set(version);
+            try_eval_with_deserialize::<i64>(&expr, &ctx)
+        }
+        // `1L + executeFromVar[Int](1)`, the variable holding the constant `2`
+        assert_eq!(sum(ErgoTreeVersion::V0, "9a0502d40401", "0404").unwrap(), 3);
+        assert!(sum(ErgoTreeVersion::V3, "9a0502d40401", "0404").is_err());
+        // the control: `1L + executeFromVar[Long](1)`, the variable holding `2L`
+        assert_eq!(sum(ErgoTreeVersion::V3, "9a0502d40501", "0504").unwrap(), 3);
+    }
+
+    #[test]
+    fn a_tree_built_in_memory_gets_no_upcast() {
+        // By reading: only the deserializing builder inserts an `Upcast`. A sum built without
+        // the parser, as a tree from sigmastate's `StdSigmaBuilder`, keeps its operands as
+        // given, and a `Long` with an `Int` throws at evaluation
+        let plus = |right: Expr| -> Expr {
+            BinOp {
+                kind: ArithOp::Plus.into(),
+                left: Box::new(Expr::Const(1i64.into())),
+                right: Box::new(right),
+            }
+            .into()
+        };
+        assert!(try_eval_out_wo_ctx::<Value>(&plus(Expr::Const(2i32.into()))).is_err());
+        assert_eq!(
+            try_eval_out_wo_ctx::<Value>(&plus(Expr::Const(2i64.into()))).unwrap(),
+            Value::Long(3)
+        );
+    }
 
     #[test]
     fn the_left_operand_s_type_selects_the_arithmetic() {
@@ -502,10 +579,11 @@ mod tests {
     #[test]
     fn arith_mismatched_numeric_coercion_vectors() {
         // Zero-tolerance vectors from the sigma-state 6.0.3 sweep (eval value:type +
-        // raw JIT cost, regime activatedScriptVersion=3 / ergoTree v0). Mismatched
-        // numeric operands coerce to the WIDER type (Byte<Short<Int<Long<BigInt),
-        // compute checked in the wider type, and reject only on genuine wider-type
-        // overflow. Cost = same-type arith + the Upcast cost (bigint=30 else 10).
+        // raw JIT cost, regime activatedScriptVersion=3 / ergoTree v0). Below tree
+        // version 3 the parser wraps the narrower of two operands of different numeric
+        // static types in an `Upcast` to the WIDER type (Byte<Short<Int<Long<BigInt), so
+        // the operation computes checked in the wider type and rejects only on genuine
+        // wider-type overflow. Cost = same-type arith + the Upcast's (bigint=30 else 10).
         use crate::eval::test_util::try_eval_out;
         use ergotree_ir::chain::context::Context;
         use ergotree_ir::ergo_tree::ErgoTree;
