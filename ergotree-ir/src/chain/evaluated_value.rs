@@ -15,6 +15,7 @@ use crate::mir::expr::Expr;
 use crate::mir::global_vars::GlobalVars;
 use crate::mir::tuple::tuple_items_sigma_parse;
 use crate::mir::value::CollKind;
+use crate::mir::value::Value;
 use crate::serialization::op_code::OpCode;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
@@ -64,8 +65,8 @@ impl<T: Into<Constant>> From<T> for EvaluatedValue {
 pub struct ScriptValue {
     /// The type a script reads the value at
     pub tpe: SType,
-    /// The data
-    pub v: Literal,
+    /// The value, as the evaluator holds it
+    pub v: Value<'static>,
 }
 
 impl EvaluatedValue {
@@ -87,7 +88,7 @@ impl EvaluatedValue {
     pub fn to_script_value(&self) -> Result<ScriptValue, TryExtractFromError> {
         // `stypeToRType(v.tpe)`, then `v.value` (`ErgoLikeContext.scala:159-160`)
         let tpe = self.script_type()?;
-        let v = self.script_data()?;
+        let v = Value::from(self.script_data()?);
         Ok(ScriptValue { tpe, v })
     }
 
@@ -503,6 +504,7 @@ mod tests {
 #[allow(clippy::unwrap_used)]
 mod script_value_tests {
     use super::*;
+    use crate::mir::coll_value::CollValue;
 
     fn parse(hex: &str) -> EvaluatedValue {
         EvaluatedValue::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap()
@@ -524,7 +526,10 @@ mod script_value_tests {
             let c = Constant::sigma_parse_bytes(&base16::decode(constant_hex).unwrap()).unwrap();
             assert_eq!(
                 parse(hex).to_script_value().unwrap(),
-                ScriptValue { tpe: c.tpe, v: c.v },
+                ScriptValue {
+                    tpe: c.tpe,
+                    v: c.v.into()
+                },
                 "{hex}"
             );
         }
@@ -541,10 +546,10 @@ mod script_value_tests {
         );
         assert_eq!(
             sv.v,
-            Literal::Coll(
-                CollKind::from_collection(SType::SAny, vec![Literal::Int(1), Literal::Int(2)])
-                    .unwrap()
-            )
+            Value::Coll(CollValue::generic(
+                SType::SAny,
+                vec![Value::Int(1), Value::Int(2)]
+            ))
         );
     }
 

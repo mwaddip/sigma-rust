@@ -1549,7 +1549,7 @@ mod value_check_tests {
             .unwrap()
             .v;
         let mut env = Env::empty();
-        env.insert(1.into(), coll.into());
+        env.insert(1.into(), coll);
         let ctx = force_any_val::<Context>();
         assert!(use_pair.eval(&mut env, &ctx).is_err());
     }

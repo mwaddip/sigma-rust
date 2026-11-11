@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use ergotree_ir::mir::constant::TryExtractFromError;
 use ergotree_ir::mir::get_var::GetVar;
 use ergotree_ir::mir::value::Value;
@@ -19,7 +20,7 @@ impl Evaluable for GetVar {
         };
         let script_value = value.to_script_value()?;
         if script_value.tpe == self.var_tpe {
-            Ok(Some(script_value.v).into())
+            Ok(Value::Opt(Some(Box::new(script_value.v))))
         } else {
             Err(TryExtractFromError(format!(
                 "GetVar: expected extension value id {} to have type {:?}, found {:?} in context extension map {}",

@@ -31,9 +31,7 @@ impl Evaluable for ExtractRegisterAs {
             ))
         })?;
         match get_register_script_value(&ir_box, id)? {
-            Some(value) if value.tpe == *self.elem_tpe => {
-                Ok(Value::Opt(Some(Box::new(value.v.into()))))
-            }
+            Some(value) if value.tpe == *self.elem_tpe => Ok(Value::Opt(Some(Box::new(value.v)))),
             Some(value) => Err(EvalError::UnexpectedValue(format!(
                 "Expected register {id} to be of type {}, got {:?}",
                 self.elem_tpe, value.tpe

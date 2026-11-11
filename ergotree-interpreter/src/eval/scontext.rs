@@ -136,7 +136,7 @@ pub(crate) static GET_VAR_FROM_INPUT_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, arg
         Some(var) if var.script_type()? == **output_tpe => var,
         _ => return Ok(Value::Opt(None)),
     };
-    Ok(Value::Opt(Some(Box::new(var.to_script_value()?.v.into()))))
+    Ok(Value::Opt(Some(Box::new(var.to_script_value()?.v))))
 };
 
 #[cfg(test)]
