@@ -241,9 +241,24 @@ mod non_pair_value_rows {
             assert!(ErgoTree::sigma_parse_bytes(&bytes).is_err(), "{tree_hex}");
         }
         // EQ of two `Any` operands and an arithmetic operation parse and throw at evaluation
-        // ("Unknown type SAny"; no `Any` in `ArithOp.impls`)
+        // ("Unknown type SAny"; no `Any` in `ArithOp.impls`): SANTA
+        // `Tuple.non_pair_value_gates` G1-G3, and the equality's controls over a Coll[Int]
         assert_throws("0b1793b248040404020406040000b248040404020406040200");
+        assert_throws("0b18d193b248040404020406040000b248040404020406040200");
         assert_throws("0b0e9ab2480404040204060400000402");
+        assert_accepts(
+            "0b1393b21003020406040000b21003020406040200",
+            Value::Boolean(false),
+            83,
+        );
+        let false_prop = Value::SigmaProp(alloc::boxed::Box::new(SigmaProp::new(
+            SigmaBoolean::TrivialProp(false),
+        )));
+        assert_accepts(
+            "0b14d193b21003020406040000b21003020406040200",
+            false_prop,
+            98,
+        );
     }
 
     #[test]
@@ -251,8 +266,12 @@ mod non_pair_value_rows {
         // SizeOf(ConcreteCollection[(Int,Int,Int)](t, t)): each item is checked against its
         // type ("Unsupported tuple type"), while the same collection as data answers (above)
         assert_throws("0b15b18302480404044804040402040648040404020406");
-        // Fold(Coll[Int](1), t, (p: ((Int,Int,Int), Int)) => p._1): the zero is checked
+        // the same collection of PAIRS answers: SizeOf(Coll((1, 2), (3, 4))) (SANTA gates C6)
+        assert_accepts("0b10b1830258860204020404860204060408", int(2), 84);
+        // Fold(Coll[Int](1), t, (p: ((Int,Int,Int), Int)) => p._1): the zero is checked; and
+        // SANTA gates G9, the same over Coll[Int](1, 2, 3) inside SizeOf
         assert_throws("0b17b010010248040404020406d901014c480404048c720101");
+        assert_throws("0b1ab1b0100302040648040404020406d901014c480404048c720101");
         // (1,2,3).map((x: Int) => x + 1), the METHOD: the receiver's item type is `Any`
         assert_throws("0b14dc0c034804040402040601d90101049a72010402");
     }

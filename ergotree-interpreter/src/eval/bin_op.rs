@@ -450,20 +450,28 @@ mod arith_op_type_tests {
 
     #[test]
     fn the_left_operand_s_type_selects_the_arithmetic() {
-        // `(1, 2, 3).apply(0)` is typed `Any` and holds an `Int` (SANTA
-        // `Coll.runtime_shapes_methodcall` C2: 1 @44)
+        // SANTA `Tuple.non_pair_value_gates` G3-G8 with their controls C3-C5 (sigma-state
+        // 6.0.7). An item of the tuple `(1, 2, 3)` is typed `Any` and holds an `Int`
+        // (`Coll.runtime_shapes_methodcall` C2: `(1, 2, 3).apply(0)` is 1 @44)
         assert_accepts("0b0ddc0c0a48040404020406010400", Value::Int(1), 44);
-        // `(1, 2, 3).apply(0) + 1` and `min((1, 2, 3).apply(0), 1)`: no arithmetic for `Any`
+        // on the LEFT there is no arithmetic for `Any` (`KeyNotFoundException: key 97`):
+        // `ByIndex(t, 0) + 1`, `t.apply(0) + 1`, `min(t.apply(0), 1)`
         for tree_hex in [
+            "0b0e9ab2480404040204060400000402",
             "0b109adc0c0a480404040204060104000402",
             "0b10a1dc0c0a480404040204060104000402",
         ] {
             assert!(eval_v3_body(tree_hex).1.is_err(), "{tree_hex}");
         }
-        // by reading: `1 + (1, 2, 3).apply(0)` is `Int` arithmetic, and the right operand is
-        // an `Int`
-        let (_, res, _) = eval_v3_body("0b109a0402dc0c0a48040404020406010400");
-        assert_eq!(res.unwrap(), Value::Int(2));
+        // on the RIGHT it is `Int` arithmetic at the plain collection's cost:
+        // `1 + ByIndex(t, 0)`, `1 + t.apply(0)`, `min(1, t.apply(0))`
+        assert_accepts("0b0e9a0402b248040404020406040000", Value::Int(2), 60);
+        assert_accepts("0b109a0402dc0c0a48040404020406010400", Value::Int(2), 64);
+        assert_accepts("0b10a10402dc0c0a48040404020406010400", Value::Int(1), 54);
+        // the controls over `Coll[Int](1, 2, 3)`
+        assert_accepts("0b0c9ab210030204060400000402", Value::Int(2), 60);
+        assert_accepts("0b0e9adc0c0a10030204060104000402", Value::Int(2), 64);
+        assert_accepts("0b0ea1dc0c0a10030204060104000402", Value::Int(1), 54);
     }
 }
 
