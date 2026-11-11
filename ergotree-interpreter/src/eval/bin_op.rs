@@ -308,9 +308,12 @@ impl Evaluable for BinOp {
 #[cfg(feature = "arbitrary")]
 #[allow(clippy::unwrap_used)]
 mod arith_op_type_tests {
+    use alloc::boxed::Box;
     use ergotree_ir::bigint256::BigInt256;
     use ergotree_ir::chain::context::Context;
+    use ergotree_ir::chain::context_extension::ContextExtension;
     use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::bin_op::{ArithOp, BinOp};
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::value::Value;
     use ergotree_ir::serialization::sigma_byte_reader::from_bytes;
@@ -320,7 +323,9 @@ mod arith_op_type_tests {
     use sigma_test_util::force_any_val;
 
     use crate::eval::env::Env;
-    use crate::eval::test_util::{assert_accepts, eval_v3_body};
+    use crate::eval::test_util::{
+        assert_accepts, eval_v3_body, try_eval_out_wo_ctx, try_eval_with_deserialize,
+    };
     use crate::eval::EvalError;
     use crate::eval::Evaluable;
 
@@ -469,6 +474,55 @@ mod arith_op_type_tests {
             // `OptionGet(Some(1L)) + 1L`
             ("0b079ae42901020502", Some((Value::Long(2), 40))),
         ]);
+    }
+
+    #[test]
+    fn a_substituted_operand_keeps_the_parser_s_upcast() {
+        // By reading, not measured (SANTA's eval tier binds no context variable). Below tree
+        // version 3 the parser wraps `executeFromVar[Int](1)` in an `Upcast` to `Long` when it
+        // builds the sum. The substitution at spend replaces the node under that `Upcast` and
+        // rebuilds its ancestors through their constructors, not the builder (v6.0.7
+        // `Rewriter.scala:241-260`), so the `Upcast` stays and no new one is inserted. From
+        // v3 there is none, and the `Int` meets the `Long` implementation
+        fn sum(version: ErgoTreeVersion, body_hex: &str, var_hex: &str) -> Result<i64, EvalError> {
+            let body = base16::decode(body_hex.as_bytes()).unwrap();
+            let expr = from_bytes(&body)
+                .with_tree_version(version, Expr::sigma_parse)
+                .unwrap();
+            let var = base16::decode(var_hex.as_bytes()).unwrap();
+            let ext = ContextExtension {
+                values: [(1u8, var.into())].iter().cloned().collect(),
+            };
+            let mut ctx = force_any_val::<Context>().with_extension(&ext);
+            ctx.activated_script_version_byte = 3;
+            ctx.tree_version.set(version);
+            try_eval_with_deserialize::<i64>(&expr, &ctx)
+        }
+        // `1L + executeFromVar[Int](1)`, the variable holding the constant `2`
+        assert_eq!(sum(ErgoTreeVersion::V0, "9a0502d40401", "0404").unwrap(), 3);
+        assert!(sum(ErgoTreeVersion::V3, "9a0502d40401", "0404").is_err());
+        // the control: `1L + executeFromVar[Long](1)`, the variable holding `2L`
+        assert_eq!(sum(ErgoTreeVersion::V3, "9a0502d40501", "0504").unwrap(), 3);
+    }
+
+    #[test]
+    fn a_tree_built_in_memory_gets_no_upcast() {
+        // By reading: only the deserializing builder inserts an `Upcast`. A sum built without
+        // the parser, as a tree from sigmastate's `StdSigmaBuilder`, keeps its operands as
+        // given, and a `Long` with an `Int` throws at evaluation
+        let plus = |right: Expr| -> Expr {
+            BinOp {
+                kind: ArithOp::Plus.into(),
+                left: Box::new(Expr::Const(1i64.into())),
+                right: Box::new(right),
+            }
+            .into()
+        };
+        assert!(try_eval_out_wo_ctx::<Value>(&plus(Expr::Const(2i32.into()))).is_err());
+        assert_eq!(
+            try_eval_out_wo_ctx::<Value>(&plus(Expr::Const(2i64.into()))).unwrap(),
+            Value::Long(3)
+        );
     }
 
     #[test]
