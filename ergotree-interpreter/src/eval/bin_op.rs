@@ -1,5 +1,7 @@
 //! Operators in ErgoTree
 
+use core::cmp::Ordering;
+
 use ergotree_ir::bigint256::BigInt256;
 use ergotree_ir::mir::bin_op::BinOp;
 use ergotree_ir::mir::bin_op::BinOpKind;
@@ -85,72 +87,44 @@ where
         .map(|t| t.into()) // convert T to Value
 }
 
-fn eval_ge<'ctx>(lv: Value<'ctx>, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError> {
-    match lv {
-        Value::Byte(lv_raw) => Ok((lv_raw >= rv.try_extract_into::<i8>()?).into()),
-        Value::Short(lv_raw) => Ok((lv_raw >= rv.try_extract_into::<i16>()?).into()),
-        Value::Int(lv_raw) => Ok((lv_raw >= rv.try_extract_into::<i32>()?).into()),
-        Value::Long(lv_raw) => Ok((lv_raw >= rv.try_extract_into::<i64>()?).into()),
-        Value::BigInt(lv_raw) => Ok((lv_raw >= rv.try_extract_into::<BigInt256>()?).into()),
-        Value::UnsignedBigInt(lv_raw) => {
-            Ok((lv_raw >= rv.try_extract_into::<UnsignedBigInt>()?).into())
-        }
+/// The ordering of a comparison's operands. sigmastate adds the comparison's cost once both
+/// operands are evaluated, then takes the ordering of the LEFT operand's static type, from the
+/// table arithmetic uses, and casts BOTH operand values to it (`SimpleRelation.opImpl`, v6.0.6
+/// `trees.scala:1075-1078`; `LT.eval`, `:1092-1098`, and `LE`, `GT`, `GE` alike). A value of
+/// another type throws at every tree version, also when both values are of one kind (SANTA
+/// `Comparison.mixed_width`)
+fn eval_ordering<'ctx>(
+    op: &BinOp,
+    lv: Value<'ctx>,
+    rv: Value<'ctx>,
+    ctx: &Context<'ctx>,
+) -> Result<Ordering, EvalError> {
+    ctx.add_jit_cost(20)?; // LT, LE, GT, GE: 20 for every type
+    let op_tpe = op.left.tpe();
+    match op_tpe {
+        SType::SByte => ordering_at::<i8>(lv, rv),
+        SType::SShort => ordering_at::<i16>(lv, rv),
+        SType::SInt => ordering_at::<i32>(lv, rv),
+        SType::SLong => ordering_at::<i64>(lv, rv),
+        SType::SBigInt => ordering_at::<BigInt256>(lv, rv),
+        SType::SUnsignedBigInt => ordering_at::<UnsignedBigInt>(lv, rv),
+        // No parsed comparison gets here: the builder requires numeric operands
+        // (`comparisonOp`, `check_build`). The JVM's table has no entry for another type
         _ => Err(EvalError::UnexpectedValue(format!(
-            "expected BinOp::left to be numeric value, got {0:?}",
-            lv
+            "{:?}: no ordering for the left operand's type {op_tpe:?}",
+            op.kind
         ))),
     }
 }
 
-fn eval_gt<'ctx>(lv: Value<'ctx>, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError> {
-    match lv {
-        Value::Byte(lv_raw) => Ok((lv_raw > rv.try_extract_into::<i8>()?).into()),
-        Value::Short(lv_raw) => Ok((lv_raw > rv.try_extract_into::<i16>()?).into()),
-        Value::Int(lv_raw) => Ok((lv_raw > rv.try_extract_into::<i32>()?).into()),
-        Value::Long(lv_raw) => Ok((lv_raw > rv.try_extract_into::<i64>()?).into()),
-        Value::BigInt(lv_raw) => Ok((lv_raw > rv.try_extract_into::<BigInt256>()?).into()),
-        Value::UnsignedBigInt(lv_raw) => {
-            Ok((lv_raw > rv.try_extract_into::<UnsignedBigInt>()?).into())
-        }
-        _ => Err(EvalError::UnexpectedValue(format!(
-            "expected BinOp::left to be numeric value, got {0:?}",
-            lv
-        ))),
-    }
-}
-
-fn eval_lt<'ctx>(lv: Value<'ctx>, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError> {
-    match lv {
-        Value::Byte(lv_raw) => Ok((lv_raw < rv.try_extract_into::<i8>()?).into()),
-        Value::Short(lv_raw) => Ok((lv_raw < rv.try_extract_into::<i16>()?).into()),
-        Value::Int(lv_raw) => Ok((lv_raw < rv.try_extract_into::<i32>()?).into()),
-        Value::Long(lv_raw) => Ok((lv_raw < rv.try_extract_into::<i64>()?).into()),
-        Value::BigInt(lv_raw) => Ok((lv_raw < rv.try_extract_into::<BigInt256>()?).into()),
-        Value::UnsignedBigInt(lv_raw) => {
-            Ok((lv_raw < rv.try_extract_into::<UnsignedBigInt>()?).into())
-        }
-        _ => Err(EvalError::UnexpectedValue(format!(
-            "expected BinOp::left to be numeric value, got {0:?}",
-            lv
-        ))),
-    }
-}
-
-fn eval_le<'ctx>(lv: Value<'ctx>, rv: Value<'ctx>) -> Result<Value<'ctx>, EvalError> {
-    match lv {
-        Value::Byte(lv_raw) => Ok((lv_raw <= rv.try_extract_into::<i8>()?).into()),
-        Value::Short(lv_raw) => Ok((lv_raw <= rv.try_extract_into::<i16>()?).into()),
-        Value::Int(lv_raw) => Ok((lv_raw <= rv.try_extract_into::<i32>()?).into()),
-        Value::Long(lv_raw) => Ok((lv_raw <= rv.try_extract_into::<i64>()?).into()),
-        Value::BigInt(lv_raw) => Ok((lv_raw <= rv.try_extract_into::<BigInt256>()?).into()),
-        Value::UnsignedBigInt(lv_raw) => {
-            Ok((lv_raw <= rv.try_extract_into::<UnsignedBigInt>()?).into())
-        }
-        _ => Err(EvalError::UnexpectedValue(format!(
-            "expected BinOp::left to be numeric value, got {0:?}",
-            lv
-        ))),
-    }
+/// The ordering of two values at `T`: each must be a `T`
+fn ordering_at<'ctx, T>(lv: Value<'ctx>, rv: Value<'ctx>) -> Result<Ordering, EvalError>
+where
+    T: Ord + TryExtractFrom<Value<'ctx>>,
+{
+    let lv_raw = lv.try_extract_into::<T>()?;
+    let rv_raw = rv.try_extract_into::<T>()?;
+    Ok(lv_raw.cmp(&rv_raw))
 }
 
 /// An arithmetic operation at `T`, the Rust type of the left operand's static type. sigmastate
@@ -213,15 +187,11 @@ impl Evaluable for BinOp {
         match self.kind {
             // The arithmetic cost is charged in `eval_arith`, by the left operand's static type
             BinOpKind::Arith(_) => {}
-            BinOpKind::Relation(op) => match op {
-                // Eq/NEq cost is charged by eq_with_cost during the eval
-                // dispatch below (per-type + per-coll-element), since the cost
-                // depends on the runtime value type.
-                RelationOp::Eq | RelationOp::NEq => {}
-                _ => {
-                    ctx.add_jit_cost(20)?;
-                } // LT, LE, GT, GE = Fixed(20)
-            },
+            // Eq/NEq cost is charged by eq_with_cost during the eval
+            // dispatch below (per-type + per-coll-element), since the cost
+            // depends on the runtime value type. LT, LE, GT, GE are charged in
+            // `eval_ordering`, once the right operand is evaluated
+            BinOpKind::Relation(_) => {}
             BinOpKind::Logical(_) => {
                 ctx.add_jit_cost(20)?; // BinOr, BinAnd, BinXor = Fixed(20)
             }
@@ -272,10 +242,10 @@ impl Evaluable for BinOp {
                         !crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
                     ))
                 }
-                RelationOp::Gt => eval_gt(lv, rv()?),
-                RelationOp::Lt => eval_lt(lv, rv()?),
-                RelationOp::Ge => eval_ge(lv, rv()?),
-                RelationOp::Le => eval_le(lv, rv()?),
+                RelationOp::Gt => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_gt().into()),
+                RelationOp::Lt => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_lt().into()),
+                RelationOp::Ge => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_ge().into()),
+                RelationOp::Le => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_le().into()),
             },
             BinOpKind::Arith(op) => {
                 let rv = rv()?;
@@ -512,6 +482,136 @@ mod arith_op_type_tests {
         assert_accepts("0b0c9ab210030204060400000402", Value::Int(2), 60);
         assert_accepts("0b0e9adc0c0a10030204060104000402", Value::Int(2), 64);
         assert_accepts("0b0ea1dc0c0a10030204060104000402", Value::Int(1), 54);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod comparison_type_tests {
+    use alloc::boxed::Box;
+    use ergotree_ir::mir::bin_op::{BinOp, RelationOp};
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::value::Value;
+
+    use crate::eval::test_util::{assert_trees, eval_tree, try_eval_out_wo_ctx};
+
+    #[test]
+    fn santa_comparison_rows() {
+        // SANTA `Comparison.mixed_width` (`78cb343`, sigma-state 6.0.7), each script as a v3
+        // sized tree and a v0 tree. `I2` = `If(false, 1L, 2)`, `I3` = `If(false, 1L, 3)`: the
+        // static type is `Long`, the value an `Int`
+        let f = |cost| Some((Value::Boolean(false), cost));
+        assert_trees(&[
+            // R0 `1L > 2L`, the control
+            ("0b059105020504", f(30)),
+            ("009105020504", f(30)),
+            // R1 `I3 > I2`
+            ("0b0f919501000502040695010005020404", None),
+            ("00919501000502040695010005020404", None),
+            // R2 `I2 > 1L`
+            ("0b0a91950100050204040502", None),
+            ("0091950100050204040502", None),
+            // R3 `3L > I2`
+            ("0b0a91050695010005020404", None),
+            ("0091050695010005020404", None),
+            // R4 `I2 < I3`
+            ("0b0f8f9501000502040495010005020406", None),
+            ("008f9501000502040495010005020406", None),
+            // R5 `I2 >= I2`
+            ("0b0f929501000502040495010005020404", None),
+            ("00929501000502040495010005020404", None),
+            // R6 `I2 <= I2`
+            ("0b0f909501000502040495010005020404", None),
+            ("00909501000502040495010005020404", None),
+            // R7 `I2 == I2`: refused by `EQ`'s own check of each value against its operand's
+            // type, a control and not the ordering's refusal
+            ("0b0f939501000502040495010005020404", None),
+            ("00939501000502040495010005020404", None),
+        ]);
+    }
+
+    #[test]
+    fn a_comparison_takes_the_left_operand_s_static_type() {
+        // The refusals are by reading: the lookup is the one SANTA measured for a `Long`
+        // operand holding an `Int` (`SimpleRelation.opImpl`, v6.0.6 `trees.scala:1075-1078`),
+        // here for other types and for the other direction. The values and costs are
+        // sigma-rust's own at `d34f774b`, not JVM measurements
+        let b = |v, cost| Some((Value::Boolean(v), cost));
+        assert_trees(&[
+            // `If(false, 1, 3L) > If(false, 1, 2L)`: `Long` values in `Int` operands
+            ("0b0f919501000402050695010004020504", None),
+            ("00919501000402050695010004020504", None),
+            // `If(false, BigInt 1, 3L) > If(false, BigInt 1, 2L)`: `Long` values in `BigInt`
+            // operands
+            ("0b119195010006010105069501000601010504", None),
+            ("009195010006010105069501000601010504", None),
+            // `If(false, 1L, 3L) > If(false, 1L, 2L)`, the honest twin of R1
+            ("0b0f919501000502050695010005020504", b(true, 60)),
+            ("00919501000502050695010005020504", b(true, 60)),
+            // `UnsignedBigInt 1 > UnsignedBigInt 2`
+            ("0b0791090101090102", b(false, 30)),
+            // `BigInt 1 > BigInt 2`
+            ("0b0791060101060102", b(false, 30)),
+            // `(1: Byte) > (2: Byte)`
+            ("0b059102010202", b(false, 30)),
+        ]);
+    }
+
+    #[test]
+    fn producers_keep_their_comparison() {
+        // A comparison whose left operand's type comes from another node keeps its value:
+        // sigma-rust's own values and costs at `d34f774b`, not JVM measurements. A `tpe()` that
+        // named another type than the value's would refuse a tree the JVM accepts
+        let b = |v, cost| Some((Value::Boolean(v), cost));
+        assert_trees(&[
+            // `ByIndex(Coll[Long](1, 2), 0) > 1L`
+            ("0b0b91b2110202040400000502", b(false, 65)),
+            ("0091b2110202040400000502", b(false, 65)),
+            // `(1L, 2L)._1 > 1L`
+            ("0b08918c590204010502", b(false, 40)),
+            // `{ val x = 1L; x > x }`
+            ("0b0bd801d60105029172017201", b(false, 42)),
+            // `SizeOf(Coll[Long](1, 2)) > 1`
+            ("0b0891b1110202040402", b(true, 44)),
+            // `Coll[Long](1, 2).size > 1`
+            ("0b0a91db0c01110202040402", b(true, 48)),
+            // `OptionGet(Some(1L)) > 1L`
+            ("0b0791e42901020502", b(false, 45)),
+        ]);
+    }
+
+    #[test]
+    fn a_comparison_charges_after_both_operands() {
+        // By reading: `LT.eval` evaluates both operands, then adds its cost (v6.0.6
+        // `trees.scala:1092-1098`). `1L > 2L / 0L` fails in the division: the three constants
+        // and the division's 15 are charged, the comparison's 20 is not
+        for tree in ["0b089105029d05040500", "009105029d05040500"] {
+            let (res, cost) = eval_tree(tree);
+            assert!(res.is_err(), "{tree}: {res:?}");
+            assert_eq!(cost, 30, "{tree}");
+        }
+    }
+
+    #[test]
+    fn a_comparison_built_in_memory_over_a_non_numeric_type_errors() {
+        // The parser refuses a comparison of non-numeric operands (`comparisonOp`); a tree
+        // built without it has no entry in the JVM's table and must be an error here, not a
+        // panic
+        for op in [
+            RelationOp::Gt,
+            RelationOp::Lt,
+            RelationOp::Ge,
+            RelationOp::Le,
+        ] {
+            let expr: Expr = BinOp {
+                kind: op.into(),
+                left: Box::new(Expr::Const(true.into())),
+                right: Box::new(Expr::Const(true.into())),
+            }
+            .into();
+            assert!(try_eval_out_wo_ctx::<Value>(&expr).is_err(), "{op:?}");
+        }
     }
 }
 
