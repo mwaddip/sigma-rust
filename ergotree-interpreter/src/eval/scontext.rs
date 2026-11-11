@@ -371,6 +371,7 @@ mod get_var_from_input_tests {
     use ergotree_ir::chain::context::Context;
     use ergotree_ir::chain::context_extension::ContextExtension;
     use ergotree_ir::chain::evaluated_value::EvaluatedValue;
+    use ergotree_ir::mir::coll_value::CollValue;
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::method_call::MethodCall;
     use ergotree_ir::mir::value::Value;
@@ -393,6 +394,7 @@ mod get_var_from_input_tests {
             values: [
                 (0u8, value("86020402a3")),
                 (1u8, value("830158860204020404")),
+                (2u8, value("48040404020406")),
             ]
             .into_iter()
             .collect(),
@@ -417,5 +419,21 @@ mod get_var_from_input_tests {
         assert_eq!(read(0, SType::SInt).unwrap(), Value::Opt(None));
         let pairs = SType::SColl(SType::STuple(STuple::pair(SType::SInt, SType::SInt)).into());
         assert!(read(1, pairs).is_err());
+        // its var 2, the constant `(1, 2, 3)`: read at its own type it is the tuple's
+        // `Coll[Any]` (SANTA's tuple-values reply: `getVarFromInput[(Int, Int, Int)](0, 1).get.size`
+        // is 3), read as a `Coll[Int]` it is `None`, not a throw
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        let ints = alloc::vec![Value::Int(1), Value::Int(2), Value::Int(3)];
+        assert_eq!(
+            read(2, triple).unwrap(),
+            Value::Opt(Some(Box::new(Value::Coll(CollValue::generic(
+                SType::SAny,
+                ints
+            )))))
+        );
+        assert_eq!(
+            read(2, SType::SColl(SType::SInt.into())).unwrap(),
+            Value::Opt(None)
+        );
     }
 }

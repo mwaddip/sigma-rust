@@ -779,13 +779,21 @@ pub mod test_util {
     /// without the tree's root-type check), and its value and JIT cost at activated version 3
     #[cfg(test)]
     pub(crate) fn eval_v3_body(tree_hex: &str) -> (Expr, Result<Value<'static>, EvalError>, u64) {
+        eval_v3_body_in(force_any_val::<Context>(), tree_hex)
+    }
+
+    /// [`eval_v3_body`] in the given context
+    #[cfg(test)]
+    pub(crate) fn eval_v3_body_in(
+        mut ctx: Context<'static>,
+        tree_hex: &str,
+    ) -> (Expr, Result<Value<'static>, EvalError>, u64) {
         let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
         assert_eq!(bytes[0], 0x0b, "{tree_hex}");
         assert!(bytes[1] < 0x80, "{tree_hex}");
         let expr = from_bytes(&bytes[2..])
             .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
             .unwrap();
-        let mut ctx = force_any_val::<Context>();
         ctx.activated_script_version_byte = 3;
         ctx.tree_version.set(ErgoTreeVersion::V3);
         ctx.jit_cost.set(0);

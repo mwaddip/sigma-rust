@@ -119,6 +119,31 @@ pub(crate) mod register_conversion_tests {
     }
 
     #[test]
+    fn a_register_tuple_of_three_reads_as_a_collection() {
+        // SANTA's tuple-values reply, G2 and G3: SizeOf(SELF.R4[(Int, Int, Int)].get) is 3 @89
+        // for R4 = the constant `(1, 2, 3)` and for R4 = the tuple EXPRESSION `Tuple(1, 2, 3)`
+        // alike (`Tuple.value` is the `Coll[Any]` the data decoder builds)
+        use crate::eval::test_util::eval_v3_body_in;
+        use ergotree_ir::mir::value::Value;
+        for r4 in ["48040404020406", "8603040204040406"] {
+            let (_, res, cost) = eval_v3_body_in(ctx_with_r4(r4), "0b09b1e4c6a70448040404");
+            assert_eq!(res.unwrap(), Value::Int(3), "{r4}");
+            assert_eq!(cost, 89, "{r4}");
+        }
+        // R4 = `Coll((1, 2, 3))`: SizeOf(SELF.R4[Coll[(Int, Int, Int)]].get(0)) is 3 @124, where
+        // the same collection built in the script throws (`tuple.rs`)
+        let (_, res, cost) = eval_v3_body_in(
+            ctx_with_r4("0c4804040401020406"),
+            "0b0eb1b2e4c6a7040c48040404040000",
+        );
+        assert_eq!(res.unwrap(), Value::Int(3));
+        assert_eq!(cost, 124);
+        // R4 = `(1, 2, 3)` read as a Coll[Int]: the register's type is the tuple's
+        let (_, res, _) = eval_v3_body_in(ctx_with_r4("48040404020406"), "0b06b1e4c6a70410");
+        assert!(res.is_err());
+    }
+
+    #[test]
     fn a_register_read_converts_every_register_of_the_box() {
         // SANTA V10: R4 = `Tuple(1, HEIGHT)` fails the read of R5; its twin, R4 = `Tuple(1, 2)`,
         // does not; and C1 as R4, a `Coll[(Int, Int)]` holding a tuple expression, fails it
