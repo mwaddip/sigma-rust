@@ -28,13 +28,15 @@ impl Evaluable for Tuple {
                 self.items.len()
             )));
         };
-        ctx.add_jit_cost(15)?; // Tuple = Fixed(15)
-                               // Mirror the JVM Tuple eval, which `checkType`s each item's value after
-                               // evaluating it (`values.scala:828-833`): an item whose type is an
-                               // unsupported tuple (arity != 2) is rejected ("Unsupported tuple
-                               // type", SType.scala:200), which catches an arity-3 tuple constant
-                               // carried as a pair item; so is a pair item whose value is not a pair,
-                               // the data of a pair tuple expression.
+        // Tuple = Fixed(15)
+        ctx.add_jit_cost(15)?;
+
+        // Mirror the JVM Tuple eval, which `checkType`s each item's value after
+        // evaluating it (`values.scala:828-833`): an item whose type is an
+        // unsupported tuple (arity != 2) is rejected ("Unsupported tuple
+        // type", SType.scala:200), which catches an arity-3 tuple constant
+        // carried as a pair item; so is a pair item whose value is not a pair,
+        // the data of a pair tuple expression.
         let mut item_v = |i: &Expr| -> Result<Value<'ctx>, EvalError> {
             let v = i.eval(env, ctx)?;
             crate::eval::check_value_of_type(&i.tpe(), &v, ctx.tree_version())?;
@@ -153,6 +155,66 @@ mod non_pair_value_rows {
             "0b11b548040404020406d90101049172010402",
             coll(SType::SAny, &[2, 3]),
             136,
+        );
+    }
+
+    #[test]
+    fn the_coll_methods_read_a_tuple_as_a_collection() {
+        // SANTA's tuple-values reply, section 3: the `Coll` methods on `(1, 2, 3)` at the plain
+        // collection's costs (the trees are ours; the costs are the reply's)
+        // size, apply(0), get(0), getOrElse(5, 9)
+        assert_accepts("0b0adb0c0148040404020406", int(3), 23);
+        assert_accepts("0b0ddc0c0a48040404020406010400", int(1), 44);
+        assert_accepts(
+            "0b0ddc0c2148040404020406010400",
+            Value::Opt(Some(alloc::boxed::Box::new(int(1)))),
+            44,
+        );
+        assert_accepts("0b0fdc0c024804040402040602040a0412", int(9), 49);
+        // indexOf(1, 1): -1, searching from index 1; indices
+        assert_accepts("0b0fdc0c1a480404040204060204020402", int(-1), 55);
+        assert_accepts(
+            "0b0adb0c0e48040404020406",
+            coll(SType::SInt, &[0, 1, 2]),
+            31,
+        );
+        // startsWith and endsWith, the tuple as receiver and as argument
+        assert_accepts("0b12dc0c1f480404040204060148040404020406", truth(), 25);
+        assert_accepts("0b12dc0c20480404040204060148040404020406", truth(), 25);
+        assert_accepts("0b10dc0c1f10030204060148040404020406", truth(), 25);
+        // reverse, updated(0, 7), patch(0, t, 1): the item type stays `Any`
+        assert_accepts(
+            "0b0adb0c1e48040404020406",
+            coll(SType::SAny, &[3, 2, 1]),
+            31,
+        );
+        assert_accepts(
+            "0b0fdc0c1448040404020406020400040e",
+            coll(SType::SAny, &[7, 2, 3]),
+            40,
+        );
+        assert_accepts(
+            "0b16dc0c1348040404020406030400480404040204060402",
+            coll(SType::SAny, &[1, 2, 3, 2, 3]),
+            56,
+        );
+        // zip: the pair's item type has `Any` on the tuple's side
+        let zipped = |other: SType| {
+            let ints = |xs: &[i32]| xs.iter().map(|i| Value::Int(*i)).collect::<Vec<_>>();
+            Value::Coll(CollValue::pairs(
+                CollValue::generic(SType::SAny, ints(&[1, 2, 3])),
+                CollValue::generic(other, ints(&[1, 2, 3])),
+            ))
+        };
+        assert_accepts(
+            "0b12dc0c1d480404040204060148040404020406",
+            zipped(SType::SAny),
+            25,
+        );
+        assert_accepts(
+            "0b10dc0c1d48040404020406011003020406",
+            zipped(SType::SInt),
+            25,
         );
     }
 
