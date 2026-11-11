@@ -3,17 +3,40 @@ use core::convert::TryInto;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use ergotree_ir::mir::atleast::Atleast;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractFromError;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::sigma_protocol::sigma_boolean::cthreshold::Cthreshold;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaBoolean;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
+use ergotree_ir::types::stype::SType;
 
 use crate::eval::env::Env;
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
+
+/// The propositions of `AtLeast`'s input. sigmastate casts the collection's backing array to
+/// `SigmaProp[]` (`toSigmaTrees(props.toArray)`, v6.0.6 `CSigmaDslBuilder.scala:105`), which only
+/// a collection built at the item type `SigmaProp` has: a tuple of propositions, a `Coll[Any]`
+/// over `Object[]`, throws there, empty or not (SANTA's tuple-values reply, A4)
+fn sigma_props(coll: &CollValue<'_>) -> Result<Vec<SigmaBoolean>, EvalError> {
+    if coll.elem_tpe() != SType::SSigmaProp {
+        return Err(EvalError::UnexpectedValue(format!(
+            "Atleast: a collection of {:?} is not an array of SigmaProp",
+            coll.elem_tpe()
+        )));
+    }
+    Ok(coll
+        .as_vec()
+        .into_iter()
+        .map(|i| {
+            i.try_extract_into::<SigmaProp>()
+                .map(|sp| sp.value().clone())
+        })
+        .collect::<Result<Vec<SigmaBoolean>, TryExtractFromError>>()?)
+}
 
 impl Evaluable for Atleast {
     fn eval<'ctx>(
@@ -24,23 +47,17 @@ impl Evaluable for Atleast {
         let bound_v = self.bound.eval(env, ctx)?;
         let input_v = self.input.eval(env, ctx)?;
 
-        let normalized_input_vals: Vec<Value> = match input_v {
-            Value::Coll(coll) => Ok(coll.as_vec()),
+        let coll = match input_v {
+            Value::Coll(coll) => Ok(coll),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "Atleast: expected input to be Value::Coll, got: {0:?}",
                 input_v
             ))),
         }?;
-        ctx.add_per_item_jit_cost(20, 3, 5, normalized_input_vals.len() as u32)?;
+        ctx.add_per_item_jit_cost(20, 3, 5, coll.len() as u32)?;
 
         let bound = bound_v.try_extract_into::<i32>()?;
-        let input = normalized_input_vals
-            .into_iter()
-            .map(|i| {
-                i.try_extract_into::<SigmaProp>()
-                    .map(|sp| sp.value().clone())
-            })
-            .collect::<Result<Vec<SigmaBoolean>, TryExtractFromError>>()?;
+        let input = sigma_props(&coll)?;
 
         // Mirror Scala `CSigmaDslBuilder.atLeast` (sigma/data/CSigmaDslBuilder.scala): the
         // children-count cap (`MaxChildrenCountForAtLeastOp = 255`) is checked BEFORE
@@ -159,6 +176,34 @@ mod tests {
         )
         .unwrap()
         .into()
+    }
+
+    #[test]
+    fn needs_an_array_of_sigma_props() {
+        let props = || -> Vec<Value<'static>> {
+            vec![
+                Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
+                Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
+            ]
+        };
+        let typed = CollValue::generic(SType::SSigmaProp, props());
+        assert_eq!(sigma_props(&typed).unwrap().len(), 2);
+        // a tuple of propositions is a `Coll[Any]`: the cast of its array throws, empty or not
+        let tuple = CollValue::generic(SType::SAny, props());
+        assert!(sigma_props(&tuple).is_err());
+        let empty_tuple = CollValue::generic(SType::SAny, Vec::<Value<'static>>::new());
+        assert!(sigma_props(&empty_tuple).is_err());
+    }
+
+    #[test]
+    fn a_concrete_collection_is_an_array_of_sigma_props() {
+        use ergotree_ir::mir::collection::Collection;
+        let prop = || Expr::Const(force_any_val::<SigmaProp>().into());
+        let coll: Expr = Collection::new(SType::SSigmaProp, vec![prop(), prop()])
+            .unwrap()
+            .into();
+        let expr: Expr = Atleast::new(2i32.into(), coll).unwrap().into();
+        assert!(try_eval_out_wo_ctx::<SigmaProp>(&expr).is_ok());
     }
 
     // Scala `AtLeast.reduce` (sigma/ast/trees.scala): `bound > children.size` reduces to

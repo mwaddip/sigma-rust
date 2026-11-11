@@ -409,12 +409,11 @@ impl<'ctx> TryFrom<Value<'ctx>> for Literal {
                 }
                 None => Ok(Literal::Opt(None)),
             },
-            Value::Tup(t) => {
-                if let Ok(t) = t.try_mapped::<_, _, String>(Literal::try_from) {
-                    Ok(Literal::Tup(t))
-                } else {
-                    Err("Can't convert Value:Tup element".into())
-                }
+            Value::Pair(pair) => {
+                let (l, r) = *pair;
+                Ok(Literal::Tup(
+                    [Literal::try_from(l)?, Literal::try_from(r)?].into(),
+                ))
             }
             Value::AvlTree(a) => Ok(Literal::from(*a)),
             Value::String(s) => Ok(Literal::from(s)),
@@ -424,6 +423,222 @@ impl<'ctx> TryFrom<Value<'ctx>> for Literal {
             Value::Global => Err("Cannot convert Value::Global into Literal".into()),
             Value::Lambda(_) => Err("Cannot convert Value::Lambda(_) into Literal".into()),
         }
+    }
+}
+
+/// A value as data of type `tpe`: sigmastate's `DataSerializer.serialize(value, tpe, w)` reads
+/// the value by its static type and casts it to that type's class (v6.0.6
+/// `CoreDataSerializer.scala:22-85`, `DataSerializer.scala:15-24`), so a value of another class
+/// is an error. A tuple type takes a pair, or a collection of `Any` holding as many items as the
+/// type (`fromDslTuple`, `Evaluation.scala:91-96`, and the length assert, `:66-69`), and converts
+/// each item by its own type. A collection type converts its items by the item type; `Coll[Byte]`
+/// and `Coll[Boolean]` need a collection of that item type, whose array the JVM casts
+/// (`:53-56`). `Unit` writes nothing and reads no value (`:23`). A type with no arm (`Any`, a
+/// function, a type variable, `Global`, `Context`, `PreHeader`) is an error (`:82-84`). The
+/// version gates of `UnsignedBigInt`, `Option` and `Header` stay in the writer.
+pub fn literal_of_type(value: Value<'_>, tpe: &SType) -> Result<Literal, String> {
+    let tuple = |items: Vec<Value<'_>>, t: &STuple| -> Result<Literal, String> {
+        let data = items
+            .into_iter()
+            .zip(t.items.iter())
+            .map(|(item, item_tpe)| literal_of_type(item, item_tpe))
+            .collect::<Result<Vec<Literal>, String>>()?;
+        TupleItems::try_from(data)
+            .map(Literal::Tup)
+            .map_err(|e| format!("a tuple of type {tpe:?}: {e:?}"))
+    };
+    match (tpe, value) {
+        (SType::SUnit, _) => Ok(Literal::Unit),
+        (SType::SBoolean, v @ Value::Boolean(_))
+        | (SType::SByte, v @ Value::Byte(_))
+        | (SType::SShort, v @ Value::Short(_))
+        | (SType::SInt, v @ Value::Int(_))
+        | (SType::SLong, v @ Value::Long(_))
+        | (SType::SString, v @ Value::String(_))
+        | (SType::SBigInt, v @ Value::BigInt(_))
+        | (SType::SUnsignedBigInt, v @ Value::UnsignedBigInt(_))
+        | (SType::SGroupElement, v @ Value::GroupElement(_))
+        | (SType::SSigmaProp, v @ Value::SigmaProp(_))
+        | (SType::SAvlTree, v @ Value::AvlTree(_))
+        | (SType::SBox, v @ Value::CBox(_))
+        | (SType::SHeader, v @ Value::Header(_)) => Literal::try_from(v),
+        (SType::SColl(elem), Value::Coll(coll)) => match **elem {
+            SType::SByte | SType::SBoolean if coll.elem_tpe() == **elem => {
+                CollKind::try_from(coll).map(Literal::Coll)
+            }
+            SType::SByte | SType::SBoolean => Err(format!(
+                "a value of type {tpe:?} cannot be a collection of {:?}",
+                coll.elem_tpe()
+            )),
+            _ => Ok(Literal::Coll(CollKind::WrappedColl {
+                elem_tpe: (**elem).clone(),
+                items: coll
+                    .as_vec()
+                    .into_iter()
+                    .map(|item| literal_of_type(item, elem))
+                    .collect::<Result<Arc<[Literal]>, String>>()?,
+            })),
+        },
+        (SType::STuple(t), Value::Pair(pair)) if t.items.len() == 2 => {
+            let (l, r) = *pair;
+            tuple(alloc::vec![l, r], t)
+        }
+        (SType::STuple(t), Value::Coll(coll))
+            if coll.elem_tpe() == SType::SAny && coll.len() == t.items.len() =>
+        {
+            tuple(coll.as_vec(), t)
+        }
+        (SType::SOption(elem), Value::Opt(opt)) => Ok(Literal::Opt(match opt {
+            Some(v) => Some(Box::new(literal_of_type(*v, elem)?)),
+            None => None,
+        })),
+        (_, value) => Err(format!("a value of type {tpe:?} cannot be {value:?}")),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod literal_of_type_tests {
+    use super::*;
+    use crate::mir::coll_value::CollValue;
+    use alloc::vec;
+
+    fn int_triple() -> SType {
+        SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt))
+    }
+
+    fn int_pair() -> SType {
+        SType::STuple(STuple::pair(SType::SInt, SType::SInt))
+    }
+
+    fn ints(xs: &[i32]) -> Vec<Value<'static>> {
+        xs.iter().map(|x| Value::Int(*x)).collect()
+    }
+
+    /// sigmastate's value of a tuple of other than two items
+    fn any_coll(items: Vec<Value<'static>>) -> Value<'static> {
+        Value::Coll(CollValue::generic(SType::SAny, items))
+    }
+
+    fn int_tuple(xs: &[i32]) -> Literal {
+        let items: Vec<Literal> = xs.iter().map(|x| Literal::Int(*x)).collect();
+        Literal::Tup(items.try_into().unwrap())
+    }
+
+    #[test]
+    fn a_collection_of_any_is_a_tuple_of_its_length() {
+        assert_eq!(
+            literal_of_type(any_coll(ints(&[1, 2, 3])), &int_triple()),
+            Ok(int_tuple(&[1, 2, 3]))
+        );
+        // `fromDslTuple` takes a collection of `Any` for a pair type too
+        assert_eq!(
+            literal_of_type(any_coll(ints(&[1, 2])), &int_pair()),
+            Ok(int_tuple(&[1, 2]))
+        );
+        // the length assert
+        assert!(literal_of_type(any_coll(ints(&[1, 2])), &int_triple()).is_err());
+        assert!(literal_of_type(any_coll(ints(&[1, 2, 3])), &int_pair()).is_err());
+        // `fromDslTuple` refuses a collection of another item type
+        let coll_of_ints = Value::Coll(CollValue::generic(SType::SInt, ints(&[1, 2, 3])));
+        assert!(literal_of_type(coll_of_ints, &int_triple()).is_err());
+    }
+
+    #[test]
+    fn a_pair_is_a_tuple_of_two() {
+        let pair: Value = (1i32, 2i32).into();
+        assert_eq!(
+            literal_of_type(pair.clone(), &int_pair()),
+            Ok(int_tuple(&[1, 2]))
+        );
+        assert!(literal_of_type(pair, &int_triple()).is_err());
+    }
+
+    #[test]
+    fn a_collection_converts_its_items_by_the_item_type() {
+        // a data `Coll[(Int, Int, Int)]` as sigmastate holds it: a `Coll[Coll[Any]]`
+        let coll = Value::Coll(CollValue::generic(
+            SType::SColl(SType::SAny.into()),
+            vec![any_coll(ints(&[1, 2, 3]))],
+        ));
+        assert_eq!(
+            literal_of_type(coll, &SType::SColl(int_triple().into())),
+            Ok(Literal::Coll(CollKind::WrappedColl {
+                elem_tpe: int_triple(),
+                items: vec![int_tuple(&[1, 2, 3])].into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn a_value_of_another_class_is_refused() {
+        // by reading: `DataSerializer.serialize` has no arm for `Any`, and casts a value to its
+        // type's class
+        assert!(literal_of_type(Value::Int(1), &SType::SAny).is_err());
+        assert!(literal_of_type(Value::Long(1), &SType::SInt).is_err());
+        assert!(literal_of_type(Value::Int(1), &SType::SColl(SType::SInt.into())).is_err());
+        assert!(literal_of_type(Value::Global, &SType::SGlobal).is_err());
+        assert_eq!(
+            literal_of_type(Value::Int(1), &SType::SInt),
+            Ok(Literal::Int(1))
+        );
+    }
+
+    #[test]
+    fn byte_and_boolean_collections_need_their_array() {
+        let coll_byte = SType::SColl(SType::SByte.into());
+        let bytes = vec![Value::Byte(1), Value::Byte(2)];
+        let native = Literal::Coll(CollKind::NativeColl(NativeColl::CollByte(
+            vec![1i8, 2].into(),
+        )));
+        assert_eq!(
+            literal_of_type(
+                Value::Coll(CollValue::Bytes(vec![1i8, 2].into())),
+                &coll_byte
+            ),
+            Ok(native.clone())
+        );
+        assert_eq!(
+            literal_of_type(
+                Value::Coll(CollValue::generic(SType::SByte, bytes.clone())),
+                &coll_byte
+            ),
+            Ok(native)
+        );
+        // a tuple of bytes is an `Object[]`: the cast to `byte[]` throws
+        assert!(literal_of_type(any_coll(bytes), &coll_byte).is_err());
+        let coll_bool = SType::SColl(SType::SBoolean.into());
+        assert_eq!(
+            literal_of_type(
+                Value::Coll(CollValue::Booleans(vec![true, false].into())),
+                &coll_bool
+            ),
+            Ok(Literal::Coll(CollKind::WrappedColl {
+                elem_tpe: SType::SBoolean,
+                items: vec![Literal::Boolean(true), Literal::Boolean(false)].into(),
+            }))
+        );
+        assert!(literal_of_type(any_coll(vec![Value::Boolean(true)]), &coll_bool).is_err());
+    }
+
+    #[test]
+    fn unit_reads_no_value_and_an_option_converts_its_value() {
+        assert_eq!(
+            literal_of_type(Value::Int(1), &SType::SUnit),
+            Ok(Literal::Unit)
+        );
+        let opt_triple = SType::SOption(int_triple().into());
+        assert_eq!(
+            literal_of_type(
+                Value::Opt(Some(Box::new(any_coll(ints(&[1, 2, 3]))))),
+                &opt_triple
+            ),
+            Ok(Literal::Opt(Some(Box::new(int_tuple(&[1, 2, 3])))))
+        );
+        assert_eq!(
+            literal_of_type(Value::Opt(None), &opt_triple),
+            Ok(Literal::Opt(None))
+        );
     }
 }
 
@@ -1218,16 +1433,6 @@ pub(crate) mod arbitrary {
                                 elem.clone().prop_map(|c| coll_from_constant(c, 2)),
                                 elem.clone().prop_map(|c| coll_from_constant(c, 10)),
                                 // no Option[_] since it cannot be serialized (for now)
-                                // // Some(v)
-                                // elem.clone().prop_map(|c| Constant {
-                                //     tpe: SType::SOption(Box::new(c.tpe)),
-                                //     v: Value::Opt(Box::new(Some(c.v)))
-                                // }),
-                                // // None
-                                // elem.prop_map(|c| Constant {
-                                //     tpe: SType::SOption(Box::new(c.tpe)),
-                                //     v: Value::Opt(Box::new(None))
-                                // })
 
                                 // Tuple
                                 vec(elem, 2..=4).prop_map(|constants| Constant {

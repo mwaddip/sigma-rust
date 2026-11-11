@@ -10,6 +10,7 @@ use ergotree_ir::mir::constant::Constant;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::subst_const::SubstConstants;
 use ergotree_ir::mir::value::Value;
+use ergotree_ir::types::stype::SType;
 use sigma_util::AsVecI8;
 use sigma_util::AsVecU8;
 
@@ -23,6 +24,17 @@ impl Evaluable for SubstConstants {
         let positions_v = self.positions.eval(env, ctx)?;
         let new_values_v = self.new_values.eval(env, ctx)?;
 
+        // sigmastate hands `positionsV.toArray` to a parameter of type `Array[Int]` (v6.0.6
+        // `trees.scala:641-644`, `:674`): the cast needs an `int[]`, which only a collection
+        // built at the item type `Int` has. A tuple of `Int`s is a `Coll[Any]` over `Object[]`
+        // and throws there (SANTA's tuple-values-3 reply: `[Ljava.lang.Object;` to `[I`)
+        let is_int_array =
+            matches!(&positions_v, Value::Coll(coll) if coll.elem_tpe() == SType::SInt);
+        if !is_int_array {
+            return Err(EvalError::UnexpectedValue(format!(
+                "SubstConstants: expected `positions` to be an array of Int, got {positions_v:?}"
+            )));
+        }
         let positions: Vec<usize> = positions_v
             .try_extract_into::<Vec<i32>>()?
             .into_iter()
@@ -87,6 +99,38 @@ impl Evaluable for SubstConstants {
 
 fn to_misc_err<T: core::fmt::Debug>(e: T) -> EvalError {
     EvalError::Misc(format!("{:?}", e))
+}
+
+/// SANTA `Tuple.non_pair_value_type_directed` #5 and #6 (sigma-state 6.0.7), and the positions'
+/// array
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod tuple_operand_rows {
+    use ergotree_ir::mir::coll_value::CollValue;
+    use ergotree_ir::mir::value::Value;
+
+    use crate::eval::test_util::{assert_accepts, eval_v3_body};
+
+    #[test]
+    fn new_values_and_positions_need_their_types() {
+        // the control: substConstants(script with two Int constants, Coll(0), Coll(9))
+        let substituted: [i8; 13] = [27, 11, 2, 4, 18, 4, 14, -47, -109, 115, 0, 115, 1];
+        assert_accepts(
+            "0b16740e0d1b0b02040e040ed19373007301100100100112",
+            Value::Coll(CollValue::Bytes(substituted.into())),
+            315,
+        );
+        // new values `Coll((1, 2, 3))` for a constant of type (Int, Int, Int): each lifts to a
+        // `Coll[Any]` constant, which is not the type of the constant it replaces
+        let tuple_values =
+            "0b22740e131b1102480404040204060406d193b1730073011001000c4804040401020406";
+        assert!(eval_v3_body(tuple_values).1.is_err());
+        // positions as the tuple `(0)`, a `Coll[Any]`, is not an `int[]` (SANTA's
+        // tuple-values-3 reply, section 2)
+        let tuple_positions = "0b17740e0d1b0b02040e040ed1937300730160010400100112";
+        assert!(eval_v3_body(tuple_positions).1.is_err());
+    }
 }
 
 #[cfg(test)]

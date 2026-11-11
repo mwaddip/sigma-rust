@@ -86,17 +86,9 @@ pub(crate) fn eq_with_cost<'ctx>(
             Ok(lv == rv)
         }
 
-        (Value::Tup(l_items), Value::Tup(r_items)) => {
+        (Value::Pair(l), Value::Pair(r)) => {
             ctx.add_jit_cost(EQ_TUPLE_COST)?;
-            if l_items.len() != r_items.len() {
-                return Ok(false);
-            }
-            for (l, r) in l_items.iter().zip(r_items.iter()) {
-                if !eq_with_cost(l, r, ctx)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
+            Ok(eq_with_cost(&l.0, &r.0, ctx)? && eq_with_cost(&l.1, &r.1, ctx)?)
         }
 
         (Value::Opt(l_opt), Value::Opt(r_opt)) => {
@@ -706,8 +698,8 @@ mod tests {
             Value::Coll(CollValue::Generic {
                 elem_tpe: int_pair(),
                 items: Arc::from(vec![
-                    Value::Tup([Value::Int(1), Value::Int(2)].into()),
-                    Value::Tup([Value::Int(3), Value::Int(4)].into()),
+                    Value::pair(Value::Int(1), Value::Int(2)),
+                    Value::pair(Value::Int(3), Value::Int(4)),
                 ]),
             })
         };

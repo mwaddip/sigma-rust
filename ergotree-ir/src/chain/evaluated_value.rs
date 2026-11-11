@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use ergo_chain_types::ec_point::generator;
 
 use crate::has_opcode::HasOpCode;
+use crate::mir::coll_value::CollValue;
 use crate::mir::collection::coll_sigma_serialize;
 use crate::mir::collection::Collection;
 use crate::mir::constant::Constant;
@@ -15,6 +16,7 @@ use crate::mir::expr::Expr;
 use crate::mir::global_vars::GlobalVars;
 use crate::mir::tuple::tuple_items_sigma_parse;
 use crate::mir::value::CollKind;
+use crate::mir::value::Value;
 use crate::serialization::op_code::OpCode;
 use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
@@ -64,8 +66,8 @@ impl<T: Into<Constant>> From<T> for EvaluatedValue {
 pub struct ScriptValue {
     /// The type a script reads the value at
     pub tpe: SType,
-    /// The data
-    pub v: Literal,
+    /// The value, as the evaluator holds it
+    pub v: Value<'static>,
 }
 
 impl EvaluatedValue {
@@ -87,24 +89,25 @@ impl EvaluatedValue {
     pub fn to_script_value(&self) -> Result<ScriptValue, TryExtractFromError> {
         // `stypeToRType(v.tpe)`, then `v.value` (`ErgoLikeContext.scala:159-160`)
         let tpe = self.script_type()?;
-        let v = self.script_data()?;
+        let v = self.script_value()?;
         Ok(ScriptValue { tpe, v })
     }
 
-    /// The value's data as a script reads it, sigmastate's `v.value`: a constant's data, a
-    /// tuple's or a collection's (`Tuple.value`, `ConcreteCollection.value`), which fails on an
-    /// item that is not a value or on a pair's tuple expression
-    pub(crate) fn script_data(&self) -> Result<Literal, TryExtractFromError> {
-        Ok(match self {
-            EvaluatedValue::Constant(c) => c.v.clone(),
+    /// The value as a script reads it, sigmastate's `v.value`: a constant's data as the data
+    /// decoder holds it, a tuple's or a collection's as the expression builds it (`Tuple.value`,
+    /// `ConcreteCollection.value`), which fails on an item that is not a value or on a pair's
+    /// tuple expression
+    pub(crate) fn script_value(&self) -> Result<Value<'static>, TryExtractFromError> {
+        match self {
+            EvaluatedValue::Constant(c) => Ok(Value::from(c.v.clone())),
             EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => {
-                tuple_script_data(items.as_slice())?
+                tuple_script_value(items.as_slice())
             }
-            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => collection_script_data(c)?,
+            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => collection_script_value(c),
             EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => {
-                Literal::GroupElement(generator().into())
+                Ok(Value::from(Literal::GroupElement(generator().into())))
             }
-        })
+        }
     }
 
     /// The type a script reads the value at (see [`ScriptValue::tpe`]), before its data is read:
@@ -144,64 +147,57 @@ fn has_runtime_type(tpe: &SType) -> bool {
     }
 }
 
-/// An item's data, where the item is a value itself: sigmastate casts each item to
+/// An item's value, where the item is a value itself: sigmastate casts each item to
 /// `EvaluatedValue`, an `AssertionError` otherwise (`CollectionUtil.scala:188-193`)
-fn item_script_data(item: &Expr) -> Result<Literal, TryExtractFromError> {
+fn item_script_value(item: &Expr) -> Result<Value<'static>, TryExtractFromError> {
     match item {
-        Expr::Const(c) => Ok(c.v.clone()),
-        Expr::Tuple(t) => tuple_script_data(t.items.as_slice()),
-        Expr::Collection(c) => collection_script_data(c),
+        Expr::Const(c) => Ok(Value::from(c.v.clone())),
+        Expr::Tuple(t) => tuple_script_value(t.items.as_slice()),
+        Expr::Collection(c) => collection_script_value(c),
         Expr::GlobalVars(GlobalVars::GroupGenerator) => {
-            Ok(Literal::GroupElement(generator().into()))
+            Ok(Value::from(Literal::GroupElement(generator().into())))
         }
         other => Err(TryExtractFromError(format!("{other:?} is not a value"))),
     }
 }
 
-/// `Tuple.value` (`values.scala:818-822`): a `Coll[Any]` of the items' data. sigmastate
-/// represents every tuple but a pair that way (`TupleData`, `package.scala:67`), which sigma-rust's
-/// tuple data stands for, so only a pair differs: a pair is a `Tuple2` in sigmastate, and a pair
-/// expression's data stays the collection, which the pair's type checks reject
-/// (`Value.checkType`). A tuple of fewer than two items keeps the collection too, sigmastate's
-/// own form of it.
-fn tuple_script_data(items: &[Expr]) -> Result<Literal, TryExtractFromError> {
-    let data = items
+/// `Tuple.value` (`values.scala:818-822`): a `Coll[Any]` of the items' values, whatever the
+/// count. For a pair that is not the `Tuple2` its type promises, and the pair's type checks
+/// reject it (`Value.checkType`).
+fn tuple_script_value(items: &[Expr]) -> Result<Value<'static>, TryExtractFromError> {
+    let values = items
         .iter()
-        .map(item_script_data)
+        .map(item_script_value)
         .collect::<Result<Vec<_>, _>>()?;
-    if data.len() <= 2 {
-        return Ok(Literal::Coll(CollKind::from_collection(SType::SAny, data)?));
-    }
-    Ok(Literal::Tup(data.try_into().map_err(|_| {
-        TryExtractFromError(format!("a tuple of {} items", items.len()))
-    })?))
+    Ok(Value::Coll(CollValue::generic(SType::SAny, values)))
 }
 
-/// `ConcreteCollection.value` (`values.scala:882-885`): the items' data in an array of the
-/// element type's class. For a pair that class is `Tuple2`, which a tuple expression's data, a
-/// collection (`Tuple.value`), is not: an `ArrayStoreException`. Other tuples are collections
-/// themselves (`TupleData`, `package.scala:67`).
-fn collection_script_data(coll: &Collection) -> Result<Literal, TryExtractFromError> {
-    let (elem_tpe, data) = match coll {
+/// `ConcreteCollection.value` (`values.scala:879-884`): the items' values in an array of the
+/// element type's class, as a collection of that element type
+/// ([`CollValue::from_expression_items`]). For a pair that class is `Tuple2`, which a tuple
+/// expression's value, a collection (`Tuple.value`), is not: an `ArrayStoreException`. Other
+/// tuples are collections themselves (`TupleData`, `package.scala:67`).
+fn collection_script_value(coll: &Collection) -> Result<Value<'static>, TryExtractFromError> {
+    let (elem_tpe, values) = match coll {
         Collection::BoolConstants(bools) => (
             SType::SBoolean,
-            bools.iter().map(|b| Literal::Boolean(*b)).collect(),
+            bools.iter().map(|b| Value::Boolean(*b)).collect(),
         ),
         Collection::Exprs { elem_tpe, items } => {
             let of_pairs = matches!(elem_tpe, SType::STuple(t) if t.items.len() == 2);
-            let data = items
+            let values = items
                 .iter()
                 .map(|item| match item {
                     Expr::Tuple(_) if of_pairs => Err(TryExtractFromError(format!(
                         "{item:?} is not a pair's data"
                     ))),
-                    _ => item_script_data(item),
+                    _ => item_script_value(item),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            (elem_tpe.clone(), data)
+            (elem_tpe.clone(), values)
         }
     };
-    Ok(Literal::Coll(CollKind::from_collection(elem_tpe, data)?))
+    CollValue::from_expression_items(elem_tpe, values).map(Value::Coll)
 }
 
 impl EvaluatedValue {
@@ -500,7 +496,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod script_value_tests {
     use super::*;
 
@@ -524,9 +520,50 @@ mod script_value_tests {
             let c = Constant::sigma_parse_bytes(&base16::decode(constant_hex).unwrap()).unwrap();
             assert_eq!(
                 parse(hex).to_script_value().unwrap(),
-                ScriptValue { tpe: c.tpe, v: c.v },
+                ScriptValue {
+                    tpe: c.tpe,
+                    v: c.v.into()
+                },
                 "{hex}"
             );
+        }
+    }
+
+    #[test]
+    fn a_collection_expression_of_tuples_keeps_the_tuple_item_type() {
+        // `ConcreteCollection.value` builds its collection at `stypeToRType(elementType)`
+        // (`values.scala:879-884`), a tuple type for tuples of three, while the data decoder
+        // builds the same constant at `Coll[Any]` (`CoreDataSerializer.scala:160-163`). The items
+        // are the same `Coll[Any]`s, and equality compares the item types first (SANTA's
+        // tuple-values-3 reply, section 1, measured)
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        let expression = parse("83014804040448040404020406")
+            .to_script_value()
+            .unwrap();
+        let constant = parse("0c4804040401020406").to_script_value().unwrap();
+        assert_eq!(expression.tpe, constant.tpe);
+        fn item_type(v: &Value<'static>) -> SType {
+            match v {
+                Value::Coll(coll) => coll.elem_tpe(),
+                other => panic!("{other:?}"),
+            }
+        }
+        fn item(v: &Value<'static>) -> Option<Value<'static>> {
+            match v {
+                Value::Coll(coll) => coll.get_val(0),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(item_type(&expression.v), triple);
+        assert_eq!(item_type(&constant.v), SType::SColl(SType::SAny.into()));
+        assert_eq!(item(&expression.v), item(&constant.v));
+        // nested: a collection expression inside a collection expression is built the same way
+        let nested = parse("83010c4804040483014804040448040404020406")
+            .to_script_value()
+            .unwrap();
+        match item(&nested.v) {
+            Some(inner) => assert_eq!(item_type(&inner), triple),
+            None => panic!("no item"),
         }
     }
 
@@ -541,10 +578,10 @@ mod script_value_tests {
         );
         assert_eq!(
             sv.v,
-            Literal::Coll(
-                CollKind::from_collection(SType::SAny, vec![Literal::Int(1), Literal::Int(2)])
-                    .unwrap()
-            )
+            Value::Coll(CollValue::generic(
+                SType::SAny,
+                vec![Value::Int(1), Value::Int(2)]
+            ))
         );
     }
 

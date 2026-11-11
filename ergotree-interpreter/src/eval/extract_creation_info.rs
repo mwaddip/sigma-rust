@@ -16,12 +16,9 @@ use crate::eval::Evaluable;
 pub(crate) fn creation_info_value<'ctx>(b: &ErgoBox) -> Value<'ctx> {
     let (height, bytes) = b.creation_info();
     let bytes: Vec<Value> = bytes.into_iter().map(Value::Byte).collect();
-    Value::Tup(
-        [
-            Value::Int(height),
-            Value::Coll(CollValue::generic(SType::SByte, bytes)),
-        ]
-        .into(),
+    Value::pair(
+        Value::Int(height),
+        Value::Coll(CollValue::generic(SType::SByte, bytes)),
     )
 }
 

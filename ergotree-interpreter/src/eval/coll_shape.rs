@@ -25,7 +25,7 @@ pub(crate) fn get_or_else<'ctx>(
         CollValue::Bytes(_) => matches!(default, Value::Byte(_)),
         CollValue::Booleans(_) => matches!(default, Value::Boolean(_)),
         CollValue::Ints(_) => matches!(default, Value::Int(_)),
-        CollValue::Pairs { .. } => matches!(&default, Value::Tup(items) if items.len() == 2),
+        CollValue::Pairs { .. } => matches!(&default, Value::Pair(_)),
         CollValue::Generic { .. } => true,
     };
     if !takes_default {
@@ -59,9 +59,7 @@ pub(crate) fn scala_eq(a: &Value<'_>, b: &Value<'_>) -> bool {
         }
     }
     match (a, b) {
-        (Value::Tup(l), Value::Tup(r)) if l.len() == 2 && r.len() == 2 => {
-            l.iter().zip(r.iter()).all(|(x, y)| scala_eq(x, y))
-        }
+        (Value::Pair(l), Value::Pair(r)) => scala_eq(&l.0, &r.0) && scala_eq(&l.1, &r.1),
         // `Some.equals` compares the values the same way
         (Value::Opt(l), Value::Opt(r)) => match (l, r) {
             (Some(x), Some(y)) => scala_eq(x, y),
@@ -238,11 +236,9 @@ fn fits_reference_array(item: &Value<'_>, elem_tpe: &SType) -> bool {
     match elem_tpe {
         SType::SAny => true,
         SType::SColl(_) => matches!(item, Value::Coll(_)),
-        SType::STuple(t) if t.items.len() == 2 => matches!(item, Value::Tup(i) if i.len() == 2),
+        SType::STuple(t) if t.items.len() == 2 => matches!(item, Value::Pair(_)),
         // a tuple of other than two items is a `Coll[Any]` on the JVM (`Tuple.value`)
-        SType::STuple(_) => {
-            matches!(item, Value::Coll(_)) || matches!(item, Value::Tup(i) if i.len() != 2)
-        }
+        SType::STuple(_) => matches!(item, Value::Coll(_)),
         SType::SOption(_) => matches!(item, Value::Opt(_)),
         SType::SBox => matches!(item, Value::CBox(_)),
         SType::SGroupElement => matches!(item, Value::GroupElement(_)),
@@ -683,7 +679,7 @@ pub(crate) mod santa_rows {
     }
 
     fn pair(a: i32, b: i32) -> Value<'static> {
-        Value::Tup([Value::Int(a), Value::Int(b)].into())
+        Value::pair(Value::Int(a), Value::Int(b))
     }
 
     #[test]
@@ -977,7 +973,7 @@ pub(crate) mod santa_rows {
     #[test]
     fn mapped_pairs_rows() {
         // M3/M4: `map` over a collection of pairs gives a generic collection of pairs
-        let pair = |a, b| Value::Tup([Value::Int(a), Value::Int(b)].into());
+        let pair = |a, b| Value::pair(Value::Int(a), Value::Int(b));
         assert_row(
             "0b19dc0c02dc0c030c58020204060801d9010158720102040a0101",
             Value::Boolean(true),
@@ -1036,7 +1032,7 @@ mod scala_eq_tests {
 
     #[test]
     fn pairs_compare_component_wise() {
-        let pair = |a: Value<'static>, b: Value<'static>| Value::Tup([a, b].into());
+        let pair = |a: Value<'static>, b: Value<'static>| Value::pair(a, b);
         assert!(scala_eq(
             &pair(Value::Long(1), Value::Int(2)),
             &pair(Value::Int(1), Value::Int(2))

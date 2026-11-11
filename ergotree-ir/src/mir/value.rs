@@ -16,7 +16,6 @@ use crate::bigint256::BigInt256;
 use crate::chain::ergo_box::ErgoBox;
 use crate::reference::Ref;
 use crate::sigma_protocol::sigma_boolean::SigmaProp;
-use crate::types::stuple::TupleItems;
 use crate::types::stype::LiftIntoSType;
 use crate::types::stype::SType;
 use crate::unsignedbigint256::UnsignedBigInt;
@@ -342,8 +341,9 @@ pub enum Value<'ctx> {
     AvlTree(Box<AvlTreeData>),
     /// Collection of values of the same type, in the form of the JVM object that holds it
     Coll(CollValue<'ctx>),
-    /// Tuple (arbitrary type values)
-    Tup(TupleItems<Value<'ctx>>),
+    /// A pair, sigmastate's `Tuple2`. A tuple of any other count is a collection of `Any`
+    /// (`Value::Coll`), as sigmastate holds it (v6.0.6 `Evaluation.scala:99-102`)
+    Pair(Box<(Value<'ctx>, Value<'ctx>)>),
     /// Transaction(and blockchain) context info
     Context,
     /// String type
@@ -361,6 +361,11 @@ pub enum Value<'ctx> {
 }
 
 impl<'ctx> Value<'ctx> {
+    /// A pair of `l` and `r`
+    pub fn pair(l: Value<'ctx>, r: Value<'ctx>) -> Self {
+        Value::Pair(Box::new((l, r)))
+    }
+
     /// Convert a Value<'ctx> to a Value<'static>.
     /// Useful for returning errors especially in bindings where we can't return  borrowed values
     pub fn to_static(&'ctx self) -> Value<'static> {
@@ -382,7 +387,9 @@ impl<'ctx> Value<'ctx> {
             Value::UnsignedBigInt(b) => Value::UnsignedBigInt(*b),
             Value::AvlTree(t) => Value::AvlTree(t.clone()),
             Value::Coll(coll) => Value::Coll(coll_to_static_shared(coll, memo)),
-            Value::Tup(tup) => Value::Tup(tup.mapped_ref(|v| v.to_static_shared(memo))),
+            Value::Pair(pair) => {
+                Value::pair(pair.0.to_static_shared(memo), pair.1.to_static_shared(memo))
+            }
             Value::Context => Value::Context,
             Value::String(s) => Value::String(s.clone()),
             Value::Header(h) => Value::Header(h.clone()),
@@ -480,7 +487,15 @@ impl From<Literal> for Value<'static> {
             Literal::AvlTree(a) => Value::AvlTree(a),
             Literal::Header(h) => Value::Header(h),
             Literal::Opt(lit) => Value::Opt(lit.map(|boxed| *boxed).map(Value::from).map(Box::new)),
-            Literal::Tup(t) => Value::Tup(t.mapped(Value::from)),
+            // sigmastate's data of a tuple: a `Tuple2` for a pair, a generic `Coll[Any]` for any
+            // other count (v6.0.6 `CoreDataSerializer.scala:134-139`, `Evaluation.scala:99-102`)
+            Literal::Tup(t) => match <[Literal; 2]>::try_from(t.to_vec()) {
+                Ok([l, r]) => Value::pair(l.into(), r.into()),
+                Err(items) => Value::Coll(CollValue::generic(
+                    SType::SAny,
+                    items.into_iter().map(Value::from).collect::<Vec<_>>(),
+                )),
+            },
         }
     }
 }
@@ -517,14 +532,11 @@ impl core::fmt::Display for Value<'_> {
                     write!(f, "None")
                 }
             }
-            Value::Tup(items) => {
+            Value::Pair(pair) => {
                 write!(f, "(")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    item.fmt(f)?;
-                }
+                pair.0.fmt(f)?;
+                write!(f, ", ")?;
+                pair.1.fmt(f)?;
                 write!(f, ")")
             }
             Value::Unit => write!(f, "()"),
@@ -582,12 +594,19 @@ impl<'ctx, T: LiftIntoSType + StoreWrapped + Into<Value<'ctx>>> From<Vec<T>> for
 }
 
 #[allow(clippy::from_over_into)]
-#[allow(clippy::unwrap_used)]
-#[impl_for_tuples(2, 4)]
+impl<'ctx, A: Into<Value<'ctx>>, B: Into<Value<'ctx>>> Into<Value<'ctx>> for (A, B) {
+    fn into(self) -> Value<'ctx> {
+        Value::pair(self.0.into(), self.1.into())
+    }
+}
+
+/// A Rust tuple of three or four items is sigmastate's tuple of that count: a collection of `Any`
+#[allow(clippy::from_over_into)]
+#[impl_for_tuples(3, 4)]
 impl<'ctx> Into<Value<'ctx>> for Tuple {
     fn into(self) -> Value<'ctx> {
         let v: Vec<Value> = [for_tuples!(  #( Tuple.into() ),* )].to_vec();
-        Value::Tup(v.try_into().unwrap())
+        Value::Coll(CollValue::generic(SType::SAny, v))
     }
 }
 
@@ -833,23 +852,47 @@ impl<'ctx, T: TryExtractFrom<Value<'ctx>>> TryExtractFrom<Value<'ctx>> for Optio
     }
 }
 
-#[impl_for_tuples(2, 4)]
+impl<'ctx, A: TryExtractFrom<Value<'ctx>>, B: TryExtractFrom<Value<'ctx>>>
+    TryExtractFrom<Value<'ctx>> for (A, B)
+{
+    fn try_extract_from(v: Value<'ctx>) -> Result<Self, TryExtractFromError> {
+        match v {
+            Value::Pair(pair) => {
+                let (l, r) = *pair;
+                Ok((A::try_extract_from(l)?, B::try_extract_from(r)?))
+            }
+            _ => Err(TryExtractFromError(format!(
+                "expected a pair, found {:?}",
+                v
+            ))),
+        }
+    }
+}
+
+/// A Rust tuple of three or four items reads sigmastate's tuple of exactly that count: a
+/// collection of `Any`
+#[impl_for_tuples(3, 4)]
 impl<'ctx> TryExtractFrom<Value<'ctx>> for Tuple {
     fn try_extract_from(v: Value<'ctx>) -> Result<Self, TryExtractFromError> {
         match v {
-            Value::Tup(items) => {
-                let mut iter = items.iter();
-                Ok(for_tuples!( ( #(
+            Value::Coll(coll) if coll.elem_tpe() == SType::SAny => {
+                let mut iter = coll.as_vec().into_iter();
+                let res = for_tuples!( ( #(
                                 Tuple::try_extract_from(
                                     iter
                                         .next()
-                                        .cloned()
-                                        .ok_or_else(|| TryExtractFromError("not enough items in STuple".to_string()))?
+                                        .ok_or_else(|| TryExtractFromError("not enough items in the tuple".to_string()))?
                                 )?
-                                ),* ) ))
+                                ),* ) );
+                match iter.next() {
+                    None => Ok(res),
+                    Some(_) => Err(TryExtractFromError(
+                        "too many items in the tuple".to_string(),
+                    )),
+                }
             }
             _ => Err(TryExtractFromError(format!(
-                "expected Context, found {:?}",
+                "expected a tuple (a collection of Any), found {:?}",
                 v
             ))),
         }
@@ -861,6 +904,38 @@ impl<'ctx> TryExtractFrom<Value<'ctx>> for Tuple {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tuple_data_is_a_pair_or_a_collection_of_any() {
+        // sigmastate's data of a tuple is a `Tuple2` for a pair and a `Coll[Any]` for any other
+        // count (v6.0.6 `CoreDataSerializer.scala:134-139`, `Evaluation.scala:99-102`)
+        let tuple = |xs: &[i32]| -> Literal {
+            let items: Vec<Literal> = xs.iter().map(|x| Literal::Int(*x)).collect();
+            Literal::Tup(items.try_into().unwrap())
+        };
+        for xs in [&[][..], &[1], &[1, 2, 3]] {
+            let items: Vec<Value> = xs.iter().map(|x| Value::Int(*x)).collect();
+            assert_eq!(
+                Value::from(tuple(xs)),
+                Value::Coll(CollValue::generic(SType::SAny, items)),
+                "{xs:?}"
+            );
+        }
+        assert_eq!(
+            Value::from(tuple(&[1, 2])),
+            Value::pair(Value::Int(1), Value::Int(2))
+        );
+        // a tuple inside a pair converts the same way
+        let nested = Literal::Tup([tuple(&[1, 2, 3]), Literal::Int(4)].into());
+        let triple = CollValue::generic(
+            SType::SAny,
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+        );
+        assert_eq!(
+            Value::from(nested),
+            Value::pair(Value::Coll(triple), Value::Int(4))
+        );
+    }
 
     #[test]
     fn byte_u8_array_into() {

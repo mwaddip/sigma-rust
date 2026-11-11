@@ -1,13 +1,13 @@
 use crate::eval::EvalError;
 use alloc::boxed::Box;
-use alloc::{string::ToString, sync::Arc};
+use alloc::string::ToString;
 
 use ergo_chain_types::autolykos_pow_scheme::{decode_compact_bits, encode_compact_bits};
-use ergotree_ir::mir::constant::Literal;
+use ergotree_ir::mir::constant::literal_of_type;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
 use ergotree_ir::unsignedbigint256::UnsignedBigInt;
 use ergotree_ir::{
-    mir::{coll_value::CollValue, constant::TryExtractInto, value::Value},
+    mir::{constant::TryExtractInto, value::Value},
     serialization::{
         data::DataSerializer,
         sigma_byte_reader::{self, SigmaByteRead},
@@ -22,10 +22,6 @@ use ergo_chain_types::{autolykos_pow_scheme::AutolykosPowScheme, ec_point::gener
 use ergotree_ir::bigint256::BigInt256;
 use ergotree_ir::types::stype::SType;
 
-fn helper_xor(x: &[i8], y: &[i8]) -> Arc<[i8]> {
-    x.iter().zip(y.iter()).map(|(x1, x2)| *x1 ^ *x2).collect()
-}
-
 pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(10)?;
     if obj != Value::Global {
@@ -38,7 +34,6 @@ pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args|
 };
 
 pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(10)?;
     if obj != Value::Global {
         return Err(EvalError::UnexpectedValue(format!(
             "sglobal.xor expected obj to be Value::Global, got {:?}",
@@ -54,20 +49,9 @@ pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::NotFound("xor: missing left arg".to_string()))?;
 
-    // the bytes of any `Coll[Byte]`, specialised or generic (sigmastate reads `toArray`)
-    match (
-        left_v.clone().try_extract_into::<Vec<i8>>(),
-        right_v.clone().try_extract_into::<Vec<i8>>(),
-    ) {
-        (Ok(l_byte), Ok(r_byte)) => {
-            let xor = helper_xor(&l_byte, &r_byte);
-            Ok(CollValue::Bytes(xor).into())
-        }
-        _ => Err(EvalError::UnexpectedValue(format!(
-            "expected Xor input to be byte array, got: {0:?}",
-            (left_v, right_v)
-        ))),
-    }
+    // `xor_eval` is `Xor.xorWithCosting` (v6.0.6 `methods.scala:1917-1920`): the node's cost
+    // and its reading of its operands
+    super::xor::xor_with_costing(ctx, &left_v, &right_v)
 };
 
 pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
@@ -196,7 +180,7 @@ pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     )?))
 };
 
-pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     // Scala `serialize_eval` charges SigmaByteWriter.StartWriterCost = FixedCost(JitCost(10))
     // up front, then each writer `put`'s cost during DataSerializer.serialize.
     ctx.add_jit_cost(10)?;
@@ -206,11 +190,11 @@ pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             obj
         )));
     }
-    let arg: Literal = args
-        .first()
-        .ok_or_else(|| EvalError::NotFound("serialize: missing first arg".into()))?
-        .to_static()
-        .try_into()
+    // sigmastate writes the value by the argument expression's type
+    // (`DataSerializer.serialize(value, mc.args(0).tpe, w)`, v6.0.6 `methods.scala:1982`)
+    let missing = || EvalError::NotFound("serialize: missing first arg".into());
+    let arg_tpe = mc.args.first().ok_or_else(missing)?.tpe();
+    let arg = literal_of_type(args.first().ok_or_else(missing)?.to_static(), &arg_tpe)
         .map_err(EvalError::UnexpectedValue)?;
 
     let mut buf = vec![];
@@ -379,7 +363,7 @@ mod tests {
             .unwrap()
     }
     fn deserialize(array: &[u8], return_type: SType) -> Constant {
-        let type_args = [(STypeVar::t(), return_type)].into_iter().collect();
+        let type_args = [(STypeVar::t(), return_type.clone())].into_iter().collect();
         let deserialize_node = MethodCall::with_type_args(
             Expr::Global,
             DESERIALIZE_METHOD.clone().with_concrete_types(&type_args),
@@ -392,15 +376,19 @@ mod tests {
             try_eval_out_with_version::<Vec<u8>>(&deserialize_node.clone().into(), &ctx, version, 3)
                 .is_err()
         }));
-        try_eval_out_with_version::<Value>(
+        let value = try_eval_out_with_version::<Value>(
             &deserialize_node.into(),
             &ctx,
             ErgoTreeVersion::V3.into(),
             3,
         )
-        .unwrap()
-        .try_into()
-        .unwrap()
+        .unwrap();
+        // the value as data of the requested type: a tuple of other than two items is a
+        // collection of `Any` at evaluation
+        Constant {
+            v: super::literal_of_type(value, &return_type).unwrap(),
+            tpe: return_type,
+        }
     }
 
     fn encode_nbits(bigint: BigInt256) -> i64 {

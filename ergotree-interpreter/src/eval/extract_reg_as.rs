@@ -31,9 +31,7 @@ impl Evaluable for ExtractRegisterAs {
             ))
         })?;
         match get_register_script_value(&ir_box, id)? {
-            Some(value) if value.tpe == *self.elem_tpe => {
-                Ok(Value::Opt(Some(Box::new(value.v.into()))))
-            }
+            Some(value) if value.tpe == *self.elem_tpe => Ok(Value::Opt(Some(Box::new(value.v)))),
             Some(value) => Err(EvalError::UnexpectedValue(format!(
                 "Expected register {id} to be of type {}, got {:?}",
                 self.elem_tpe, value.tpe
@@ -115,6 +113,50 @@ pub(crate) mod register_conversion_tests {
         Context {
             self_box: Box::leak(Box::new(b)),
             ..force_any_val::<Context>()
+        }
+    }
+
+    #[test]
+    fn a_register_tuple_of_three_reads_as_a_collection() {
+        // SANTA's tuple-values reply, G2 and G3: SizeOf(SELF.R4[(Int, Int, Int)].get) is 3 @89
+        // for R4 = the constant `(1, 2, 3)` and for R4 = the tuple EXPRESSION `Tuple(1, 2, 3)`
+        // alike (`Tuple.value` is the `Coll[Any]` the data decoder builds)
+        use crate::eval::test_util::eval_v3_body_in;
+        use ergotree_ir::mir::value::Value;
+        for r4 in ["48040404020406", "8603040204040406"] {
+            let (_, res, cost) = eval_v3_body_in(ctx_with_r4(r4), "0b09b1e4c6a70448040404");
+            assert_eq!(res.unwrap(), Value::Int(3), "{r4}");
+            assert_eq!(cost, 89, "{r4}");
+        }
+        // R4 = `Coll((1, 2, 3))`: SizeOf(SELF.R4[Coll[(Int, Int, Int)]].get(0)) is 3 @124, where
+        // the same collection built in the script throws (`tuple.rs`)
+        let (_, res, cost) = eval_v3_body_in(
+            ctx_with_r4("0c4804040401020406"),
+            "0b0eb1b2e4c6a7040c48040404040000",
+        );
+        assert_eq!(res.unwrap(), Value::Int(3));
+        assert_eq!(cost, 124);
+        // R4 = `(1, 2, 3)` read as a Coll[Int]: the register's type is the tuple's
+        let (_, res, _) = eval_v3_body_in(ctx_with_r4("48040404020406"), "0b06b1e4c6a70410");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn a_register_collection_s_item_type_follows_its_producer() {
+        // SANTA's tuple-values-3 reply, V2 and V3: SELF.R4[Coll[(Int,Int,Int)]].get ==
+        // Coll((1, 2, 3)). R4 as the collection EXPRESSION is built at the tuple item type, the
+        // constant it is compared with at `Coll[Any]`: false @81, the comparison stopping at the
+        // item types. R4 as the CONSTANT: true @119
+        use crate::eval::test_util::eval_v3_body_in;
+        use ergotree_ir::mir::value::Value;
+        let tree = "0b1393e4c6a7040c480404040c4804040401020406";
+        for (r4, equal, cost) in [
+            ("83014804040448040404020406", false, 81),
+            ("0c4804040401020406", true, 119),
+        ] {
+            let (_, res, c) = eval_v3_body_in(ctx_with_r4(r4), tree);
+            assert_eq!(res.unwrap(), Value::Boolean(equal), "{r4}");
+            assert_eq!(c, cost, "{r4}");
         }
     }
 

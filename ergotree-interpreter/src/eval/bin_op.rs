@@ -8,6 +8,7 @@ use ergotree_ir::mir::bin_op::{ArithOp, LogicalOp};
 use ergotree_ir::mir::constant::TryExtractFrom;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
+use ergotree_ir::types::stype::SType;
 use ergotree_ir::unsignedbigint256::UnsignedBigInt;
 use num_traits::CheckedAdd;
 use num_traits::CheckedDiv;
@@ -256,6 +257,17 @@ impl Evaluable for BinOp {
             },
             BinOpKind::Arith(op) => {
                 let rv = rv()?;
+                // sigmastate looks the operation up by the LEFT operand's static type, once both
+                // operands are evaluated (`ArithOp.impls(tpe.typeCode)`, `tpe = left.tpe`, v6.0.6
+                // `trees.scala:707`, `:722-725`, `:734`, `:861-869`): a type with no arithmetic,
+                // such as the `Any` of a tuple's item read by index, throws there whatever the
+                // values are (SANTA's tuple-values reply, N14: `KeyNotFoundException: key 97`)
+                let op_tpe = self.left.tpe();
+                if !has_arithmetic(&op_tpe) {
+                    return Err(EvalError::UnexpectedValue(format!(
+                        "{op:?}: no arithmetic for the left operand's type {op_tpe:?}"
+                    )));
+                }
                 // sigma-state silently coerces mismatched numeric operands to the
                 // WIDER type (Byte<Short<Int<Long<BigInt) and computes there with
                 // checked (addExact) semantics, rejecting ONLY on genuine wider-type
@@ -412,6 +424,54 @@ impl Evaluable for BinOp {
             }
             BinOpKind::Bit(_) => Err(not_evaluated("BitOp")),
         }
+    }
+}
+
+/// The types sigmastate has arithmetic for (`ArithOp.impls`, v6.0.6 `trees.scala:861-869`)
+fn has_arithmetic(tpe: &SType) -> bool {
+    matches!(
+        tpe,
+        SType::SByte
+            | SType::SShort
+            | SType::SInt
+            | SType::SLong
+            | SType::SBigInt
+            | SType::SUnsignedBigInt
+    )
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod arith_op_type_tests {
+    use ergotree_ir::mir::value::Value;
+
+    use crate::eval::test_util::{assert_accepts, eval_v3_body};
+
+    #[test]
+    fn the_left_operand_s_type_selects_the_arithmetic() {
+        // SANTA `Tuple.non_pair_value_gates` G3-G8 with their controls C3-C5 (sigma-state
+        // 6.0.7). An item of the tuple `(1, 2, 3)` is typed `Any` and holds an `Int`
+        // (`Coll.runtime_shapes_methodcall` C2: `(1, 2, 3).apply(0)` is 1 @44)
+        assert_accepts("0b0ddc0c0a48040404020406010400", Value::Int(1), 44);
+        // on the LEFT there is no arithmetic for `Any` (`KeyNotFoundException: key 97`):
+        // `ByIndex(t, 0) + 1`, `t.apply(0) + 1`, `min(t.apply(0), 1)`
+        for tree_hex in [
+            "0b0e9ab2480404040204060400000402",
+            "0b109adc0c0a480404040204060104000402",
+            "0b10a1dc0c0a480404040204060104000402",
+        ] {
+            assert!(eval_v3_body(tree_hex).1.is_err(), "{tree_hex}");
+        }
+        // on the RIGHT it is `Int` arithmetic at the plain collection's cost:
+        // `1 + ByIndex(t, 0)`, `1 + t.apply(0)`, `min(1, t.apply(0))`
+        assert_accepts("0b0e9a0402b248040404020406040000", Value::Int(2), 60);
+        assert_accepts("0b109a0402dc0c0a48040404020406010400", Value::Int(2), 64);
+        assert_accepts("0b10a10402dc0c0a48040404020406010400", Value::Int(1), 54);
+        // the controls over `Coll[Int](1, 2, 3)`
+        assert_accepts("0b0c9ab210030204060400000402", Value::Int(2), 60);
+        assert_accepts("0b0e9adc0c0a10030204060104000402", Value::Int(2), 64);
+        assert_accepts("0b0ea1dc0c0a10030204060104000402", Value::Int(1), 54);
     }
 }
 

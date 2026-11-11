@@ -87,6 +87,33 @@ impl<'ctx> CollValue<'ctx> {
         }
     }
 
+    /// The collection sigmastate's `ConcreteCollection.value` builds from a collection
+    /// EXPRESSION held in a register or a context variable (v6.0.6 `values.scala:879-884`):
+    /// `Colls.fromArray` at the item type `stypeToRType(elementType)`. So one of tuples of other
+    /// than two items keeps the tuple type as its item type, where decoded data of the same
+    /// declared type has `Coll[Any]` ([`From<CollKind<Literal>>`]); equality compares item types
+    /// first, so the two differ. `items` are the items' values. The forms are the ones data
+    /// takes: a `Coll[Byte]` and a `Coll[Boolean]` specialised, pairs as their two sides
+    pub fn from_expression_items(
+        elem_tpe: SType,
+        items: Vec<Value<'static>>,
+    ) -> Result<CollValue<'static>, TryExtractFromError> {
+        let all_booleans = || items.iter().all(|v| matches!(v, Value::Boolean(_)));
+        match elem_tpe {
+            SType::SByte => items
+                .into_iter()
+                .map(|v| v.try_extract_into::<i8>())
+                .collect::<Result<Arc<[i8]>, _>>()
+                .map(CollValue::Bytes),
+            SType::SBoolean if all_booleans() => items
+                .into_iter()
+                .map(|v| v.try_extract_into::<bool>())
+                .collect::<Result<Arc<[bool]>, _>>()
+                .map(CollValue::Booleans),
+            elem_tpe => Ok(from_data(elem_tpe, items)),
+        }
+    }
+
     /// The result of an operation that keeps its receiver's class: sigmastate builds it with
     /// `builder.fromArray` inside the receiver (v6.0.7 `CollsOverArrays.scala:31-111`), so a
     /// specialised receiver gives the same specialised form (an item of another kind is an error, as
@@ -159,7 +186,7 @@ impl<'ctx> CollValue<'ctx> {
             CollValue::Ints(items) => items.get(index).map(|&i| Value::Int(i)),
             CollValue::Generic { items, .. } => items.get(index).cloned(),
             CollValue::Pairs { ls, rs } => {
-                Some(Value::Tup([ls.get_val(index)?, rs.get_val(index)?].into()))
+                Some(Value::pair(ls.get_val(index)?, rs.get_val(index)?))
             }
         }
     }
@@ -175,7 +202,7 @@ impl<'ctx> CollValue<'ctx> {
                 .as_vec()
                 .into_iter()
                 .zip(rs.as_vec())
-                .map(|(l, r)| Value::Tup([l, r].into()))
+                .map(|(l, r)| Value::pair(l, r))
                 .collect(),
         }
     }
@@ -216,19 +243,16 @@ fn split_pairs<'ctx>(
     let Some((lt, rt)) = pair_item_types(elem_tpe) else {
         return Err(items);
     };
-    if !items
-        .iter()
-        .all(|v| matches!(v, Value::Tup(pair) if pair.len() == 2))
-    {
+    if !items.iter().all(|v| matches!(v, Value::Pair(_))) {
         return Err(items);
     }
     let mut ls = Vec::with_capacity(items.len());
     let mut rs = Vec::with_capacity(items.len());
     for item in items {
-        if let Value::Tup(pair) = item {
-            let mut pair = pair.to_vec().into_iter();
-            ls.extend(pair.next());
-            rs.extend(pair.next());
+        if let Value::Pair(pair) = item {
+            let (l, r) = *pair;
+            ls.push(l);
+            rs.push(r);
         }
     }
     Ok((lt, rt, ls, rs))
@@ -237,7 +261,9 @@ fn split_pairs<'ctx>(
 /// Data items as the JVM's deserializer holds them, past its two specialised item types
 /// (`CoreDataSerializer.deserializeColl`'s generic branch, v6.0.7 `:175-191`): `fromArray` at an
 /// abstract type, as [`CollValue::from_array`]. Total: a pair-typed collection holding a non-pair
-/// item, which the parser never builds, stays generic
+/// item, which the parser never builds, stays generic. A pair collection's sides are built at
+/// their own item types (`fromBoxedPairs`, `CollsOverArrays.scala:205-215`), a tuple type
+/// included
 fn from_data(elem_tpe: SType, items: Vec<Value<'static>>) -> CollValue<'static> {
     match split_pairs(&elem_tpe, items) {
         Ok((lt, rt, ls, rs)) => CollValue::pairs(from_data(lt, ls), from_data(rt, rs)),
@@ -292,9 +318,18 @@ impl From<CollKind<Literal>> for CollValue<'static> {
                             .collect::<Option<Arc<[bool]>>>()
                     })
                     .flatten();
-                match bits {
-                    Some(bits) => CollValue::Booleans(bits),
-                    None => from_data(elem_tpe, items.iter().cloned().map(Value::from).collect()),
+                let values = || items.iter().cloned().map(Value::from).collect::<Vec<_>>();
+                match (bits, elem_tpe) {
+                    (Some(bits), _) => CollValue::Booleans(bits),
+                    // the collection the decoder reads: one of tuples of other than two items
+                    // is built at the item type `Coll[Any]`, the class of such a tuple's data,
+                    // not at the tuple type (v6.0.6 `CoreDataSerializer.scala:160-163`; SANTA
+                    // `Tuple.non_pair_value_producers` #5). Only that collection: a pair
+                    // collection's sides keep their own types ([`from_data`])
+                    (None, SType::STuple(t)) if t.items.len() != 2 => {
+                        CollValue::generic(SType::SColl(SType::SAny.into()), values())
+                    }
+                    (None, elem_tpe) => from_data(elem_tpe, values()),
                 }
             }
         }
@@ -357,7 +392,7 @@ mod tests {
     }
 
     fn pair(a: i32, b: i32) -> Value<'static> {
-        Value::Tup([Value::Int(a), Value::Int(b)].into())
+        Value::pair(Value::Int(a), Value::Int(b))
     }
 
     #[test]
@@ -394,8 +429,8 @@ mod tests {
         let spec = Value::Coll(bytes(&[1]));
         let gen = Value::Coll(generic(SType::SByte, vec![Value::Byte(1)]));
         assert_eq!(
-            Value::Tup([spec.clone(), Value::Int(1)].into()),
-            Value::Tup([gen.clone(), Value::Int(1)].into())
+            Value::pair(spec.clone(), Value::Int(1)),
+            Value::pair(gen.clone(), Value::Int(1))
         );
         assert_eq!(
             Value::Opt(Some(spec.clone().into())),
@@ -435,6 +470,72 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert_eq!(p.get_val(0), Some(pair(0, 5)));
         assert_eq!(p.get_val(1), None);
+    }
+
+    #[test]
+    fn a_data_collection_of_non_pair_tuples_holds_collections_of_any() {
+        // by reading: `deserializeColl` builds a collection of non-pair tuples at the item type
+        // `Coll[Any]` (v6.0.6 `CoreDataSerializer.scala:160-163`), and each item is the tuple's
+        // own `Coll[Any]` (`:134-139`)
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        let item = Literal::Tup(
+            vec![Literal::Int(1), Literal::Int(2), Literal::Int(3)]
+                .try_into()
+                .unwrap(),
+        );
+        let coll_of_any = SType::SColl(SType::SAny.into());
+        for items in [vec![item], vec![]] {
+            let len = items.len();
+            let coll = CollValue::from(CollKind::WrappedColl {
+                elem_tpe: triple.clone(),
+                items: items.into(),
+            });
+            assert!(matches!(&coll, CollValue::Generic { .. }));
+            assert_eq!(coll.elem_tpe(), coll_of_any);
+            assert_eq!(coll.len(), len);
+            if len == 1 {
+                let ints = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
+                assert_eq!(
+                    coll.get_val(0),
+                    Some(Value::Coll(CollValue::generic(SType::SAny, ints)))
+                );
+            }
+        }
+        // a pair collection's side is built at its own item type, the tuple type
+        // (`fromBoxedPairs`): data `Coll[((Int, Int, Int), Int)]`
+        let triple_lit = || {
+            Literal::Tup(
+                vec![Literal::Int(1), Literal::Int(2), Literal::Int(3)]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let sides = CollValue::from(CollKind::WrappedColl {
+            elem_tpe: SType::STuple(STuple::pair(triple.clone(), SType::SInt)),
+            items: vec![Literal::Tup([triple_lit(), Literal::Int(4)].into())].into(),
+        });
+        match &sides {
+            CollValue::Pairs { ls, .. } => assert_eq!(ls.elem_tpe(), triple),
+            other => panic!("{other:?}"),
+        }
+        // and a collection EXPRESSION's value is built at the element type
+        // (`ConcreteCollection.value`), so it differs from the same collection as data
+        let ints = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
+        let item = Value::Coll(CollValue::generic(SType::SAny, ints));
+        let expr_coll = CollValue::from_expression_items(triple.clone(), vec![item]).unwrap();
+        assert_eq!(expr_coll.elem_tpe(), triple);
+        let data_coll = CollValue::from(CollKind::WrappedColl {
+            elem_tpe: triple.clone(),
+            items: vec![triple_lit()].into(),
+        });
+        assert_ne!(expr_coll, data_coll);
+        // a collection of pairs is still a `PairOfCols`
+        let pair = Literal::Tup([Literal::Int(1), Literal::Int(2)].into());
+        let pairs = CollValue::from(CollKind::WrappedColl {
+            elem_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt)),
+            items: vec![pair].into(),
+        });
+        assert!(matches!(pairs, CollValue::Pairs { .. }));
     }
 
     /// Data collections, one per shape the JVM's deserializer builds, with their types

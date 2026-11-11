@@ -220,16 +220,11 @@ pub(crate) fn check_value_of_type(
         SType::SGroupElement => matches!(value, Value::GroupElement(_)),
         SType::SSigmaProp => matches!(value, Value::SigmaProp(_)),
         SType::SBox => matches!(value, Value::CBox(_)),
-        // a tuple of three or more items is a `Coll[Any]` in sigmastate (`TupleData`,
-        // `package.scala:67`, `Evaluation.scala:99-102`), so it passes as a collection
-        SType::SColl(_) => {
-            matches!(value, Value::Coll(_))
-                || matches!(value, Value::Tup(items) if items.len() != 2)
-        }
+        // a tuple of other than two items is a `Coll[Any]` in sigmastate (`TupleData`,
+        // `package.scala:67`, `Evaluation.scala:99-102`) and here, so it passes as a collection
+        SType::SColl(_) => matches!(value, Value::Coll(_)),
         SType::SOption(_) => matches!(value, Value::Opt(_)),
-        SType::STuple(t) if t.items.len() == 2 => {
-            matches!(value, Value::Tup(items) if items.len() == 2)
-        }
+        SType::STuple(t) if t.items.len() == 2 => matches!(value, Value::Pair(_)),
         SType::STuple(_) => return Err(EvalError::Misc(format!("Unsupported tuple type {tpe:?}"))),
         SType::SFunc(f) if f.t_dom.len() == 1 => {
             matches!(value, Value::Lambda(l) if l.args.len() == 1)
@@ -773,6 +768,62 @@ pub mod test_util {
 
     thread_local! {
         static TEST_CTX: Context<'static> = force_any_val::<Context>();
+    }
+
+    /// The root of SANTA's eval tree (a v3 sized tree whose root is the expression, read
+    /// without the tree's root-type check), and its value and JIT cost at activated version 3
+    #[cfg(test)]
+    pub(crate) fn eval_v3_body(tree_hex: &str) -> (Expr, Result<Value<'static>, EvalError>, u64) {
+        eval_v3_body_in(force_any_val::<Context>(), tree_hex)
+    }
+
+    /// [`eval_v3_body`] in the given context
+    #[cfg(test)]
+    pub(crate) fn eval_v3_body_in(
+        mut ctx: Context<'static>,
+        tree_hex: &str,
+    ) -> (Expr, Result<Value<'static>, EvalError>, u64) {
+        let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
+        assert_eq!(bytes[0], 0x0b, "{tree_hex}");
+        // the size: one VLQ byte, or two
+        let root = if bytes[1] < 0x80 { 2 } else { 3 };
+        assert!(bytes[root - 1] < 0x80, "{tree_hex}");
+        let expr = from_bytes(&bytes[root..])
+            .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
+            .unwrap();
+        ctx.activated_script_version_byte = 3;
+        ctx.tree_version.set(ErgoTreeVersion::V3);
+        ctx.jit_cost.set(0);
+        let mut env = Env::empty();
+        let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
+        (expr, res, ctx.jit_cost_value())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_accepts(tree_hex: &str, expected: Value<'static>, cost: u64) {
+        let (_, res, c) = eval_v3_body(tree_hex);
+        assert_eq!(res.unwrap(), expected, "{tree_hex}");
+        assert_eq!(c, cost, "{tree_hex}");
+    }
+
+    /// the error under the span wrapper each eval node adds
+    #[cfg(test)]
+    fn innermost(e: &EvalError) -> &EvalError {
+        match e {
+            EvalError::Spanned(s) => innermost(&s.error),
+            e => e,
+        }
+    }
+
+    /// fails at eval in an evaluator, not for want of one
+    #[cfg(test)]
+    pub(crate) fn assert_evaluator_refuses(tree_hex: &str) {
+        let (_, res, _) = eval_v3_body(tree_hex);
+        let err = res.unwrap_err();
+        assert!(
+            !matches!(innermost(&err), EvalError::NotFound(_)),
+            "{tree_hex}: {err:?}"
+        );
     }
 
     pub fn eval_out_wo_ctx<T: TryExtractFrom<Value<'static>> + 'static>(expr: &Expr) -> T {
@@ -1375,6 +1426,7 @@ mod value_check_tests {
     use ergotree_ir::mir::coll_by_index::ByIndex;
     use ergotree_ir::mir::coll_fold::Fold;
     use ergotree_ir::mir::coll_size::SizeOf;
+    use ergotree_ir::mir::coll_value::CollValue;
     use ergotree_ir::mir::collection::Collection;
     use ergotree_ir::mir::constant::{Constant, Literal};
     use ergotree_ir::mir::func_value::{FuncArg, FuncValue};
@@ -1499,7 +1551,7 @@ mod value_check_tests {
             .unwrap()
             .v;
         let mut env = Env::empty();
-        env.insert(1.into(), coll.into());
+        env.insert(1.into(), coll);
         let ctx = force_any_val::<Context>();
         assert!(use_pair.eval(&mut env, &ctx).is_err());
     }
@@ -1689,10 +1741,7 @@ mod value_check_tests {
                 SType::SOption(SType::SInt.into()),
                 Value::Opt(Some(Box::new(Value::Int(1)))),
             ),
-            (
-                pair_type(),
-                Value::Tup(vec![Value::Int(1), Value::Int(2)].try_into().unwrap()),
-            ),
+            (pair_type(), Value::pair(Value::Int(1), Value::Int(2))),
             (
                 SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)),
                 a_lambda.clone(),
@@ -1740,11 +1789,11 @@ mod value_check_tests {
         }
         // a tuple other than a pair and a function of other than one argument throw
         let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
-        let three = Value::Tup(
-            vec![Value::Int(1), Value::Int(2), Value::Int(3)]
-                .try_into()
-                .unwrap(),
-        );
+        // a tuple of three as it is held: a collection of `Any`
+        let three = Value::Coll(CollValue::generic(
+            SType::SAny,
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+        ));
         assert!(check_value_of_type(&triple, &three, v3).is_err());
         let binary = SType::SFunc(SFunc::new(vec![SType::SInt, SType::SInt], SType::SInt));
         assert!(check_value_of_type(&binary, &a_lambda, v3).is_err());
@@ -1774,12 +1823,12 @@ mod value_check_tests {
         // `package.scala:67`; `Evaluation.toDslTuple`, `Evaluation.scala:99-102`), so it passes
         // the collection arm (`SType.scala:198`); a pair is a `Tuple2`, which does not
         let coll_type = SType::SColl(SType::SInt.into());
-        let three = Value::Tup(
-            vec![Value::Int(1), Value::Int(2), Value::Int(3)]
-                .try_into()
-                .unwrap(),
-        );
-        let pair = Value::Tup(vec![Value::Int(1), Value::Int(2)].try_into().unwrap());
+        // a tuple of three as it is held: a collection of `Any`
+        let three = Value::Coll(CollValue::generic(
+            SType::SAny,
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+        ));
+        let pair = Value::pair(Value::Int(1), Value::Int(2));
         assert!(check_value_of_type(&coll_type, &three, ErgoTreeVersion::V3).is_ok());
         assert!(check_value_of_type(&coll_type, &pair, ErgoTreeVersion::V3).is_err());
         // `{ (x: Coll[Int]) => true }((1, 2, 3))`: neither parser checks the argument's type

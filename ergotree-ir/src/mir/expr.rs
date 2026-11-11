@@ -814,7 +814,7 @@ fn subst_deserialize(expr: &Expr, ctx: &Context) -> Result<Option<Expr>, SubstDe
 
 /// A register as `eba.value.toArray` reads it (v6.0.7 `ErgoLikeInterpreter.scala:19-22`): `None`
 /// for a register the box does not have, else the bytes of a `Coll[Byte]`. The value is read as
-/// a script reads it, its data (`EvaluatedValue::script_data`): a read that fails (an item that
+/// a script reads it (`EvaluatedValue::script_value`): a read that fails (an item that
 /// is not a value, an `AssertionError`; a pair's tuple expression in a collection, an
 /// `ArrayStoreException`) fails the spend. The arm matching an `EvaluatedValue[SByteArray]` is
 /// erased, so data that is not a byte array fails the cast of `toArray`'s result, a
@@ -824,26 +824,24 @@ fn register_script_bytes(
     ctx: &Context,
 ) -> Result<Option<Vec<u8>>, SubstDeserializeError> {
     use crate::chain::ergo_box::RegisterValue;
-    use crate::mir::constant::Literal;
-    use crate::mir::value::{CollKind, NativeColl};
-    let data = match reg {
+    use crate::mir::coll_value::CollValue;
+    use crate::mir::value::Value;
+    let value = match reg {
         RegisterId::NonMandatoryRegisterId(id) => match ctx.self_box.additional_registers.get(id) {
             None => return Ok(None),
-            Some(RegisterValue::Parsed(c)) => c.v.clone(),
-            Some(RegisterValue::ParsedExpr(e)) => e.value().script_data()?,
+            Some(RegisterValue::Parsed(c)) => Value::from(c.v.clone()),
+            Some(RegisterValue::ParsedExpr(e)) => e.value().script_value()?,
             Some(RegisterValue::Invalid { error_msg, .. }) => {
                 return Err(RegisterValueError::Invalid(error_msg.clone()).into())
             }
         },
         RegisterId::MandatoryRegisterId(_) => match ctx.self_box.get_register(reg)? {
-            Some(c) => c.v,
+            Some(c) => Value::from(c.v),
             None => return Ok(None),
         },
     };
-    match data {
-        Literal::Coll(CollKind::NativeColl(NativeColl::CollByte(bytes))) => {
-            Ok(Some(bytes.iter().map(|b| *b as u8).collect()))
-        }
+    match value {
+        Value::Coll(CollValue::Bytes(bytes)) => Ok(Some(bytes.iter().map(|b| *b as u8).collect())),
         other => Err(SubstDeserializeError::RegisterNotBytes(format!(
             "{other:?}"
         ))),

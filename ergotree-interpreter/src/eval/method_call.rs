@@ -161,59 +161,13 @@ mod arity_tests {
 #[allow(clippy::unwrap_used, clippy::unreachable)]
 mod jvm_method_rows {
     use alloc::vec::Vec;
-    use ergotree_ir::chain::context::Context;
-    use ergotree_ir::ergo_tree::ErgoTreeVersion;
     use ergotree_ir::mir::constant::TryExtractInto;
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::value::Value;
-    use ergotree_ir::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
     use ergotree_ir::serialization::SigmaSerializable;
     use ergotree_ir::types::stype::SType;
-    use sigma_test_util::force_any_val;
 
-    use crate::eval::{Env, EvalError, Evaluable};
-
-    /// The root of SANTA's eval tree (a v3 sized tree whose root is the expression, read
-    /// without the tree's root-type check), and its value and JIT cost at activated version 3
-    fn eval_v3_body(tree_hex: &str) -> (Expr, Result<Value<'static>, EvalError>, u64) {
-        let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
-        assert_eq!(bytes[0], 0x0b, "{tree_hex}");
-        assert!(bytes[1] < 0x80, "{tree_hex}");
-        let expr = from_bytes(&bytes[2..])
-            .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
-            .unwrap();
-        let mut ctx = force_any_val::<Context>();
-        ctx.activated_script_version_byte = 3;
-        ctx.tree_version.set(ErgoTreeVersion::V3);
-        ctx.jit_cost.set(0);
-        let mut env = Env::empty();
-        let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
-        (expr, res, ctx.jit_cost_value())
-    }
-
-    fn assert_accepts(tree_hex: &str, expected: Value<'static>, cost: u64) {
-        let (_, res, c) = eval_v3_body(tree_hex);
-        assert_eq!(res.unwrap(), expected, "{tree_hex}");
-        assert_eq!(c, cost, "{tree_hex}");
-    }
-
-    /// the error under the span wrapper each eval node adds
-    fn innermost(e: &EvalError) -> &EvalError {
-        match e {
-            EvalError::Spanned(s) => innermost(&s.error),
-            e => e,
-        }
-    }
-
-    /// fails at eval in an evaluator, not for want of one
-    fn assert_evaluator_refuses(tree_hex: &str) {
-        let (_, res, _) = eval_v3_body(tree_hex);
-        let err = res.unwrap_err();
-        assert!(
-            !matches!(innermost(&err), EvalError::NotFound(_)),
-            "{tree_hex}: {err:?}"
-        );
-    }
+    use crate::eval::test_util::{assert_accepts, assert_evaluator_refuses, eval_v3_body};
 
     #[test]
     fn coll_v5_accept_rows() {
@@ -353,6 +307,16 @@ mod jvm_method_rows {
     }
 
     #[test]
+    fn global_serialize_writes_a_tuple_by_its_type() {
+        // SANTA's tuple-values reply, W1 and W2: Global.serialize((1, 2, 3)) writes the items
+        // with no length, Global.serialize(Coll((1, 2, 3))) the collection's length and the items
+        use ergotree_ir::mir::coll_value::CollValue;
+        let bytes = |b: &[i8]| Value::Coll(CollValue::Bytes(b.into()));
+        assert_accepts("0b0cdc6a03dd0148040404020406", bytes(&[2, 4, 6]), 33);
+        assert_accepts("0b0edc6a03dd010c4804040401020406", bytes(&[1, 2, 4, 6]), 36);
+    }
+
+    #[test]
     fn option_new_evaluators_check_their_receiver() {
         // isDefined and get on Coll(1, 2)
         assert_evaluator_refuses("0b0adb240283020404020404");
@@ -394,8 +358,7 @@ mod jvm_method_rows {
     #[test]
     fn coll_runtime_shapes_rows() {
         // SANTA `Coll.runtime_shapes_methodcall.json` (bar the two `Coll[Byte]`-constant rows)
-        use ergotree_ir::types::stuple::TupleItems;
-        let pair = |a: i32, b: i32| Value::Tup(TupleItems::from([Value::Int(a), Value::Int(b)]));
+        let pair = |a: i32, b: i32| Value::pair(Value::Int(a), Value::Int(b));
         // a collection of pairs is a `PairOfCols` on the JVM: the `Coll.getOrElse` bridge
         // casts the default to `Tuple2` whatever the index (`CollsOverArrays.scala:309-315`)
         assert_evaluator_refuses("0b0edc0c0283015858020402040a0101"); // getOrElse(5, true)

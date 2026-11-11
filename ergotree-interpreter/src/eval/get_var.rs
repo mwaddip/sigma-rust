@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use ergotree_ir::mir::constant::TryExtractFromError;
 use ergotree_ir::mir::get_var::GetVar;
 use ergotree_ir::mir::value::Value;
@@ -19,7 +20,7 @@ impl Evaluable for GetVar {
         };
         let script_value = value.to_script_value()?;
         if script_value.tpe == self.var_tpe {
-            Ok(Some(script_value.v).into())
+            Ok(Value::Opt(Some(Box::new(script_value.v))))
         } else {
             Err(TryExtractFromError(format!(
                 "GetVar: expected extension value id {} to have type {:?}, found {:?} in context extension map {}",
@@ -57,6 +58,31 @@ pub mod tests {
         ctx.extension_provider =
             Box::leak(DummyContextExtensionProvider(vec![ctx.extension.clone()]).into());
         ctx
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_tuple_of_three_reads_as_a_collection() {
+        // SANTA's tuple-values reply, G1: SizeOf(getVar[(Int, Int, Int)](1).get) is 3 @39 for a
+        // variable holding the constant `(1, 2, 3)`
+        use crate::eval::test_util::eval_v3_body_in;
+        use ergotree_ir::chain::evaluated_value::EvaluatedValue;
+        use ergotree_ir::mir::value::Value;
+        use ergotree_ir::serialization::SigmaSerializable;
+        let triple =
+            EvaluatedValue::sigma_parse_bytes(&base16::decode("48040404020406").unwrap()).unwrap();
+        let mut ctx = force_any_val::<Context>();
+        ctx.extension = Box::leak(
+            ContextExtension {
+                values: [(1u8, triple)].into_iter().collect(),
+            }
+            .into(),
+        );
+        ctx.extension_provider =
+            Box::leak(DummyContextExtensionProvider(vec![ctx.extension.clone()]).into());
+        let (_, res, cost) = eval_v3_body_in(ctx, "0b08b1e4e30148040404");
+        assert_eq!(res.unwrap(), Value::Int(3));
+        assert_eq!(cost, 39);
     }
 
     /// Normal evaluation
