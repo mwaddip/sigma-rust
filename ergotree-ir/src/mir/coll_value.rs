@@ -237,11 +237,18 @@ fn split_pairs<'ctx>(
 /// Data items as the JVM's deserializer holds them, past its two specialised item types
 /// (`CoreDataSerializer.deserializeColl`'s generic branch, v6.0.7 `:175-191`): `fromArray` at an
 /// abstract type, as [`CollValue::from_array`]. Total: a pair-typed collection holding a non-pair
-/// item, which the parser never builds, stays generic
+/// item, which the parser never builds, stays generic. A collection of tuples of other than two
+/// items is built at the item type `Coll[Any]`, the class of such a tuple's data, not at the
+/// tuple type (v6.0.6 `:160-163`)
 fn from_data(elem_tpe: SType, items: Vec<Value<'static>>) -> CollValue<'static> {
     match split_pairs(&elem_tpe, items) {
         Ok((lt, rt, ls, rs)) => CollValue::pairs(from_data(lt, ls), from_data(rt, rs)),
-        Err(items) => CollValue::generic(elem_tpe, items),
+        Err(items) => match elem_tpe {
+            SType::STuple(t) if t.items.len() != 2 => {
+                CollValue::generic(SType::SColl(SType::SAny.into()), items)
+            }
+            elem_tpe => CollValue::generic(elem_tpe, items),
+        },
     }
 }
 
@@ -435,6 +442,44 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert_eq!(p.get_val(0), Some(pair(0, 5)));
         assert_eq!(p.get_val(1), None);
+    }
+
+    #[test]
+    fn a_data_collection_of_non_pair_tuples_holds_collections_of_any() {
+        // by reading: `deserializeColl` builds a collection of non-pair tuples at the item type
+        // `Coll[Any]` (v6.0.6 `CoreDataSerializer.scala:160-163`), and each item is the tuple's
+        // own `Coll[Any]` (`:134-139`)
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        let item = Literal::Tup(
+            vec![Literal::Int(1), Literal::Int(2), Literal::Int(3)]
+                .try_into()
+                .unwrap(),
+        );
+        let coll_of_any = SType::SColl(SType::SAny.into());
+        for items in [vec![item], vec![]] {
+            let len = items.len();
+            let coll = CollValue::from(CollKind::WrappedColl {
+                elem_tpe: triple.clone(),
+                items: items.into(),
+            });
+            assert!(matches!(&coll, CollValue::Generic { .. }));
+            assert_eq!(coll.elem_tpe(), coll_of_any);
+            assert_eq!(coll.len(), len);
+            if len == 1 {
+                let ints = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
+                assert_eq!(
+                    coll.get_val(0),
+                    Some(Value::Coll(CollValue::generic(SType::SAny, ints)))
+                );
+            }
+        }
+        // a collection of pairs is still a `PairOfCols`
+        let pair = Literal::Tup([Literal::Int(1), Literal::Int(2)].into());
+        let pairs = CollValue::from(CollKind::WrappedColl {
+            elem_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt)),
+            items: vec![pair].into(),
+        });
+        assert!(matches!(pairs, CollValue::Pairs { .. }));
     }
 
     /// Data collections, one per shape the JVM's deserializer builds, with their types

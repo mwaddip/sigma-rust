@@ -480,7 +480,13 @@ impl From<Literal> for Value<'static> {
             Literal::AvlTree(a) => Value::AvlTree(a),
             Literal::Header(h) => Value::Header(h),
             Literal::Opt(lit) => Value::Opt(lit.map(|boxed| *boxed).map(Value::from).map(Box::new)),
-            Literal::Tup(t) => Value::Tup(t.mapped(Value::from)),
+            // sigmastate's data of a tuple: a `Tuple2` for a pair, a generic `Coll[Any]` for any
+            // other count (v6.0.6 `CoreDataSerializer.scala:134-139`, `Evaluation.scala:99-102`)
+            Literal::Tup(t) if t.len() == 2 => Value::Tup(t.mapped(Value::from)),
+            Literal::Tup(t) => Value::Coll(CollValue::generic(
+                SType::SAny,
+                t.to_vec().into_iter().map(Value::from).collect::<Vec<_>>(),
+            )),
         }
     }
 }
@@ -861,6 +867,35 @@ impl<'ctx> TryExtractFrom<Value<'ctx>> for Tuple {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tuple_data_is_a_pair_or_a_collection_of_any() {
+        // sigmastate's data of a tuple is a `Tuple2` for a pair and a `Coll[Any]` for any other
+        // count (v6.0.6 `CoreDataSerializer.scala:134-139`, `Evaluation.scala:99-102`)
+        let tuple = |xs: &[i32]| -> Literal {
+            let items: Vec<Literal> = xs.iter().map(|x| Literal::Int(*x)).collect();
+            Literal::Tup(items.try_into().unwrap())
+        };
+        for xs in [&[][..], &[1], &[1, 2, 3]] {
+            let items: Vec<Value> = xs.iter().map(|x| Value::Int(*x)).collect();
+            assert_eq!(
+                Value::from(tuple(xs)),
+                Value::Coll(CollValue::generic(SType::SAny, items)),
+                "{xs:?}"
+            );
+        }
+        assert!(matches!(Value::from(tuple(&[1, 2])), Value::Tup(items) if items.len() == 2));
+        // a tuple inside a pair converts the same way
+        let nested = Literal::Tup([tuple(&[1, 2, 3]), Literal::Int(4)].into());
+        let triple = CollValue::generic(
+            SType::SAny,
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+        );
+        assert_eq!(
+            Value::from(nested),
+            Value::Tup([Value::Coll(triple), Value::Int(4)].into())
+        );
+    }
 
     #[test]
     fn byte_u8_array_into() {

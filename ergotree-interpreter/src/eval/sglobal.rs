@@ -379,7 +379,7 @@ mod tests {
             .unwrap()
     }
     fn deserialize(array: &[u8], return_type: SType) -> Constant {
-        let type_args = [(STypeVar::t(), return_type)].into_iter().collect();
+        let type_args = [(STypeVar::t(), return_type.clone())].into_iter().collect();
         let deserialize_node = MethodCall::with_type_args(
             Expr::Global,
             DESERIALIZE_METHOD.clone().with_concrete_types(&type_args),
@@ -392,15 +392,19 @@ mod tests {
             try_eval_out_with_version::<Vec<u8>>(&deserialize_node.clone().into(), &ctx, version, 3)
                 .is_err()
         }));
-        try_eval_out_with_version::<Value>(
+        let value = try_eval_out_with_version::<Value>(
             &deserialize_node.into(),
             &ctx,
             ErgoTreeVersion::V3.into(),
             3,
         )
-        .unwrap()
-        .try_into()
-        .unwrap()
+        .unwrap();
+        // the value as data of the requested type: a tuple of other than two items is a
+        // collection of `Any` at evaluation
+        Constant {
+            v: super::literal_of_type(value, &return_type).unwrap(),
+            tpe: return_type,
+        }
     }
 
     fn encode_nbits(bigint: BigInt256) -> i64 {
