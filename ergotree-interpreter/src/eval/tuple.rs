@@ -228,6 +228,17 @@ mod non_pair_value_rows {
     }
 
     #[test]
+    fn a_pair_collection_s_side_keeps_the_tuple_item_type() {
+        // by reading: sigmaProp(Coll[((Int,Int,Int), Int)](((1,2,3), 4)) ==
+        // ConcreteCollection(((1,2,3), 4))). The constant's left side is built at the tuple
+        // type (`fromBoxedPairs`), as the in-script collection's is, so the item types agree
+        // and the items compare
+        let (_, res, _) =
+            eval_v3_body("0b1dd1930c4c48040404010204060883014c480404044c4804040402040608");
+        assert_eq!(res.unwrap(), true_prop());
+    }
+
+    #[test]
     fn an_any_typed_item_meets_the_three_gates() {
         // ByIndex((1,2,3), i) is typed `Any`. EQ against an Int and a comparison are refused
         // at parse, with and without the size bit (`ConstraintFailed` is no validation error)

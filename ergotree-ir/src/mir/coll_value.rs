@@ -87,6 +87,33 @@ impl<'ctx> CollValue<'ctx> {
         }
     }
 
+    /// The collection sigmastate's `ConcreteCollection.value` builds from a collection
+    /// EXPRESSION held in a register or a context variable (v6.0.6 `values.scala:879-884`):
+    /// `Colls.fromArray` at the item type `stypeToRType(elementType)`. So one of tuples of other
+    /// than two items keeps the tuple type as its item type, where decoded data of the same
+    /// declared type has `Coll[Any]` ([`From<CollKind<Literal>>`]); equality compares item types
+    /// first, so the two differ. `items` are the items' values. The forms are the ones data
+    /// takes: a `Coll[Byte]` and a `Coll[Boolean]` specialised, pairs as their two sides
+    pub fn from_expression_items(
+        elem_tpe: SType,
+        items: Vec<Value<'static>>,
+    ) -> Result<CollValue<'static>, TryExtractFromError> {
+        let all_booleans = || items.iter().all(|v| matches!(v, Value::Boolean(_)));
+        match elem_tpe {
+            SType::SByte => items
+                .into_iter()
+                .map(|v| v.try_extract_into::<i8>())
+                .collect::<Result<Arc<[i8]>, _>>()
+                .map(CollValue::Bytes),
+            SType::SBoolean if all_booleans() => items
+                .into_iter()
+                .map(|v| v.try_extract_into::<bool>())
+                .collect::<Result<Arc<[bool]>, _>>()
+                .map(CollValue::Booleans),
+            elem_tpe => Ok(from_data(elem_tpe, items)),
+        }
+    }
+
     /// The result of an operation that keeps its receiver's class: sigmastate builds it with
     /// `builder.fromArray` inside the receiver (v6.0.7 `CollsOverArrays.scala:31-111`), so a
     /// specialised receiver gives the same specialised form (an item of another kind is an error, as
@@ -234,18 +261,13 @@ fn split_pairs<'ctx>(
 /// Data items as the JVM's deserializer holds them, past its two specialised item types
 /// (`CoreDataSerializer.deserializeColl`'s generic branch, v6.0.7 `:175-191`): `fromArray` at an
 /// abstract type, as [`CollValue::from_array`]. Total: a pair-typed collection holding a non-pair
-/// item, which the parser never builds, stays generic. A collection of tuples of other than two
-/// items is built at the item type `Coll[Any]`, the class of such a tuple's data, not at the
-/// tuple type (v6.0.6 `:160-163`)
+/// item, which the parser never builds, stays generic. A pair collection's sides are built at
+/// their own item types (`fromBoxedPairs`, `CollsOverArrays.scala:205-215`), a tuple type
+/// included
 fn from_data(elem_tpe: SType, items: Vec<Value<'static>>) -> CollValue<'static> {
     match split_pairs(&elem_tpe, items) {
         Ok((lt, rt, ls, rs)) => CollValue::pairs(from_data(lt, ls), from_data(rt, rs)),
-        Err(items) => match elem_tpe {
-            SType::STuple(t) if t.items.len() != 2 => {
-                CollValue::generic(SType::SColl(SType::SAny.into()), items)
-            }
-            elem_tpe => CollValue::generic(elem_tpe, items),
-        },
+        Err(items) => CollValue::generic(elem_tpe, items),
     }
 }
 
@@ -296,9 +318,18 @@ impl From<CollKind<Literal>> for CollValue<'static> {
                             .collect::<Option<Arc<[bool]>>>()
                     })
                     .flatten();
-                match bits {
-                    Some(bits) => CollValue::Booleans(bits),
-                    None => from_data(elem_tpe, items.iter().cloned().map(Value::from).collect()),
+                let values = || items.iter().cloned().map(Value::from).collect::<Vec<_>>();
+                match (bits, elem_tpe) {
+                    (Some(bits), _) => CollValue::Booleans(bits),
+                    // the collection the decoder reads: one of tuples of other than two items
+                    // is built at the item type `Coll[Any]`, the class of such a tuple's data,
+                    // not at the tuple type (v6.0.6 `CoreDataSerializer.scala:160-163`; SANTA
+                    // `Tuple.non_pair_value_producers` #5). Only that collection: a pair
+                    // collection's sides keep their own types ([`from_data`])
+                    (None, SType::STuple(t)) if t.items.len() != 2 => {
+                        CollValue::generic(SType::SColl(SType::SAny.into()), values())
+                    }
+                    (None, elem_tpe) => from_data(elem_tpe, values()),
                 }
             }
         }
@@ -470,6 +501,34 @@ mod tests {
                 );
             }
         }
+        // a pair collection's side is built at its own item type, the tuple type
+        // (`fromBoxedPairs`): data `Coll[((Int, Int, Int), Int)]`
+        let triple_lit = || {
+            Literal::Tup(
+                vec![Literal::Int(1), Literal::Int(2), Literal::Int(3)]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let sides = CollValue::from(CollKind::WrappedColl {
+            elem_tpe: SType::STuple(STuple::pair(triple.clone(), SType::SInt)),
+            items: vec![Literal::Tup([triple_lit(), Literal::Int(4)].into())].into(),
+        });
+        match &sides {
+            CollValue::Pairs { ls, .. } => assert_eq!(ls.elem_tpe(), triple),
+            other => panic!("{other:?}"),
+        }
+        // and a collection EXPRESSION's value is built at the element type
+        // (`ConcreteCollection.value`), so it differs from the same collection as data
+        let ints = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
+        let item = Value::Coll(CollValue::generic(SType::SAny, ints));
+        let expr_coll = CollValue::from_expression_items(triple.clone(), vec![item]).unwrap();
+        assert_eq!(expr_coll.elem_tpe(), triple);
+        let data_coll = CollValue::from(CollKind::WrappedColl {
+            elem_tpe: triple.clone(),
+            items: vec![triple_lit()].into(),
+        });
+        assert_ne!(expr_coll, data_coll);
         // a collection of pairs is still a `PairOfCols`
         let pair = Literal::Tup([Literal::Int(1), Literal::Int(2)].into());
         let pairs = CollValue::from(CollKind::WrappedColl {
