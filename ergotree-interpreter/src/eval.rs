@@ -775,6 +775,52 @@ pub mod test_util {
         static TEST_CTX: Context<'static> = force_any_val::<Context>();
     }
 
+    /// The root of SANTA's eval tree (a v3 sized tree whose root is the expression, read
+    /// without the tree's root-type check), and its value and JIT cost at activated version 3
+    #[cfg(test)]
+    pub(crate) fn eval_v3_body(tree_hex: &str) -> (Expr, Result<Value<'static>, EvalError>, u64) {
+        let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
+        assert_eq!(bytes[0], 0x0b, "{tree_hex}");
+        assert!(bytes[1] < 0x80, "{tree_hex}");
+        let expr = from_bytes(&bytes[2..])
+            .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
+            .unwrap();
+        let mut ctx = force_any_val::<Context>();
+        ctx.activated_script_version_byte = 3;
+        ctx.tree_version.set(ErgoTreeVersion::V3);
+        ctx.jit_cost.set(0);
+        let mut env = Env::empty();
+        let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
+        (expr, res, ctx.jit_cost_value())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_accepts(tree_hex: &str, expected: Value<'static>, cost: u64) {
+        let (_, res, c) = eval_v3_body(tree_hex);
+        assert_eq!(res.unwrap(), expected, "{tree_hex}");
+        assert_eq!(c, cost, "{tree_hex}");
+    }
+
+    /// the error under the span wrapper each eval node adds
+    #[cfg(test)]
+    fn innermost(e: &EvalError) -> &EvalError {
+        match e {
+            EvalError::Spanned(s) => innermost(&s.error),
+            e => e,
+        }
+    }
+
+    /// fails at eval in an evaluator, not for want of one
+    #[cfg(test)]
+    pub(crate) fn assert_evaluator_refuses(tree_hex: &str) {
+        let (_, res, _) = eval_v3_body(tree_hex);
+        let err = res.unwrap_err();
+        assert!(
+            !matches!(innermost(&err), EvalError::NotFound(_)),
+            "{tree_hex}: {err:?}"
+        );
+    }
+
     pub fn eval_out_wo_ctx<T: TryExtractFrom<Value<'static>> + 'static>(expr: &Expr) -> T {
         TEST_CTX.with(|ctx| eval_out(expr, ctx))
     }

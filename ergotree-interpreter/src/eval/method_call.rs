@@ -161,59 +161,13 @@ mod arity_tests {
 #[allow(clippy::unwrap_used, clippy::unreachable)]
 mod jvm_method_rows {
     use alloc::vec::Vec;
-    use ergotree_ir::chain::context::Context;
-    use ergotree_ir::ergo_tree::ErgoTreeVersion;
     use ergotree_ir::mir::constant::TryExtractInto;
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::value::Value;
-    use ergotree_ir::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
     use ergotree_ir::serialization::SigmaSerializable;
     use ergotree_ir::types::stype::SType;
-    use sigma_test_util::force_any_val;
 
-    use crate::eval::{Env, EvalError, Evaluable};
-
-    /// The root of SANTA's eval tree (a v3 sized tree whose root is the expression, read
-    /// without the tree's root-type check), and its value and JIT cost at activated version 3
-    fn eval_v3_body(tree_hex: &str) -> (Expr, Result<Value<'static>, EvalError>, u64) {
-        let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
-        assert_eq!(bytes[0], 0x0b, "{tree_hex}");
-        assert!(bytes[1] < 0x80, "{tree_hex}");
-        let expr = from_bytes(&bytes[2..])
-            .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
-            .unwrap();
-        let mut ctx = force_any_val::<Context>();
-        ctx.activated_script_version_byte = 3;
-        ctx.tree_version.set(ErgoTreeVersion::V3);
-        ctx.jit_cost.set(0);
-        let mut env = Env::empty();
-        let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
-        (expr, res, ctx.jit_cost_value())
-    }
-
-    fn assert_accepts(tree_hex: &str, expected: Value<'static>, cost: u64) {
-        let (_, res, c) = eval_v3_body(tree_hex);
-        assert_eq!(res.unwrap(), expected, "{tree_hex}");
-        assert_eq!(c, cost, "{tree_hex}");
-    }
-
-    /// the error under the span wrapper each eval node adds
-    fn innermost(e: &EvalError) -> &EvalError {
-        match e {
-            EvalError::Spanned(s) => innermost(&s.error),
-            e => e,
-        }
-    }
-
-    /// fails at eval in an evaluator, not for want of one
-    fn assert_evaluator_refuses(tree_hex: &str) {
-        let (_, res, _) = eval_v3_body(tree_hex);
-        let err = res.unwrap_err();
-        assert!(
-            !matches!(innermost(&err), EvalError::NotFound(_)),
-            "{tree_hex}: {err:?}"
-        );
-    }
+    use crate::eval::test_util::{assert_accepts, assert_evaluator_refuses, eval_v3_body};
 
     #[test]
     fn coll_v5_accept_rows() {
