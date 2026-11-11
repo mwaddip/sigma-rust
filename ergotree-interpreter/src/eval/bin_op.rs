@@ -322,47 +322,10 @@ mod arith_op_type_tests {
     use ergotree_ir::unsignedbigint256::UnsignedBigInt;
     use sigma_test_util::force_any_val;
 
-    use crate::eval::env::Env;
     use crate::eval::test_util::{
-        assert_accepts, eval_v3_body, try_eval_out_wo_ctx, try_eval_with_deserialize,
+        assert_accepts, assert_trees, eval_v3_body, try_eval_out_wo_ctx, try_eval_with_deserialize,
     };
     use crate::eval::EvalError;
-    use crate::eval::Evaluable;
-
-    /// The value and JIT cost of a SANTA eval tree at activated version 3: a v3 sized tree
-    /// (`0b`, [`eval_v3_body`]) or a v0 tree (`00`), whose root is the expression
-    fn eval_tree(tree_hex: &str) -> (Result<Value<'static>, EvalError>, u64) {
-        if tree_hex.starts_with("0b") {
-            let (_, res, cost) = eval_v3_body(tree_hex);
-            return (res, cost);
-        }
-        let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
-        assert_eq!(bytes[0], 0x00, "{tree_hex}");
-        let expr = from_bytes(&bytes[1..])
-            .with_tree_version(ErgoTreeVersion::V0, Expr::sigma_parse)
-            .unwrap();
-        let mut ctx = force_any_val::<Context>();
-        ctx.activated_script_version_byte = 3;
-        ctx.tree_version.set(ErgoTreeVersion::V0);
-        ctx.jit_cost.set(0);
-        let mut env = Env::empty();
-        let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
-        (res, ctx.jit_cost_value())
-    }
-
-    /// Each tree's value and cost, or that it errors where no value is given
-    fn check(rows: &[(&str, Option<(Value<'static>, u64)>)]) {
-        for (tree_hex, expected) in rows {
-            let (res, cost) = eval_tree(tree_hex);
-            match expected {
-                Some((value, expected_cost)) => {
-                    assert_eq!(res.as_ref().ok(), Some(value), "{tree_hex}: {res:?}");
-                    assert_eq!(cost, *expected_cost, "{tree_hex}");
-                }
-                None => assert!(res.is_err(), "{tree_hex}: {res:?}"),
-            }
-        }
-    }
 
     fn bigint(n: i32) -> Value<'static> {
         Value::BigInt(BigInt256::from(n))
@@ -376,7 +339,7 @@ mod arith_op_type_tests {
         // numeric type throws `ClassCastException`. Below tree version 3 the parser wraps the
         // narrower of two operands of different static types in an `Upcast`, which costs 10,
         // or 30 to `BigInt` (`SigmaBuilder.scala:674-683`, `:757-763`, `CostKind.scala:60-65`)
-        check(&[
+        assert_trees(&[
             // A1, A2: `1L + 2L`, the control
             ("0b059a05020504", Some((Value::Long(3), 25))),
             ("009a05020504", Some((Value::Long(3), 25))),
@@ -415,7 +378,7 @@ mod arith_op_type_tests {
         // values and costs are sigma-rust's own at `a7656774`, not JVM measurements;
         // sigma-state 6.0.3 measured the mirrored v0 pairs (`Int * Long`, `max(Int, Long)`,
         // `min(Int, Long)`, in `arith_mismatched_numeric_coercion_vectors`) at the same costs
-        check(&[
+        assert_trees(&[
             // `1L * 2`
             ("0b059c05020404", None),
             ("009c05020404", Some((Value::Long(2), 35))),
@@ -455,7 +418,7 @@ mod arith_op_type_tests {
         // An operand whose static type comes from another node keeps its arithmetic. Values and
         // costs are sigma-rust's own at `a7656774`, not JVM measurements: a regression guard
         // for a static type that disagrees with the value it types
-        check(&[
+        assert_trees(&[
             // `ByIndex(Coll[Long](1, 2), 0) + 1L`
             ("0b0b9ab2110202040400000502", Some((Value::Long(2), 60))),
             ("009ab2110202040400000502", Some((Value::Long(2), 60))),
