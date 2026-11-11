@@ -1218,16 +1218,6 @@ pub(crate) mod arbitrary {
                                 elem.clone().prop_map(|c| coll_from_constant(c, 2)),
                                 elem.clone().prop_map(|c| coll_from_constant(c, 10)),
                                 // no Option[_] since it cannot be serialized (for now)
-                                // // Some(v)
-                                // elem.clone().prop_map(|c| Constant {
-                                //     tpe: SType::SOption(Box::new(c.tpe)),
-                                //     v: Value::Opt(Box::new(Some(c.v)))
-                                // }),
-                                // // None
-                                // elem.prop_map(|c| Constant {
-                                //     tpe: SType::SOption(Box::new(c.tpe)),
-                                //     v: Value::Opt(Box::new(None))
-                                // })
 
                                 // Tuple
                                 vec(elem, 2..=4).prop_map(|constants| Constant {
