@@ -487,6 +487,31 @@ mod tests {
         assert_eq!(cost, 21);
     }
 
+    // the `propositionBytes` vector of `eval_accessor_method_forms_blessed_vectors` with the box
+    // constant's tree `10 01 0101 d17300` read from an overlong constants count, `10 81 00 …`:
+    // the method returns the bytes the tree was read from (`CBox.scala:27`,
+    // `ErgoBoxCandidate.scala:50`), at the same cost; the writer gives `10 01 …`. This box
+    // constant is ours; SANTA `kept-tree-bytes-input` pins the same read on a spent box.
+    #[test]
+    fn proposition_bytes_method_reads_the_kept_bytes() {
+        use crate::eval::test_util::try_eval_with_deserialize;
+
+        let blessed = "100163c0843d10010101d1730000000107000000000000000000000000000000000000000000000000000000000000000000111111111111111111111111111111111111111111111111111111111111111100db63027300";
+        assert_eq!(blessed.matches("10010101d17300").count(), 1);
+        let tree_hex = blessed.replace("10010101d17300", "1081000101d17300");
+        let tree =
+            ErgoTree::sigma_parse_bytes_lenient(&base16::decode(&tree_hex).unwrap()).unwrap();
+        let mut ctx = force_any_val::<Context>();
+        ctx.activated_script_version_byte = 2;
+        ctx.tree_version.set(ErgoTreeVersion::V0);
+        let eval_ctx = ctx.with_constants(tree.constants().unwrap());
+        let before = eval_ctx.jit_cost_value();
+        let pb =
+            try_eval_with_deserialize::<Vec<i8>>(tree.root_expr().unwrap(), &eval_ctx).unwrap();
+        assert_eq!(pb, vec![16, -127, 0, 1, 1, -47, 115, 0]);
+        assert_eq!(eval_ctx.jit_cost_value() - before, 15);
+    }
+
     // getRegV5 (method id 7) deserializes but has no eval — mirroring the JVM,
     // where getRegMethodV5's reflective lookup fails. A live occurrence errors;
     // a dead-branch occurrence leaves the script evaluable. Trees are the

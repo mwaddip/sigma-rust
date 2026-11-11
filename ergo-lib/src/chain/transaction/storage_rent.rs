@@ -355,6 +355,24 @@ mod tests {
         assert!(!check_expired_box(&b, &other_script, 100, H, FACTOR));
     }
 
+    #[test]
+    fn recreation_with_a_non_canonical_tree_is_not_preserved() {
+        // SANTA `rent-recreation-noncanonical-script-reject`: the output's tree is the box's
+        // tree with its constants count written as the VLQ `81 00`. It parses to the same tree,
+        // but R1 is the bytes the tree was read from (`ErgoBoxCandidate.scala:72`), so R1 is
+        // not preserved.
+        let tree = |hex: &str| ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap()).unwrap();
+        let mut b = expired_box(5_000_000_000, 0, 0);
+        b.ergo_tree = tree("10010101d17300");
+        let fee = 125_000_000u64; // 100 bytes * 1_250_000
+        let same = recreated(&b, 5_000_000_000 - fee, H);
+        assert!(check_expired_box(&b, &same, 100, H, FACTOR));
+        let mut overlong = same.clone();
+        overlong.ergo_tree = tree("1081000101d17300");
+        assert_eq!(overlong.ergo_tree, b.ergo_tree);
+        assert!(!check_expired_box(&b, &overlong, 100, H, FACTOR));
+    }
+
     // ---- check_expired_box: R4..R9 compared as `ErgoBox.get` values ----
 
     /// `b` with its non-mandatory registers replaced by `regs`.
