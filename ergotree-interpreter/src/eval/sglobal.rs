@@ -22,24 +22,12 @@ use ergo_chain_types::{autolykos_pow_scheme::AutolykosPowScheme, ec_point::gener
 use ergotree_ir::bigint256::BigInt256;
 use ergotree_ir::types::stype::SType;
 
-pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
     ctx.add_jit_cost(10)?;
-    if obj != Value::Global {
-        return Err(EvalError::UnexpectedValue(format!(
-            "sglobal.groupGenerator expected obj to be Value::Global, got {:?}",
-            obj
-        )));
-    }
     Ok(Value::from(generator()))
 };
 
-pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    if obj != Value::Global {
-        return Err(EvalError::UnexpectedValue(format!(
-            "sglobal.xor expected obj to be Value::Global, got {:?}",
-            obj
-        )));
-    }
+pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
     let right_v = args
         .first()
         .cloned()
@@ -54,14 +42,8 @@ pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     super::xor::xor_with_costing(ctx, &left_v, &right_v)
 };
 
-pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
+pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
     ctx.add_jit_cost(10)?;
-    if obj != Value::Global {
-        return Err(EvalError::UnexpectedValue(format!(
-            "sglobal.fromBigEndianBytes expected obj to be Value::Global, got {:?}",
-            obj
-        )));
-    }
 
     let bytes_val = args
         .first()
@@ -154,13 +136,7 @@ pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx,
     }
 };
 
-pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
-    if obj != Value::Global {
-        return Err(EvalError::UnexpectedValue(format!(
-            "sglobal.deserialize expected obj to be Value::Global, got {:?}",
-            obj
-        )));
-    }
+pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
     let output_type = &mc.tpe().t_range;
     let bytes = args
         .first()
@@ -179,16 +155,10 @@ pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     )?))
 };
 
-pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
+pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
     // Scala `serialize_eval` charges SigmaByteWriter.StartWriterCost = FixedCost(JitCost(10))
     // up front, then each writer `put`'s cost during DataSerializer.serialize.
     ctx.add_jit_cost(10)?;
-    if obj != Value::Global {
-        return Err(EvalError::UnexpectedValue(format!(
-            "sglobal.groupGenerator expected obj to be Value::Global, got {:?}",
-            obj
-        )));
-    }
     // sigmastate writes the value by the argument expression's type
     // (`DataSerializer.serialize(value, mc.args(0).tpe, w)`, v6.0.6 `methods.scala:1982`)
     let missing = || EvalError::NotFound("serialize: missing first arg".into());
@@ -209,14 +179,8 @@ pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     Ok(Value::from(buf))
 };
 
-pub(crate) static SGLOBAL_SOME_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+pub(crate) static SGLOBAL_SOME_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
     ctx.add_jit_cost(5)?;
-    if obj != Value::Global {
-        return Err(EvalError::UnexpectedValue(format!(
-            "sglobal.some expected obj to be Value::Global, got {:?}",
-            obj
-        )));
-    }
     let value = args
         .first()
         .cloned()
@@ -224,14 +188,8 @@ pub(crate) static SGLOBAL_SOME_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     Ok(Value::Opt(Some(Box::new(value))))
 };
 
-pub(crate) static SGLOBAL_NONE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+pub(crate) static SGLOBAL_NONE_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
     ctx.add_jit_cost(5)?;
-    if obj != Value::Global {
-        return Err(EvalError::UnexpectedValue(format!(
-            "sglobal.none expected obj to be Value::Global, got {:?}",
-            obj
-        )));
-    }
     Ok(Value::Opt(None))
 };
 
