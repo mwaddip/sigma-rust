@@ -174,7 +174,7 @@ mod negation_type_tests {
             // `-(BigInt 1)`
             (
                 "0b04f0060101",
-                Some((Value::BigInt(BigInt256::from(-1i32)), 35)),
+                Some((Value::from(BigInt256::from(-1i32)), 35)),
             ),
         ]);
         // `UnsignedBigInt` has its entry in the table, so the cost is charged before `negate`

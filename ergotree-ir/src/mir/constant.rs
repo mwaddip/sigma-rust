@@ -395,7 +395,9 @@ impl<'ctx> TryFrom<Value<'ctx>> for Literal {
             Value::Short(s) => Ok(Literal::from(s)),
             Value::Int(i) => Ok(Literal::from(i)),
             Value::Long(l) => Ok(Literal::from(l)),
-            Value::BigInt(b) => Ok(Literal::from(b)),
+            // data is 256-bit: sigmastate's constant writer requires `fitsIn256Bits`
+            // (v6.0.6 `CoreDataSerializer.scala:35`)
+            Value::BigInt(b) => Ok(Literal::from(BigInt256::try_from(b)?)),
             Value::Unit => Ok(Literal::Unit),
             Value::SigmaProp(s) => Ok(Literal::from(*s)),
             Value::UnsignedBigInt(b) => Ok(Literal::from(b)),
@@ -502,6 +504,47 @@ mod literal_of_type_tests {
     use super::*;
     use crate::mir::coll_value::CollValue;
     use alloc::vec;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_runtime_bigint_outside_256_bits_is_not_data() {
+        // A runtime `BigInt` is as wide as sigmastate's `BigInteger`; data is 256-bit, and the
+        // JVM's constant writer requires `fitsIn256Bits` (v6.0.6 `CoreDataSerializer.scala:35`):
+        // `-2^255 ..= 2^255 - 1`
+        use crate::bigint256::BigInt256;
+        use num_bigint::BigInt;
+        let wide = |v: BigInt| Value::BigInt(v);
+        let p: BigInt = BigInt::from(1) << 255usize;
+        for v in [p.clone(), -p.clone() - 1, p.clone() << 2000usize] {
+            assert!(Literal::try_from(wide(v.clone())).is_err(), "{v}");
+            assert!(
+                literal_of_type(wide(v.clone()), &SType::SBigInt).is_err(),
+                "{v}"
+            );
+            assert!(
+                wide(v.clone()).try_extract_into::<BigInt256>().is_err(),
+                "{v}"
+            );
+        }
+        for v in [-p.clone(), p.clone() - 1, BigInt::from(0)] {
+            let data = BigInt256::try_from(v.clone()).unwrap();
+            assert_eq!(
+                Literal::try_from(wide(v.clone())),
+                Ok(Literal::BigInt(data))
+            );
+            assert_eq!(
+                literal_of_type(wide(v.clone()), &SType::SBigInt),
+                Ok(Literal::BigInt(data))
+            );
+            assert_eq!(
+                wide(v.clone()).try_extract_into::<BigInt256>().unwrap(),
+                data
+            );
+            assert_eq!(Value::from(Literal::BigInt(data)), wide(v.clone()));
+            assert_eq!(Value::from(data), wide(v.clone()));
+            assert_eq!(wide(v.clone()).try_extract_into::<BigInt>().unwrap(), v);
+        }
+    }
 
     fn int_triple() -> SType {
         SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt))

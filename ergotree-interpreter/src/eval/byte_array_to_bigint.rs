@@ -25,7 +25,7 @@ impl Evaluable for ByteArrayToBigInt {
             ));
         }
         match BigInt256::from_be_slice(&input[..]) {
-            Some(n) => Ok(Value::BigInt(n)),
+            Some(n) => Ok(n.into()),
             None => Err(UnexpectedValue(
                 "ByteArrayToBigInt: input array out of bounds".into(),
             )),

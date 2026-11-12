@@ -350,7 +350,7 @@ mod arith_op_type_tests {
     use crate::eval::EvalError;
 
     fn bigint(n: i32) -> Value<'static> {
-        Value::BigInt(BigInt256::from(n))
+        Value::from(BigInt256::from(n))
     }
 
     #[test]
@@ -853,12 +853,12 @@ mod tests {
             ("009a03020404", Some(Value::Int(3)), 35),  // Plus(Short 1, Int 2)
             (
                 "009a0402060102",
-                Some(Value::BigInt(BigInt256::from(3i32))),
+                Some(Value::from(BigInt256::from(3i32))),
                 60,
             ), // Plus(Int 1, BigInt 2)
             (
                 "009a0502060102",
-                Some(Value::BigInt(BigInt256::from(3i32))),
+                Some(Value::from(BigInt256::from(3i32))),
                 60,
             ), // Plus(Long 1, BigInt 2)
         ];

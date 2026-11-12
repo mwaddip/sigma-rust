@@ -1755,7 +1755,7 @@ mod value_check_tests {
             (SType::SShort, Value::Short(1)),
             (SType::SInt, Value::Int(1)),
             (SType::SLong, Value::Long(1)),
-            (SType::SBigInt, Value::BigInt(BigInt256::from(1i64))),
+            (SType::SBigInt, Value::from(BigInt256::from(1i64))),
             (
                 SType::SUnsignedBigInt,
                 Value::UnsignedBigInt(UnsignedBigInt::from(1u64)),
