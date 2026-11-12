@@ -395,6 +395,42 @@ mod typed_array_store {
             ("0b0cb1b31003020406830104040e", v(4, 66)), // X19 `Coll[Int] const (1,2,3) ++ ConcreteCollection[Int](7)`
         ]);
     }
+
+    /// `updateMany` stores each value into a clone of the receiver's array (v6.0.6
+    /// `CollsOverArrays.scala:106-117`, `:436-450`): it compares no item types, so a tuple receiver,
+    /// a class-compatible item and an empty update all run, and the array refuses the rest (SANTA
+    /// `Coll.reference_store_ops` C rows, `Tuple.non_pair_value_ops` rows 47-49,
+    /// `Coll.updateMany_runtime_item_type`)
+    #[test]
+    fn update_many_stores_without_comparing_item_types() {
+        assert_trees(&[
+            ("0b10b1dc0c15830163a70210010083010782", None), // C1 `Coll[Box](SELF).updateMany(Coll(0), Coll[GroupElement](g))`
+            (
+                "0b18b1dc0c158301108301040402021001008301118301050502",
+                v(1, 135),
+            ), // C2 `Coll[Coll[Int]](Coll(1)).updateMany(Coll(0), Coll[Coll[Long]](Coll(1L)))`
+            ("0b0eb1dc0c15830163a7021000830007", v(1, 95)), // C3 `Coll[Box](SELF).updateMany(Coll[Int](), Coll[GroupElement]())`
+            (
+                "0b1eb1dc0c15dc0c1d10010201830163a702100100dc0c1d1001020183010782",
+                None,
+            ), // C4 `Coll(1).zip(Coll[Box](SELF)).updateMany(Coll(0), Coll(1).zip(Coll[GroupElement](g)))`
+            (
+                "0b26b1dc0c15dc0c1d10010201830110830104040202100100dc0c1d100102018301118301050502",
+                v(1, 175),
+            ), // C5 `Coll(1).zip(Coll[Coll[Int]](Coll(1))).updateMany(Coll(0), Coll(1).zip(Coll[Coll[Long]](Coll(1L))))`
+            ("0b12b1dc0c15480404040204060210010010010e", v(3, 55)), // T23 `(1,2,3).updateMany(Coll(0), Coll(7))` (SANTA `Tuple.non_pair_value_ops` row 47)
+            ("0b10b1dc0c1510030204060210010010010e", v(3, 55)), // C23 the `Coll[Int]` control (row 48)
+            ("0b11b1dc0c151003020406021001006001040e", v(3, 55)), // U3 a 1-item tuple as the updates (row 49)
+            (
+                "0b1fdc0c159501008302040402040483020505020504028301040400830104040a",
+                None,
+            ), // SANTA `Coll.updateMany_runtime_item_type` row 0: an `Int` into a `long[]` clone
+            (
+                "0b1ddc0c1583020404020404028301040400950100830104040a830105050a",
+                None,
+            ), // row 1: a `Long` into an `int[]` clone
+        ]);
+    }
 }
 
 #[cfg(test)]

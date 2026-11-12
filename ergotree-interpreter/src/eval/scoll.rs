@@ -309,8 +309,8 @@ pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
             EvalError::NotFound("updated: missing second arg (updates)".to_string())
         })?;
 
-        let (updates_tpe, updates_val) = match updates_arg {
-            Value::Coll(coll) => Ok((coll.elem_tpe().clone(), coll.as_vec())),
+        let updates_val = match updates_arg {
+            Value::Coll(coll) => Ok(coll.as_vec()),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected first arg to be Value::Coll, got: {0:?}",
                 updates_arg
@@ -334,14 +334,10 @@ pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
                 indexes_len, updates_len, indexes_usize, updates_val
             )));
         };
-        if input_tpe != updates_tpe {
-            return Err(EvalError::UnexpectedValue(format!(
-                "Collections should be same type but was: \
-            {0:?} and {1:?}. \n Inputs: {2:?} \n Updates: {3:?}",
-                input_tpe, updates_tpe, normalized_input_vals, updates_val
-            )));
-        };
-
+        // sigmastate compares no item types (v6.0.6 `CollsOverArrays.scala:106-117`, `:436-450`):
+        // each value is stored into a clone of the receiver's array, and the rebuild below
+        // refuses the ones that array would not take (SANTA `Tuple.non_pair_value_ops` T23, U3,
+        // `Coll.reference_store_ops`)
         let mut i = 0;
         let mut res = normalized_input_vals;
 
