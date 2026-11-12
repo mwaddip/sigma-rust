@@ -47,63 +47,59 @@ const EQ_COLL_PREHEADER_PER_ITEM: (u32, u32, u32) = (15, 3, 1);
 const EQ_COLL_HEADER_PER_ITEM: (u32, u32, u32) = (15, 5, 1);
 const EQ_COLL_DEFAULT_PER_ITEM: (u32, u32, u32) = (10, 2, 1);
 
-/// Compare two Values for equality, charging per-type costs to `ctx`.
-/// Returns `Ok(true)` / `Ok(false)`, or an `EvalError::CostError` if the
-/// cumulative JIT cost limit is exceeded during charging.
+/// A `Byte`, `Short`, `Int` or `Long` value as an `i64`: what Scala's `==` compares for two boxed
+/// integers (`BoxesRunTime.equalsNumNum`), whatever their widths. `None` for any other value
+pub(crate) fn integral(v: &Value<'_>) -> Option<i64> {
+    match v {
+        Value::Byte(x) => Some(i64::from(*x)),
+        Value::Short(x) => Some(i64::from(*x)),
+        Value::Int(x) => Some(i64::from(*x)),
+        Value::Long(x) => Some(*x),
+        _ => None,
+    }
+}
+
+/// sigmastate's `equalDataValues` ends in `sys.error("Cannot compare $l and $r: unknown type")`
+/// for a left value it has no case for (v6.0.6 `DataValueComparer.scala:412-413`)
+fn no_case(kind: &str) -> EvalError {
+    EvalError::Misc(format!("Cannot compare a {kind} value: unknown type"))
+}
+
+/// Compare two values for equality, charging per-type costs to `ctx`: sigmastate's
+/// `DataValueComparer.equalDataValues` (v6.0.6 `DataValueComparer.scala:310-416`), the one
+/// comparison behind `EQ`, `NEQ` and `Coll.indexOf`.
+///
+/// It dispatches on the class of the LEFT value alone: each case charges its own cost, and then
+/// a right value of another class is unequal. So there is one arm per [`Value`] variant, in
+/// sigmastate's order, and no wildcard arm: a new variant must be given its row here.
+///
+/// Returns `Ok(true)` / `Ok(false)`, an error for a left value sigmastate has no case for, or
+/// an `EvalError::CostError` if the cumulative JIT cost limit is exceeded during charging.
 pub(crate) fn eq_with_cost<'ctx>(
     lv: &Value<'ctx>,
     rv: &Value<'ctx>,
     ctx: &Context<'ctx>,
 ) -> Result<bool, EvalError> {
-    match (lv, rv) {
-        (Value::Boolean(_), Value::Boolean(_))
-        | (Value::Byte(_), Value::Byte(_))
-        | (Value::Short(_), Value::Short(_))
-        | (Value::Int(_), Value::Int(_))
-        | (Value::Long(_), Value::Long(_)) => {
+    match lv {
+        // case 1 (`:313-316`): Scala's `==` on two boxed values. Two integers are equal when
+        // their values are, whatever their widths (SANTA `Coll.specialisation_blind_ops` X1,
+        // X2); a `Boolean` equals only a `Boolean`; anything else is unequal
+        Value::Boolean(_) | Value::Byte(_) | Value::Short(_) | Value::Int(_) | Value::Long(_) => {
             ctx.add_jit_cost(EQ_PRIM_COST)?;
-            Ok(lv == rv)
+            Ok(match (integral(lv), integral(rv)) {
+                (Some(l), Some(r)) => l == r,
+                _ => lv == rv,
+            })
         }
 
-        (Value::BigInt(_), Value::BigInt(_))
-        | (Value::UnsignedBigInt(_), Value::UnsignedBigInt(_)) => {
-            ctx.add_jit_cost(EQ_BIGINT_COST)?;
-            Ok(lv == rv)
-        }
-
-        (Value::GroupElement(_), Value::GroupElement(_)) => {
-            ctx.add_jit_cost(EQ_GROUP_ELEMENT_COST)?;
-            Ok(lv == rv)
-        }
-
-        (Value::CBox(_), Value::CBox(_)) => {
-            ctx.add_jit_cost(EQ_BOX_COST)?;
-            Ok(lv == rv)
-        }
-
-        (Value::AvlTree(_), Value::AvlTree(_)) => {
-            ctx.add_jit_cost(EQ_AVL_TREE_COST)?;
-            Ok(lv == rv)
-        }
-
-        (Value::Pair(l), Value::Pair(r)) => {
-            ctx.add_jit_cost(EQ_TUPLE_COST)?;
-            Ok(eq_with_cost(&l.0, &r.0, ctx)? && eq_with_cost(&l.1, &r.1, ctx)?)
-        }
-
-        (Value::Opt(l_opt), Value::Opt(r_opt)) => {
-            ctx.add_jit_cost(EQ_OPTION_COST)?;
-            match (l_opt.as_deref(), r_opt.as_deref()) {
-                (None, None) => Ok(true),
-                (Some(l), Some(r)) => eq_with_cost(l, r, ctx),
-                _ => Ok(false),
-            }
-        }
-
-        (Value::Coll(l_coll), Value::Coll(r_coll)) => {
-            // MatchType dispatch cost always paid, matching Scala's
-            // DataValueComparer case 2 (bug 4).
+        // case 2 (`:318-329`): the MatchType dispatch cost is always paid, also against a right
+        // value that is not a collection
+        Value::Coll(l_coll) => {
             ctx.add_jit_cost(MATCH_TYPE_COST)?;
+            let r_coll = match rv {
+                Value::Coll(r_coll) => r_coll,
+                _ => return Ok(false),
+            };
             let n = l_coll.len();
             // Scala short-circuits on a length or item-type mismatch without charging
             // per-item or base cost (bug 5; `DataValueComparer.scala:318-326`, `coll1.tItem !=
@@ -150,40 +146,102 @@ pub(crate) fn eq_with_cost<'ctx>(
             }
         }
 
-        (Value::Header(_), Value::Header(_)) => {
-            ctx.add_jit_cost(EQ_HEADER_COST)?;
+        // case 3 (`:331-338`): the second items are compared only if the first are equal
+        Value::Pair(l) => {
+            ctx.add_jit_cost(EQ_TUPLE_COST)?;
+            match rv {
+                Value::Pair(r) => {
+                    Ok(eq_with_cost(&l.0, &r.0, ctx)? && eq_with_cost(&l.1, &r.1, ctx)?)
+                }
+                _ => Ok(false),
+            }
+        }
+
+        // case 4 (`:340-341`)
+        Value::GroupElement(_) => {
+            ctx.add_jit_cost(EQ_GROUP_ELEMENT_COST)?;
             Ok(lv == rv)
         }
 
-        (Value::PreHeader(_), Value::PreHeader(_)) => {
+        // case 5 (`:343-351`): a `BigInt` never equals an `UnsignedBigInt`
+        Value::BigInt(_) | Value::UnsignedBigInt(_) => {
+            ctx.add_jit_cost(EQ_BIGINT_COST)?;
+            Ok(lv == rv)
+        }
+
+        // `:353-361`: one MatchType for the dispatch, then `equalSigmaBoolean` walks both trees
+        Value::SigmaProp(l) => {
+            ctx.add_jit_cost(MATCH_TYPE_COST)?;
+            match rv {
+                Value::SigmaProp(r) => eq_sigma_bool_with_cost(l.value(), r.value(), ctx),
+                _ => Ok(false),
+            }
+        }
+
+        // case 6 (`:363-366`)
+        Value::AvlTree(_) => {
+            ctx.add_jit_cost(EQ_AVL_TREE_COST)?;
+            Ok(lv == rv)
+        }
+
+        // case 7 (`:368-384`)
+        Value::Opt(l_opt) => {
+            ctx.add_jit_cost(EQ_OPTION_COST)?;
+            match rv {
+                Value::Opt(r_opt) => match (l_opt.as_deref(), r_opt.as_deref()) {
+                    (None, None) => Ok(true),
+                    (Some(l), Some(r)) => eq_with_cost(l, r, ctx),
+                    _ => Ok(false),
+                },
+                _ => Ok(false),
+            }
+        }
+
+        // case 8 (`:385-388`)
+        Value::PreHeader(_) => {
             ctx.add_jit_cost(EQ_PREHEADER_COST)?;
             Ok(lv == rv)
         }
 
-        (Value::SigmaProp(l), Value::SigmaProp(r)) => {
-            // Scala `DataValueComparer.equalDataValues` SigmaProp case
-            // (DataValueComparer.scala:353): one MatchType for the dispatch,
-            // then `equalSigmaBoolean` walks both trees.
-            ctx.add_jit_cost(MATCH_TYPE_COST)?;
-            eq_sigma_bool_with_cost(l.value(), r.value(), ctx)
-        }
-
-        // sigmastate dispatches on the left value and has no case for a closure: its last
-        // case throws (v6.0.7 `DataValueComparer.scala`, `equalDataValues`), before any cost
-        (Value::Lambda(_), _) => Err(EvalError::Misc(
-            "Cannot compare a function value: unknown type".into(),
-        )),
-
-        // sigmastate dispatches on the left value, and its `Unit` case charges nothing (v6.0.6
-        // `DataValueComparer.scala:409-410`; SANTA 6.0.7: 3 less per unit than `EQ_Prim`)
-        (Value::Unit, _) => Ok(matches!(rv, Value::Unit)),
-
-        // String, Context, Global, and any cross-type comparisons
-        // (which PartialEq returns false for anyway).
-        _ => {
-            ctx.add_jit_cost(EQ_PRIM_COST)?;
+        // case 9 (`:389-392`)
+        Value::Header(_) => {
+            ctx.add_jit_cost(EQ_HEADER_COST)?;
             Ok(lv == rv)
         }
+
+        // case 10 (`:393-396`)
+        Value::CBox(_) => {
+            ctx.add_jit_cost(EQ_BOX_COST)?;
+            Ok(lv == rv)
+        }
+
+        // `:397-408`: one MatchType; two strings of different lengths are unequal with nothing
+        // more charged, two of the same length are charged `EQ_COA_Short` over that length
+        // whatever the answer. `String.length` counts UTF-16 code units
+        Value::String(l) => {
+            ctx.add_jit_cost(MATCH_TYPE_COST)?;
+            match rv {
+                Value::String(r) => {
+                    let len = l.encode_utf16().count();
+                    if len != r.encode_utf16().count() {
+                        return Ok(false);
+                    }
+                    let (base, per_chunk, chunk_size) = EQ_COLL_SHORT_PER_ITEM;
+                    ctx.add_per_item_jit_cost(base, per_chunk, chunk_size, len as u32)?;
+                    Ok(l == r)
+                }
+                _ => Ok(false),
+            }
+        }
+
+        // `:409-410`: the `Unit` case charges nothing (SANTA 6.0.7: 3 less per unit than
+        // `EQ_Prim`)
+        Value::Unit => Ok(matches!(rv, Value::Unit)),
+
+        // no case in sigmastate: it throws before any cost (`:412-413`)
+        Value::Context => Err(no_case("Context")),
+        Value::Global => Err(no_case("Global")),
+        Value::Lambda(_) => Err(no_case("function")),
     }
 }
 
@@ -779,5 +837,562 @@ mod tests {
         assert!(compare(&relation(RelationOp::Eq, lambdas(), lambdas())).is_err());
         // a lambda on the right only: the left value's case decides, `l == r` for a number
         assert!(!compare(&relation(RelationOp::Eq, 1i32.into(), identity())).unwrap());
+    }
+
+    // --- The left dispatch (queue item 11). The JVM column is `equalDataValues` itself, called
+    // from Java on the sigma-state 6.0.7 jar with a fresh evaluator per row (the round's
+    // `measure/jvm-6.0.7-output.txt`), unless a row says "by reading".
+
+    /// The answer, or the error, and what the comparison charged
+    fn compare(l: &Value<'static>, r: &Value<'static>) -> (Result<bool, EvalError>, u64) {
+        let ctx = force_any_val::<Context>();
+        let before = ctx.jit_cost_value();
+        let res = eq_with_cost(l, r, &ctx);
+        (res, ctx.jit_cost_value() - before)
+    }
+
+    fn some(v: Value<'static>) -> Value<'static> {
+        Value::Opt(Some(alloc::boxed::Box::new(v)))
+    }
+
+    fn string(s: &str) -> Value<'static> {
+        Value::String(s.into())
+    }
+
+    fn coll(elem_tpe: SType, items: Vec<Value<'static>>) -> Value<'static> {
+        Value::Coll(CollValue::Generic {
+            elem_tpe,
+            items: Arc::from(items),
+        })
+    }
+
+    /// One value of every kind `equalDataValues` has a case for: its name, its class (the four
+    /// integer widths are one class, `Some` and `None` another), and what its case charges
+    /// against a right value of another class
+    fn kinds() -> Vec<(&'static str, &'static str, Value<'static>, u64)> {
+        use alloc::boxed::Box;
+        use ergo_chain_types::{Header, PreHeader};
+        use ergotree_ir::chain::ergo_box::ErgoBox;
+        use ergotree_ir::mir::avl_tree_data::AvlTreeData;
+        use ergotree_ir::reference::Ref;
+        use ergotree_ir::sigma_protocol::sigma_boolean::{SigmaBoolean, SigmaProp};
+        use ergotree_ir::unsignedbigint256::UnsignedBigInt;
+        vec![
+            ("Boolean", "boolean", Value::Boolean(true), 3),
+            ("Byte", "integer", Value::Byte(1), 3),
+            ("Short", "integer", Value::Short(1), 3),
+            ("Int", "integer", Value::Int(1), 3),
+            ("Long", "integer", Value::Long(1), 3),
+            ("BigInt", "bigint", Value::BigInt(1.into()), 5),
+            (
+                "UnsignedBigInt",
+                "unsigned",
+                Value::UnsignedBigInt(UnsignedBigInt::from(1u32)),
+                5,
+            ),
+            (
+                "GroupElement",
+                "group element",
+                Value::from(ergo_chain_types::ec_point::generator()),
+                172,
+            ),
+            ("pair", "pair", Value::pair(Value::Int(1), Value::Int(2)), 4),
+            ("Some", "option", some(Value::Int(1)), 4),
+            ("None", "option", Value::Opt(None), 4),
+            ("Coll", "coll", coll(SType::SInt, vec![Value::Int(1)]), 1),
+            (
+                "SigmaProp",
+                "sigma prop",
+                Value::sigma_prop(SigmaProp::new(SigmaBoolean::TrivialProp(true))),
+                1,
+            ),
+            (
+                "AvlTree",
+                "avl tree",
+                Value::AvlTree(Box::new(force_any_val::<AvlTreeData>())),
+                6,
+            ),
+            // by reading (`:385-396`): the harness builds none of these three
+            (
+                "PreHeader",
+                "pre-header",
+                Value::PreHeader(Box::new(force_any_val::<PreHeader>())),
+                4,
+            ),
+            (
+                "Header",
+                "header",
+                Value::Header(Box::new(force_any_val::<Header>())),
+                6,
+            ),
+            (
+                "Box",
+                "box",
+                Value::CBox(Ref::from(force_any_val::<ErgoBox>())),
+                6,
+            ),
+            ("String", "string", string("a"), 1),
+            ("Unit", "unit", Value::Unit, 0),
+        ]
+    }
+
+    /// The dispatch is on the LEFT value alone: against a right value of another class every
+    /// kind answers false at its own case's cost
+    #[test]
+    fn a_left_kind_charges_its_own_case_against_another_kind() {
+        let kinds = kinds();
+        let mut cells = 0;
+        for (l_name, l_class, l, cost) in &kinds {
+            for (r_name, r_class, r, _) in &kinds {
+                if l_class == r_class {
+                    continue;
+                }
+                let (res, charged) = compare(l, r);
+                assert!(!res.unwrap(), "{l_name} == {r_name}");
+                assert_eq!(charged, *cost, "{l_name} == {r_name}");
+                cells += 1;
+            }
+        }
+        // 19 kinds, less the same-class cells: 19 of a kind with itself, 12 among the four
+        // integers, 2 between `Some` and `None`
+        assert_eq!(cells, 19 * 19 - 19 - 12 - 2);
+    }
+
+    /// Every kind equals itself, at the cost of its case (`SigmaProp(true)`: one more
+    /// MatchType for its one node; `Some(1)`, `(1, 2)`, `Coll(1)`: their items')
+    #[test]
+    fn a_kind_equals_itself_at_its_cost() {
+        let own_cost = [
+            ("Boolean", 3),
+            ("Byte", 3),
+            ("Short", 3),
+            ("Int", 3),
+            ("Long", 3),
+            ("BigInt", 5),
+            ("UnsignedBigInt", 5),
+            ("GroupElement", 172),
+            ("pair", 10),
+            ("Some", 7),
+            ("None", 4),
+            ("Coll", 18),
+            ("SigmaProp", 2),
+            ("AvlTree", 6),
+            ("PreHeader", 4),
+            ("Header", 6),
+            ("Box", 6),
+            ("String", 18),
+            ("Unit", 0),
+        ];
+        for ((name, _, v, _), (cost_name, cost)) in kinds().iter().zip(own_cost) {
+            assert_eq!(*name, cost_name);
+            let (res, charged) = compare(v, v);
+            assert!(res.unwrap(), "{name}");
+            assert_eq!(charged, cost, "{name}");
+        }
+    }
+
+    /// Case 1 is Scala's `==` on two boxed numbers: two integers are equal when their values
+    /// are, whatever their widths, and nothing is truncated or zero-extended
+    #[test]
+    fn integers_compare_by_value_across_widths() {
+        let ones = [
+            Value::Byte(1),
+            Value::Short(1),
+            Value::Int(1),
+            Value::Long(1),
+        ];
+        let twos = [
+            Value::Byte(2),
+            Value::Short(2),
+            Value::Int(2),
+            Value::Long(2),
+        ];
+        for l in &ones {
+            for r in &ones {
+                assert_eq!(compare(l, r), (Ok(true), 3), "{l:?} == {r:?}");
+            }
+            for r in &twos {
+                assert_eq!(compare(l, r), (Ok(false), 3), "{l:?} == {r:?}");
+            }
+        }
+        let rows = [
+            (Value::Long(4294967297), Value::Int(1), false),
+            (Value::Int(1), Value::Long(4294967297), false),
+            (Value::Byte(-1), Value::Long(-1), true),
+            (Value::Long(-1), Value::Byte(-1), true),
+            (Value::Byte(-1), Value::Int(255), false),
+            (Value::Short(-1), Value::Long(65535), false),
+            (Value::Short(-1), Value::Int(-1), true),
+            (Value::Int(-1), Value::Short(-1), true),
+            (Value::Long(i64::MIN), Value::Int(0), false),
+            (Value::Int(i32::MIN), Value::Long(i64::from(i32::MIN)), true),
+            // a `Boolean` is not a number
+            (Value::Boolean(true), Value::Byte(1), false),
+            (Value::Byte(1), Value::Boolean(true), false),
+            (Value::Boolean(false), Value::Boolean(false), true),
+            (Value::Boolean(true), Value::Boolean(false), false),
+        ];
+        for (l, r, expected) in rows {
+            assert_eq!(compare(&l, &r), (Ok(expected), 3), "{l:?} == {r:?}");
+        }
+    }
+
+    /// The items of a pair, an option and a `Coll[Any]` are compared by the same function, so
+    /// by case 1; two collections compare their item TYPES first
+    #[test]
+    fn a_wrong_width_item_is_compared_by_value() {
+        let pair = |a: Value<'static>, b: Value<'static>| Value::pair(a, b);
+        let any = |items: Vec<Value<'static>>| coll(SType::SAny, items);
+        let rows = [
+            (
+                pair(Value::Int(1), Value::Int(2)),
+                pair(Value::Long(1), Value::Int(2)),
+                true,
+                10,
+            ),
+            (
+                pair(Value::Long(1), Value::Int(2)),
+                pair(Value::Int(1), Value::Int(2)),
+                true,
+                10,
+            ),
+            (some(Value::Int(1)), some(Value::Long(1)), true, 7),
+            (some(Value::Long(1)), some(Value::Int(1)), true, 7),
+            (
+                any(vec![Value::Int(1), Value::Long(2), Value::Int(3)]),
+                any(vec![Value::Long(1), Value::Int(2), Value::Int(3)]),
+                true,
+                26,
+            ),
+            (
+                any(vec![Value::Int(1), Value::Long(2), Value::Int(3)]),
+                any(vec![Value::Long(1), Value::Int(2), Value::Int(4)]),
+                false,
+                26,
+            ),
+            (
+                coll(SType::SInt, vec![Value::Int(1)]),
+                coll(SType::SLong, vec![Value::Long(1)]),
+                false,
+                1,
+            ),
+            // the left item's case decides inside a pair too
+            (
+                pair(
+                    Value::from(ergo_chain_types::ec_point::generator()),
+                    Value::Int(2),
+                ),
+                pair(Value::Long(1), Value::Int(2)),
+                false,
+                176,
+            ),
+            (
+                pair(string("a"), Value::Int(1)),
+                pair(Value::Long(1), Value::Int(1)),
+                false,
+                5,
+            ),
+            (
+                pair(Value::Long(1), Value::Int(1)),
+                pair(string("a"), Value::Int(1)),
+                false,
+                7,
+            ),
+        ];
+        for (l, r, expected, cost) in rows {
+            assert_eq!(compare(&l, &r), (Ok(expected), cost), "{l:?} == {r:?}");
+        }
+    }
+
+    /// `:397-408`: MatchType, then two strings of the same length (in UTF-16 units, as
+    /// `String.length`) are charged `EQ_COA_Short` over that length whatever the answer
+    #[test]
+    fn strings_charge_match_type_and_their_length() {
+        let rows = [
+            ("a", "a", true, 18),
+            ("a", "b", false, 18),
+            ("ab", "ab", true, 18),
+            ("", "", true, 18),
+            ("a", "ab", false, 1),
+            // one UTF-16 unit, two UTF-8 bytes
+            ("\u{e9}", "ab", false, 1),
+            ("\u{e9}", "a", false, 18),
+        ];
+        for (l, r, expected, cost) in rows {
+            assert_eq!(
+                compare(&string(l), &string(r)),
+                (Ok(expected), cost),
+                "{l:?} == {r:?}"
+            );
+        }
+        // `PerItemCost(15, 2, 96)`: 96 units are one chunk, 97 are two
+        let long = |n: usize| string(&"a".repeat(n));
+        assert_eq!(compare(&long(96), &long(96)), (Ok(true), 18));
+        assert_eq!(compare(&long(97), &long(97)), (Ok(true), 20));
+        // two UTF-16 units each (a surrogate pair), four UTF-8 bytes
+        assert_eq!(
+            compare(&string("\u{1f600}"), &string("ab")),
+            (Ok(false), 18)
+        );
+        assert_eq!(
+            compare(&string("\u{1f600}"), &string("abcd")),
+            (Ok(false), 1)
+        );
+    }
+
+    /// sigmastate has no case for a `Context` or a `Global` on the left: it throws before any
+    /// cost (`:412-413`; `Global` measured, `Context` by reading). On the right they are the
+    /// left value's case
+    #[test]
+    fn context_and_global_have_no_case() {
+        for l in [Value::Context, Value::Global] {
+            for r in [Value::Context, Value::Global, Value::Int(1)] {
+                let (res, charged) = compare(&l, &r);
+                assert!(
+                    matches!(res, Err(EvalError::Misc(_))),
+                    "{l:?} == {r:?}: {res:?}"
+                );
+                assert_eq!(charged, 0);
+            }
+            assert_eq!(compare(&Value::Int(1), &l), (Ok(false), 3));
+        }
+    }
+
+    /// An item with no case fails the comparison only when it is reached, after what was
+    /// charged on the way: a pair stops at its first unequal item
+    #[test]
+    fn an_item_without_a_case_fails_only_when_reached() {
+        let pair = |a: Value<'static>, b: Value<'static>| Value::pair(a, b);
+        let (res, charged) = compare(
+            &pair(Value::Int(1), Value::Global),
+            &pair(Value::Int(1), Value::Global),
+        );
+        assert!(matches!(res, Err(EvalError::Misc(_))), "{res:?}");
+        assert_eq!(charged, 7);
+        let (res, charged) = compare(&some(Value::Global), &some(Value::Global));
+        assert!(matches!(res, Err(EvalError::Misc(_))), "{res:?}");
+        assert_eq!(charged, 4);
+        let bytes = Value::Coll(CollValue::Bytes([1i8].as_slice().into()));
+        let rows = [
+            (
+                pair(Value::Int(1), Value::Global),
+                pair(Value::Int(2), Value::Global),
+                7,
+            ),
+            (some(Value::Int(1)), some(Value::Global), 7),
+            (coll(SType::SInt, vec![Value::Int(1)]), Value::Global, 1),
+            (bytes, Value::Int(1), 1),
+            (pair(Value::Int(1), Value::Int(2)), Value::Global, 4),
+        ];
+        for (l, r, cost) in rows {
+            assert_eq!(compare(&l, &r), (Ok(false), cost), "{l:?} == {r:?}");
+        }
+    }
+
+    /// The comparer in the evaluator, through `EQ`, `NEQ` and `Coll.indexOf`. `lie(a, b)` is
+    /// `If(false, a, b)`: typed as `a`, valued as `b`. X1 and X2 carry SANTA's costs; every
+    /// other tree's JVM value and cost are the measured comparer placed in the tree by reading
+    #[test]
+    fn the_comparer_in_the_evaluator() {
+        crate::eval::test_util::assert_trees(&[
+            // SANTA `Coll.specialisation_blind_ops` X1, X2 (sigma-state 6.0.7)
+            // X1: `Coll[Byte](1,2,3).indices.indexOf(lie Int:1L, 0)`
+            (
+                "0b15dc0c1adb0c0e0e0301020302950100040205020400",
+                Some((Value::Int(1), 96)),
+            ),
+            // X2: `Coll[Int](0,1,2).indexOf(lie Int:1L, 0)`
+            (
+                "0b16dc0c1a83030404000402040402950100040205020400",
+                Some((Value::Int(1), 100)),
+            ),
+            // `indexOf`: an integer item against an integer argument of another width
+            // I3: `Coll(1L).indexOf(lie Long:1, 0)`
+            (
+                "0b12dc0c1a830105050202950100050204020400",
+                Some((Value::Int(0), 87)),
+            ),
+            // I3c: `Coll(1L).indexOf(1L, 0)`
+            ("0b0ddc0c1a83010505020205020400", Some((Value::Int(0), 72))),
+            // I4: `Coll[Byte] const (1).indexOf(lie Byte:1L, 0)`
+            (
+                "0b10dc0c1a0e010102950100020105020400",
+                Some((Value::Int(0), 67)),
+            ),
+            // `EQ`/`NEQ`: a wrong-width item behind the shallow operand check
+            // E3: `lie((1,2),(1L,2)) == (1,2)`
+            (
+                "0b1693950100860204020404860205020404860204020404",
+                Some((Value::Boolean(true), 75)),
+            ),
+            // E3c: `(1,2) == (1,2)`
+            (
+                "0b0d93860204020404860204020404",
+                Some((Value::Boolean(true), 60)),
+            ),
+            // E4: `(1,2) == lie((1,2),(1L,2))`
+            (
+                "0b1693860204020404950100860204020404860205020404",
+                Some((Value::Boolean(true), 75)),
+            ),
+            // E5: `lie((1,2),(1L,2)) != (1,2)`
+            (
+                "0b1694950100860204020404860205020404860204020404",
+                Some((Value::Boolean(false), 75)),
+            ),
+            // E6: `lie((1,2),(2L,2)) == (1,2)`
+            (
+                "0b1693950100860204020404860205040404860204020404",
+                Some((Value::Boolean(false), 72)),
+            ),
+            // E7: `lie((1b,2),(1L,2)) == (1b,2)`
+            (
+                "0b1693950100860202010404860205020404860202010404",
+                Some((Value::Boolean(true), 75)),
+            ),
+            // E13: `lie(Coll(1).get(0), Coll(1L).get(0)) == Coll(1).get(0)`
+            (
+                "0b2593950100dc0c218301040402010400dc0c218301050502010400dc0c218301040402010400",
+                Some((Value::Boolean(true), 150)),
+            ),
+            // E13c: `Coll(1).get(0) == Coll(1).get(0)`
+            (
+                "0b1793dc0c218301040402010400dc0c218301040402010400",
+                Some((Value::Boolean(true), 135)),
+            ),
+            // the operand checks still refuse
+            // E1: `lie(1, 1L) == 1`
+            ("0b0a93950100040205020402", None),
+            // E2: `(lie(1,1L), 2) == (1, 2)`
+            ("0b12938602950100040205020404860204020404", None),
+            // a left value that is not a primitive charges its own case
+            // E9: `(big1,2) == lie((big1,2),(1L,2))`
+            (
+                "0b18938602060101040495010086020601010404860205020404",
+                Some((Value::Boolean(false), 74)),
+            ),
+            // E9c: `(big1,2) == (big1,2)`
+            (
+                "0b0f938602060101040486020601010404",
+                Some((Value::Boolean(true), 62)),
+            ),
+            // E11: `(g,2) == lie((g,2),(1L,2))`
+            (
+                "0b149386028204049501008602820404860205020404",
+                Some((Value::Boolean(false), 246)),
+            ),
+            // I1: `Coll[Box](SELF).indexOf(lie SELF:1L, 0)`
+            (
+                "0b10dc0c1a830163a702950100a705020400",
+                Some((Value::Int(-1), 95)),
+            ),
+            // I1c: `Coll[Box](SELF).indexOf(SELF, 0)`
+            ("0b0bdc0c1a830163a702a70400", Some((Value::Int(0), 85))),
+            // I2: `Coll[BigInt](1).indexOf(lie big:1L, 0)`
+            (
+                "0b14dc0c1a8301060601010295010006010105020400",
+                Some((Value::Int(-1), 89)),
+            ),
+            // I2c: `Coll[BigInt](1).indexOf(big1, 0)`
+            (
+                "0b0fdc0c1a830106060101020601010400",
+                Some((Value::Int(0), 74)),
+            ),
+            // I5: `Coll[Coll[Int]](Coll(1)).indexOf(lie Coll(1):1L, 0)`
+            (
+                "0b18dc0c1a830110830104040202950100830104040205020400",
+                Some((Value::Int(-1), 105)),
+            ),
+            // I5c: `Coll[Coll[Int]](Coll(1)).indexOf(Coll(1), 0)`
+            (
+                "0b13dc0c1a83011083010404020283010404020400",
+                Some((Value::Int(0), 127)),
+            ),
+            // I6: `Coll((1,2)).indexOf(lie (1,2):1L, 0)`
+            (
+                "0b1adc0c1a8301588602040204040295010086020402040405020400",
+                Some((Value::Int(-1), 108)),
+            ),
+            // I6c: `Coll((1,2)).indexOf((1,2), 0)`
+            (
+                "0b15dc0c1a830158860204020404028602040204040400",
+                Some((Value::Int(0), 119)),
+            ),
+            // I7: `Coll[GroupElement](g).indexOf(lie g:1L, 0)`
+            (
+                "0b10dc0c1a83010782029501008205020400",
+                Some((Value::Int(-1), 261)),
+            ),
+            // I7c: `Coll[GroupElement](g).indexOf(g, 0)`
+            ("0b0bdc0c1a8301078202820400", Some((Value::Int(0), 251))),
+            // a primitive left against another kind: unequal at `EQ_Prim`, as before
+            // E8: `lie((true,2),(1,2)) == (true,2) Int vs Boolean: false @ same`
+            (
+                "0b1693950100860201010404860204020404860201010404",
+                Some((Value::Boolean(false), 72)),
+            ),
+            // E10: `lie((big1,2),(1L,2)) == (big1,2) Long left, BigInt right: false, EQ_Prim 3`
+            (
+                "0b18939501008602060101040486020502040486020601010404",
+                Some((Value::Boolean(false), 72)),
+            ),
+            // E12: `lie((g,2),(1L,2)) == (g,2)`
+            (
+                "0b149395010086028204048602050204048602820404",
+                Some((Value::Boolean(false), 77)),
+            ),
+            // I8: `Coll(1).indexOf(lie 1:g, 0)`
+            (
+                "0b11dc0c1a8301040402029501000402820400",
+                Some((Value::Int(-1), 92)),
+            ),
+            // I9: `Coll(true).indexOf(lie true:1, 0)`
+            (
+                "0b12dc0c1a830101010102950100010104020400",
+                Some((Value::Int(-1), 87)),
+            ),
+            // I10: `Coll(1).indexOf(lie 1:true, 0)`
+            (
+                "0b12dc0c1a830104040202950100040201010400",
+                Some((Value::Int(-1), 87)),
+            ),
+            // `Context` and `Global` have no case
+            // K1: `CONTEXT == CONTEXT`
+            ("0b0393fefe", None),
+            // K2: `Global == Global`
+            ("0b0393dddd", None),
+            // K3: `(CONTEXT, 1) == (CONTEXT, 1)`
+            ("0b0b938602fe04028602fe0402", None),
+            // K4: `(Global, 1) == (Global, 1)`
+            ("0b0b938602dd04028602dd0402", None),
+            // `NEQ` negates an answer, not an error: `CONTEXT != CONTEXT` (by reading)
+            ("0b0394fefe", None),
+            // `String` items of pair constants
+            // S1: `("a",1) == ("a",1)`
+            (
+                "0b0b934c660161024c66016102",
+                Some((Value::Boolean(true), 35)),
+            ),
+            // S2: `("a",1) == ("b",1)`
+            (
+                "0b0b934c660161024c66016202",
+                Some((Value::Boolean(false), 32)),
+            ),
+            // S3: `("a",1) == ("ab",1)`
+            (
+                "0b0c934c660161024c6602616202",
+                Some((Value::Boolean(false), 15)),
+            ),
+            // S4: `("a",1) == lie(("a",1) const, (1L,1))`
+            (
+                "0b14934c660161029501004c66016102860205020402",
+                Some((Value::Boolean(false), 50)),
+            ),
+            // S5: `lie(("a",1) const, (1L,1)) == ("a",1)`
+            (
+                "0b14939501004c660161028602050204024c66016102",
+                Some((Value::Boolean(false), 52)),
+            ),
+        ]);
     }
 }
