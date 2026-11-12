@@ -12,7 +12,9 @@ use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
 use super::coll_by_index::item_at;
+use super::coll_map::has_runtime_type;
 use super::coll_map::map_coll;
+use super::coll_shape::unit_builder_items;
 use super::env::Env;
 use super::Context;
 use super::EvalFn;
@@ -65,39 +67,35 @@ pub(crate) static INDEX_OF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     }))
 };
 
-/// The concatenation of `colls`, each a collection of the type `colls_tpe`, as `flatMap` builds
-/// it: `builder.fromArray` at an abstract item type (v6.0.7 `CollsOverArrays.scala:72-75`,
-/// `:426-427`), so generic, or a `PairOfCols` for pairs (SANTA `Coll.pair_shape_restored` Y3)
+/// The concatenation of `parts` at the item type `item_tpe`, as `flatMap` builds it:
+/// `builder.fromArray` at an abstract item type (v6.0.7 `CollsOverArrays.scala:72-75`,
+/// `:426-427`), so generic, or a `PairOfCols` for pairs (SANTA `Coll.pair_shape_restored` Y3).
+/// Scala's `flatMap` hands each part to the builder of the result's array with `++=` (v6.0.6
+/// `:70-73`): an empty part is never read, whatever its class, an item of another class fails
+/// the store ([`CollValue::from_array`]), and a `Coll[Unit]` result takes them all as units
+/// ([`unit_builder_items`]); SANTA `Coll.reference_store_ops` H1, H2, H4. `Append` differs: it
+/// copies arrays
 fn flatten<'ctx>(
-    colls_tpe: SType,
-    colls: Vec<Value<'ctx>>,
+    item_tpe: SType,
+    parts: Vec<Value<'ctx>>,
 ) -> Result<CollValue<'ctx>, TryExtractFromError> {
-    let SType::SColl(item_tpe) = colls_tpe else {
-        return Err(TryExtractFromError(format!(
-            "Expected Value::Coll, got: {colls_tpe:?}"
-        )));
-    };
-    let items: Vec<Value> = if *item_tpe == SType::SByte {
-        colls
-            .into_iter()
-            .map(|v| v.try_extract_into::<Vec<i8>>())
-            .collect::<Result<Vec<_>, _>>()?
-            .concat()
-            .into_iter()
-            .map(Value::Byte)
-            .collect()
-    } else {
-        colls
-            .into_iter()
-            .map(|v| v.try_extract_into::<Vec<Value>>())
-            .collect::<Result<Vec<_>, _>>()?
-            .concat()
-    };
-    CollValue::from_array((*item_tpe).clone(), items)
+    let mut items: Vec<Value> = Vec::new();
+    for part in parts {
+        match part {
+            Value::Coll(part) => items.extend(part.as_vec()),
+            other => {
+                return Err(TryExtractFromError(format!(
+                    "Expected Value::Coll, got: {other:?}"
+                )))
+            }
+        }
+    }
+    let items = unit_builder_items(&item_tpe, items);
+    CollValue::from_array(item_tpe, items)
 }
 
 pub(crate) fn flatmap_eval<'ctx>(
-    _mc: &MethodCallSite<'_>,
+    mc: &MethodCallSite<'_>,
     _env: &mut Env<'ctx>,
     ctx: &Context<'ctx>,
     obj: Value<'ctx>,
@@ -132,6 +130,22 @@ pub(crate) fn flatmap_eval<'ctx>(
     lambda.args.first().ok_or_else(|| {
         EvalError::NotFound("flatmap: lambda has empty arguments list".to_string())
     })?;
+    // `flatMap_eval` takes the result's item type from the CALL's static type and resolves its
+    // runtime type before anything is applied or stored (v6.0.6 `methods.scala:1005-1006`): a
+    // type variable, the call's own `OV` when it could not be specialised, throws there, with
+    // or without items; and the result's array is of that static class, whichever lambda the
+    // mapper evaluated to (SANTA's third reference-store reply: R8, R8e, A2)
+    let SType::SColl(item_tpe) = &*mc.tpe().t_range else {
+        return Err(EvalError::UnexpectedValue(format!(
+            "flatMap: expected a collection range, found {:?}",
+            mc.tpe().t_range
+        )));
+    };
+    if !has_runtime_type(item_tpe) {
+        return Err(EvalError::Misc(format!(
+            "flatMap: the result's item type {item_tpe:?} has no runtime type"
+        )));
+    }
     // The body evaluates in the lambda's CAPTURED environment (JVM closure
     // semantics) — not in the caller's env. ADD_TO_ENV_COST (5) per input
     // element is charged by the invoker (AddToEnvironmentDesc,
@@ -152,7 +166,7 @@ pub(crate) fn flatmap_eval<'ctx>(
         .iter()
         .map(|item| lambda_call(item.clone()))
         .collect::<Result<Vec<Value>, EvalError>>()?;
-    let coll = flatten(lambda.body.tpe(), values).map_err(EvalError::TryExtractFrom)?;
+    let coll = flatten((**item_tpe).clone(), values).map_err(EvalError::TryExtractFrom)?;
     // flatMap cost scales with the OUTPUT (flattened) length, not the input
     // length, matching Scala's `flatMap_eval` (addSeqCost over `res.length`
     // after building the result, post the per-item lambda calls).
@@ -213,15 +227,13 @@ pub(crate) static INDICES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
 };
 
 pub(crate) static PATCH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let (normalized_input_vals, receiver) = match obj {
-        Value::Coll(coll) => Ok((coll.as_vec(), coll)),
+    let receiver = match obj {
+        Value::Coll(coll) => Ok(coll),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected obj to be Value::Coll, got: {0:?}",
             obj
         ))),
     }?;
-    let n = normalized_input_vals.len() as u32;
-    ctx.add_per_item_jit_cost(30, 2, 10, n)?;
     let from_index_val = args
         .first()
         .cloned()
@@ -238,22 +250,21 @@ pub(crate) static PATCH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let from = from_index_val.try_extract_into::<i32>()?.max(0) as usize;
     let replaced = replaced_val.try_extract_into::<i32>()?.max(0) as usize;
     let patch = match patch_val {
-        Value::Coll(coll) => Ok(coll.as_vec()),
+        Value::Coll(coll) => Ok(coll),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected patch arg to be Value::Coll, got: {0:?}",
             patch_val
         ))),
     }?;
-
-    let res = normalized_input_vals
-        .iter()
-        .take(from)
-        .chain(patch.iter())
-        .chain(normalized_input_vals.iter().skip(from + replaced))
-        .cloned()
-        .collect::<Arc<[_]>>();
-    // the receiver's class (`builder.fromArray` inside the receiver)
-    Ok(Value::Coll(receiver.rebuild_like(res.to_vec())?))
+    // `patch_eval` charges per item of the receiver and of the patch (v6.0.6
+    // `methods.scala:1027`, `nItems = xs.length + patch.length`; SANTA
+    // `Coll.reference_store_ops` F1: 10 + 1 items are two chunks). Its arguments are typed, so
+    // a patch that is not a collection fails before the charge
+    let n_items = receiver.len().saturating_add(patch.len());
+    ctx.add_per_item_jit_cost(30, 2, 10, n_items as u32)?;
+    Ok(Value::Coll(super::coll_shape::patch(
+        &receiver, from, &patch, replaced,
+    )?))
 };
 
 pub(crate) static UPDATED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -309,8 +320,8 @@ pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
             EvalError::NotFound("updated: missing second arg (updates)".to_string())
         })?;
 
-        let (updates_tpe, updates_val) = match updates_arg {
-            Value::Coll(coll) => Ok((coll.elem_tpe().clone(), coll.as_vec())),
+        let updates_val = match updates_arg {
+            Value::Coll(coll) => Ok(coll.as_vec()),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected first arg to be Value::Coll, got: {0:?}",
                 updates_arg
@@ -334,14 +345,10 @@ pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
                 indexes_len, updates_len, indexes_usize, updates_val
             )));
         };
-        if input_tpe != updates_tpe {
-            return Err(EvalError::UnexpectedValue(format!(
-                "Collections should be same type but was: \
-            {0:?} and {1:?}. \n Inputs: {2:?} \n Updates: {3:?}",
-                input_tpe, updates_tpe, normalized_input_vals, updates_val
-            )));
-        };
-
+        // sigmastate compares no item types (v6.0.6 `CollsOverArrays.scala:106-117`, `:436-450`):
+        // each value is stored into a clone of the receiver's array, and the rebuild below
+        // refuses the ones that array would not take (SANTA `Tuple.non_pair_value_ops` T23, U3,
+        // `Coll.reference_store_ops`)
         let mut i = 0;
         let mut res = normalized_input_vals;
 

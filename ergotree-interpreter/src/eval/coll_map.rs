@@ -15,7 +15,7 @@ use crate::eval::LambdaInvoker;
 /// Whether sigmastate's `stypeToRType` converts `tpe` (v6.0.7 `Evaluation.scala:22-55`): every
 /// type has an arm except a type variable and a function type with other than one argument or
 /// with type parameters, at any depth
-fn has_runtime_type(tpe: &SType) -> bool {
+pub(crate) fn has_runtime_type(tpe: &SType) -> bool {
     match tpe {
         SType::STypeVar(_) => false,
         SType::SColl(t) | SType::SOption(t) => has_runtime_type(t),
@@ -94,10 +94,21 @@ pub(crate) fn map_coll<'ctx>(
             // `PairOfCols.map` builds a generic collection directly (v6.0.7
             // `CollsOverArrays.scala:317-324`); any other receiver's goes through `builder.fromArray`
             // at an abstract type (`:31-34`), a `PairOfCols` for pairs (SANTA
-            // `Coll.pair_shape_restored` Y1)
-            if over_pairs {
-                Ok(CollValue::generic(out_elem_tpe, values))
+            // `Coll.pair_shape_restored` Y1). Both store each result into an array of the STATIC
+            // result's class, which refuses another class: the lambda's own result check does not
+            // cover a mapper that is an `If` of two lambdas (SANTA `Coll.reference_store_ops` and
+            // the third reply's P1-P4)
+            let is_pair_tpe = matches!(&out_elem_tpe, SType::STuple(t) if t.items.len() == 2);
+            if over_pairs && is_pair_tpe {
+                // a `Tuple2[]`: any pair is stored, its components unchecked (SANTA G2, P3)
+                match values.iter().find(|v| !matches!(v, Value::Pair(_))) {
+                    Some(v) => Err(EvalError::UnexpectedValue(format!(
+                        "map: a collection of {out_elem_tpe:?} cannot hold {v:?}"
+                    ))),
+                    None => Ok(CollValue::generic(out_elem_tpe, values)),
+                }
             } else {
+                // not a pair type from a `PairOfCols`: a generic collection, as `from_array` builds
                 CollValue::from_array(out_elem_tpe, values.to_vec())
                     .map_err(EvalError::TryExtractFrom)
             }

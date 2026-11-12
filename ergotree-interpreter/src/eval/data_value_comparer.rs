@@ -174,7 +174,11 @@ pub(crate) fn eq_with_cost<'ctx>(
             "Cannot compare a function value: unknown type".into(),
         )),
 
-        // String, Unit, Context, Global, and any cross-type comparisons
+        // sigmastate dispatches on the left value, and its `Unit` case charges nothing (v6.0.6
+        // `DataValueComparer.scala:409-410`; SANTA 6.0.7: 3 less per unit than `EQ_Prim`)
+        (Value::Unit, _) => Ok(matches!(rv, Value::Unit)),
+
+        // String, Context, Global, and any cross-type comparisons
         // (which PartialEq returns false for anyway).
         _ => {
             ctx.add_jit_cost(EQ_PRIM_COST)?;
@@ -322,6 +326,21 @@ mod tests {
         let lv: Value<'_> = Value::Int(42);
         let rv: Value<'_> = Value::Int(42);
         assert!(eq_with_cost(&lv, &rv, &ctx).unwrap());
+        assert_eq!(ctx.jit_cost_value() - before, EQ_PRIM_COST);
+    }
+
+    /// sigmastate's `case _: Unit => okEqual = r.isInstanceOf[Unit]` charges nothing (v6.0.6
+    /// `DataValueComparer.scala:409-410`). SANTA 6.0.7 prices it end to end in its third
+    /// reference-store reply: R9 @147 and R7m @167, 3 less per unit than `EQ_PRIM_COST` gives
+    #[test]
+    fn unit_eq_charges_nothing() {
+        let ctx = force_any_val::<Context>();
+        let before = ctx.jit_cost_value();
+        assert!(eq_with_cost(&Value::Unit, &Value::Unit, &ctx).unwrap());
+        assert!(!eq_with_cost(&Value::Unit, &Value::Int(1), &ctx).unwrap());
+        assert_eq!(ctx.jit_cost_value() - before, 0);
+        // the dispatch is on the LEFT value: a unit on the right is the left's case
+        assert!(!eq_with_cost(&Value::Int(1), &Value::Unit, &ctx).unwrap());
         assert_eq!(ctx.jit_cost_value() - before, EQ_PRIM_COST);
     }
 
