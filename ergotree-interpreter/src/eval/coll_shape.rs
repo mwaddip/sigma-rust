@@ -562,6 +562,59 @@ mod typed_array_store {
             ("0b12b1dc0c13100302040603040210010204c801", v(2, 70)), // K7 `Coll[Int] constant (1,2,3).patch(1, Coll(1), 100)`
         ]);
     }
+
+    /// `flatMap` copies each part into the result's array item by item (v6.0.6
+    /// `CollsOverArrays.scala:70-73`): an empty part is never read, whatever its class, also
+    /// into a `Coll[Byte]` result; an item of another kind fails the store (SANTA
+    /// `Coll.reference_store_ops` H1, H2, H4). `Append` differs: it copies arrays
+    #[test]
+    fn flat_map_reads_each_part_item_by_item() {
+        assert_trees(&[
+            (
+                "0b16b1dc0c0f10010201d9010104950100830163a7830007",
+                v(0, 138),
+            ), // H1 `Coll(1).flatMap({x => If(false, Coll[Box](SELF), Coll[GroupElement]())})`
+            ("0b15b1dc0c0f10010201d90101049501000e0101830005", v(0, 138)), // H2 `Coll(1).flatMap({x => If(false, Coll[Byte] const (1), ConcreteCollection[Long]())})`
+            ("0b17b1dc0c0f10010201d90101049501000e01018301050502", None), // H4 `Coll(1).flatMap({x => If(false, Coll[Byte] const (1), ConcreteCollection[Long](1L))})`
+        ]);
+    }
+
+    /// `flatMap` hands its builder each part with `++=` (v6.0.6 `CollsOverArrays.scala:70-73`,
+    /// `:410-411`), so a `Coll[Unit]` result takes parts of any class and holds units (SANTA's
+    /// third reply: R2, R9, X9)
+    #[test]
+    fn flat_map_fills_a_unit_array_with_units() {
+        assert_trees(&[
+            (
+                "0b16b1dc0c0f10010201d901010495010083016262100102",
+                v(1, 123),
+            ), // R2 `Coll(1).flatMap({x => If(false, ConcreteCollection[Unit](()), Coll[Int] constant (1))})`
+            (
+                "0b1a93dc0c0f10010201d90101049501008301626210010283016262",
+                Some((Value::Boolean(true), 147)),
+            ), // R9 R2 `== ConcreteCollection[Unit](())`
+            (
+                "0b21b1dc0c0fdc0c1d830104040201830104040201d901015895010083016262100102",
+                v(1, 183),
+            ), // X9 the same lambda over `Coll(1).zip(Coll(1))`
+        ]);
+    }
+
+    /// `flatMap_eval` resolves the call's STATIC result type before anything is stored (v6.0.6
+    /// `methods.scala:1005-1006`): a result with no runtime type throws though no part has an
+    /// item (SANTA's third reply: R8e), and the array is of the static class, not of the lambda
+    /// that happened to be applied (P5: the JVM by reading, `map`'s P2 through `flatMap`; 1 @148
+    /// on `e46ed668`)
+    #[test]
+    fn flat_map_resolves_its_static_result_type_first() {
+        assert_trees(&[
+            ("0b16b1dc0c0f10010201d901010495010083006701541000", None), // R8e `Coll(1).flatMap({x => If(false, Coll[T](), Coll[Int] constant ())})`
+            (
+                "0b1bb1dc0c0f10010201950100d9010104830163a7d901010483010782",
+                None,
+            ), // P5 `Coll(1).flatMap(If(false, {x => Coll[Box](SELF)}, {x => Coll[GroupElement](g)}))`
+        ]);
+    }
 }
 
 #[cfg(test)]

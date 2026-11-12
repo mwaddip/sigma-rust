@@ -15,7 +15,7 @@ use crate::eval::LambdaInvoker;
 /// Whether sigmastate's `stypeToRType` converts `tpe` (v6.0.7 `Evaluation.scala:22-55`): every
 /// type has an arm except a type variable and a function type with other than one argument or
 /// with type parameters, at any depth
-fn has_runtime_type(tpe: &SType) -> bool {
+pub(crate) fn has_runtime_type(tpe: &SType) -> bool {
     match tpe {
         SType::STypeVar(_) => false,
         SType::SColl(t) | SType::SOption(t) => has_runtime_type(t),

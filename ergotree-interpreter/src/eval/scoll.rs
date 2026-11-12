@@ -12,7 +12,9 @@ use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
 use super::coll_by_index::item_at;
+use super::coll_map::has_runtime_type;
 use super::coll_map::map_coll;
+use super::coll_shape::unit_builder_items;
 use super::env::Env;
 use super::Context;
 use super::EvalFn;
@@ -65,39 +67,35 @@ pub(crate) static INDEX_OF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     }))
 };
 
-/// The concatenation of `colls`, each a collection of the type `colls_tpe`, as `flatMap` builds
-/// it: `builder.fromArray` at an abstract item type (v6.0.7 `CollsOverArrays.scala:72-75`,
-/// `:426-427`), so generic, or a `PairOfCols` for pairs (SANTA `Coll.pair_shape_restored` Y3)
+/// The concatenation of `parts` at the item type `item_tpe`, as `flatMap` builds it:
+/// `builder.fromArray` at an abstract item type (v6.0.7 `CollsOverArrays.scala:72-75`,
+/// `:426-427`), so generic, or a `PairOfCols` for pairs (SANTA `Coll.pair_shape_restored` Y3).
+/// Scala's `flatMap` hands each part to the builder of the result's array with `++=` (v6.0.6
+/// `:70-73`): an empty part is never read, whatever its class, an item of another class fails
+/// the store ([`CollValue::from_array`]), and a `Coll[Unit]` result takes them all as units
+/// ([`unit_builder_items`]); SANTA `Coll.reference_store_ops` H1, H2, H4. `Append` differs: it
+/// copies arrays
 fn flatten<'ctx>(
-    colls_tpe: SType,
-    colls: Vec<Value<'ctx>>,
+    item_tpe: SType,
+    parts: Vec<Value<'ctx>>,
 ) -> Result<CollValue<'ctx>, TryExtractFromError> {
-    let SType::SColl(item_tpe) = colls_tpe else {
-        return Err(TryExtractFromError(format!(
-            "Expected Value::Coll, got: {colls_tpe:?}"
-        )));
-    };
-    let items: Vec<Value> = if *item_tpe == SType::SByte {
-        colls
-            .into_iter()
-            .map(|v| v.try_extract_into::<Vec<i8>>())
-            .collect::<Result<Vec<_>, _>>()?
-            .concat()
-            .into_iter()
-            .map(Value::Byte)
-            .collect()
-    } else {
-        colls
-            .into_iter()
-            .map(|v| v.try_extract_into::<Vec<Value>>())
-            .collect::<Result<Vec<_>, _>>()?
-            .concat()
-    };
-    CollValue::from_array((*item_tpe).clone(), items)
+    let mut items: Vec<Value> = Vec::new();
+    for part in parts {
+        match part {
+            Value::Coll(part) => items.extend(part.as_vec()),
+            other => {
+                return Err(TryExtractFromError(format!(
+                    "Expected Value::Coll, got: {other:?}"
+                )))
+            }
+        }
+    }
+    let items = unit_builder_items(&item_tpe, items);
+    CollValue::from_array(item_tpe, items)
 }
 
 pub(crate) fn flatmap_eval<'ctx>(
-    _mc: &MethodCallSite<'_>,
+    mc: &MethodCallSite<'_>,
     _env: &mut Env<'ctx>,
     ctx: &Context<'ctx>,
     obj: Value<'ctx>,
@@ -132,6 +130,22 @@ pub(crate) fn flatmap_eval<'ctx>(
     lambda.args.first().ok_or_else(|| {
         EvalError::NotFound("flatmap: lambda has empty arguments list".to_string())
     })?;
+    // `flatMap_eval` takes the result's item type from the CALL's static type and resolves its
+    // runtime type before anything is applied or stored (v6.0.6 `methods.scala:1005-1006`): a
+    // type variable, the call's own `OV` when it could not be specialised, throws there, with
+    // or without items; and the result's array is of that static class, whichever lambda the
+    // mapper evaluated to (SANTA's third reference-store reply: R8, R8e, A2)
+    let SType::SColl(item_tpe) = &*mc.tpe().t_range else {
+        return Err(EvalError::UnexpectedValue(format!(
+            "flatMap: expected a collection range, found {:?}",
+            mc.tpe().t_range
+        )));
+    };
+    if !has_runtime_type(item_tpe) {
+        return Err(EvalError::Misc(format!(
+            "flatMap: the result's item type {item_tpe:?} has no runtime type"
+        )));
+    }
     // The body evaluates in the lambda's CAPTURED environment (JVM closure
     // semantics) — not in the caller's env. ADD_TO_ENV_COST (5) per input
     // element is charged by the invoker (AddToEnvironmentDesc,
@@ -152,7 +166,7 @@ pub(crate) fn flatmap_eval<'ctx>(
         .iter()
         .map(|item| lambda_call(item.clone()))
         .collect::<Result<Vec<Value>, EvalError>>()?;
-    let coll = flatten(lambda.body.tpe(), values).map_err(EvalError::TryExtractFrom)?;
+    let coll = flatten((**item_tpe).clone(), values).map_err(EvalError::TryExtractFrom)?;
     // flatMap cost scales with the OUTPUT (flattened) length, not the input
     // length, matching Scala's `flatMap_eval` (addSeqCost over `res.length`
     // after building the result, post the per-item lambda calls).
