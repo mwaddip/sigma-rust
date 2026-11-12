@@ -2,7 +2,7 @@
 
 use core::cmp::Ordering;
 
-use ergotree_ir::bigint256::BigInt256;
+use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::bin_op::BinOp;
 use ergotree_ir::mir::bin_op::BinOpKind;
 use ergotree_ir::mir::bin_op::RelationOp;
@@ -12,14 +12,18 @@ use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 use ergotree_ir::unsignedbigint256::UnsignedBigInt;
+use num_bigint::BigInt;
 use num_traits::CheckedAdd;
 use num_traits::CheckedDiv;
 use num_traits::CheckedMul;
 use num_traits::CheckedRem;
 use num_traits::CheckedSub;
 use num_traits::Num;
+use num_traits::Signed;
+use num_traits::Zero;
 
 use crate::eval::env::Env;
+use crate::eval::fits_256_bits;
 use crate::eval::unevaluated::not_evaluated;
 use crate::eval::Context;
 use crate::eval::EvalError;
@@ -100,18 +104,8 @@ macro_rules! impl_jvm_division_fixed_width {
 }
 impl_jvm_division_fixed_width!(i8, i16, i32, i64);
 
-/// `BigInt` has its own `quot` and `divisionRemainder` (`BigIntegerOps.scala:81`, `:97`), kept
-/// in `BigInt256`'s checked operations
-impl JvmDivision for BigInt256 {
-    fn jvm_quot(&self, divisor: &Self) -> Option<Self> {
-        self.checked_div(divisor)
-    }
-    fn jvm_rem(&self, divisor: &Self) -> Option<Self> {
-        self.checked_rem(divisor)
-    }
-}
-
-/// `UnsignedBigInt` has its own too (`UnsignedBigIntegerOps.scala:71`, `:87`)
+/// `UnsignedBigInt` has its own `quot` and `divisionRemainder` (`UnsignedBigIntegerOps.scala:71`,
+/// `:87`). `BigInt`'s are in [`eval_bigint_arith`]
 impl JvmDivision for UnsignedBigInt {
     fn jvm_quot(&self, divisor: &Self) -> Option<Self> {
         self.checked_div(divisor)
@@ -160,7 +154,7 @@ fn eval_ordering<'ctx>(
         SType::SShort => ordering_at::<i16>(lv, rv),
         SType::SInt => ordering_at::<i32>(lv, rv),
         SType::SLong => ordering_at::<i64>(lv, rv),
-        SType::SBigInt => ordering_at::<BigInt256>(lv, rv),
+        SType::SBigInt => ordering_at::<BigInt>(lv, rv),
         SType::SUnsignedBigInt => ordering_at::<UnsignedBigInt>(lv, rv),
         // No parsed comparison gets here: the builder requires numeric operands
         // (`comparisonOp`, `check_build`). The JVM's table has no entry for another type
@@ -183,13 +177,13 @@ where
 
 /// An arithmetic operation at `T`, the Rust type of the left operand's static type. sigmastate
 /// charges the operation's cost for that type, then casts BOTH operand values to it (v6.0.6
-/// `trees.scala:729-739`): a value of another type, numeric or not, is an error. `bigint`: only
-/// `SBigInt` has costs of its own (every `ArithOpCompanion.costKind`, `:746-848`)
+/// `trees.scala:729-739`): a value of another type, numeric or not, is an error. Every type but
+/// `SBigInt` takes these costs (every `ArithOpCompanion.costKind`, `:746-848`); `BigInt` is
+/// [`eval_bigint_arith`]
 fn eval_arith<'ctx, T>(
     op: ArithOp,
     lv: Value<'ctx>,
     rv: Value<'ctx>,
-    bigint: bool,
     ctx: &Context<'ctx>,
 ) -> Result<Value<'ctx>, EvalError>
 where
@@ -203,13 +197,10 @@ where
         + Into<Value<'ctx>>
         + core::fmt::Display,
 {
-    ctx.add_jit_cost(match (op, bigint) {
-        (ArithOp::Plus | ArithOp::Minus, false) => 15,
-        (ArithOp::Plus | ArithOp::Minus, true) => 20,
-        (ArithOp::Multiply | ArithOp::Divide | ArithOp::Modulo, false) => 15,
-        (ArithOp::Multiply | ArithOp::Divide | ArithOp::Modulo, true) => 25,
-        (ArithOp::Max | ArithOp::Min, false) => 5,
-        (ArithOp::Max | ArithOp::Min, true) => 10,
+    ctx.add_jit_cost(match op {
+        ArithOp::Plus | ArithOp::Minus => 15,
+        ArithOp::Multiply | ArithOp::Divide | ArithOp::Modulo => 15,
+        ArithOp::Max | ArithOp::Min => 5,
     })?;
     let lv_raw = lv.try_extract_into::<T>()?;
     let rv_raw = rv.try_extract_into::<T>()?;
@@ -222,6 +213,57 @@ where
         ArithOp::Max => Ok(lv_raw.max(rv_raw).into()),
         ArithOp::Min => Ok(lv_raw.min(rv_raw).into()),
     }
+}
+
+/// `BigInt` arithmetic, on sigmastate's own width. Its `BigInt` wraps a `BigInteger`, and the
+/// 256-bit range is a check whose place depends on the operation and on the TREE version
+/// (v6.0.6 `CBigInt.scala`). `add`, `subtract` and `multiply` check their RESULT at every version
+/// (`:39-43`). `divide`, `mod`, `min` and `max` check nothing (`:45-53`), so below tree version 3
+/// they take and return a value outside the range: `MIN / -1` is 2^255. From tree version 3 the
+/// constructor refuses any result above 255 bits (`:18-20`). SANTA
+/// `BigInt.range_check_tree_version` and the rows of its reply `sigma-rust-bigint-range-reply.md`
+fn eval_bigint_arith<'ctx>(
+    op: ArithOp,
+    lv: Value<'ctx>,
+    rv: Value<'ctx>,
+    ctx: &Context<'ctx>,
+) -> Result<Value<'ctx>, EvalError> {
+    ctx.add_jit_cost(match op {
+        ArithOp::Plus | ArithOp::Minus => 20,
+        ArithOp::Multiply | ArithOp::Divide | ArithOp::Modulo => 25,
+        ArithOp::Max | ArithOp::Min => 10,
+    })?;
+    let l = lv.try_extract_into::<BigInt>()?;
+    let r = rv.try_extract_into::<BigInt>()?;
+    // the operation's symbol, its result, and whether the operation checks its own result
+    let (symbol, result, checks_its_result) = match op {
+        ArithOp::Plus => ("+", &l + &r, true),
+        ArithOp::Minus => ("-", &l - &r, true),
+        ArithOp::Multiply => ("*", &l * &r, true),
+        // `BigInteger.divide`: a zero divisor throws; the quotient truncates toward zero. The
+        // zero check comes first: the `/` of the wide integer panics on a zero divisor
+        ArithOp::Divide => {
+            if r.is_zero() {
+                return Err(arithmetic_err("/", l, r, "exception"));
+            }
+            ("/", &l / &r, false)
+        }
+        // `BigInteger.mod`: a modulus of zero or below throws; the result is not negative
+        ArithOp::Modulo => {
+            if !r.is_positive() {
+                return Err(arithmetic_err("%", l, r, "exception"));
+            }
+            let rem = &l % &r;
+            ("%", if rem.is_negative() { rem + &r } else { rem }, false)
+        }
+        ArithOp::Max => ("max", if l >= r { l.clone() } else { r.clone() }, false),
+        ArithOp::Min => ("min", if l <= r { l.clone() } else { r.clone() }, false),
+    };
+    let checked = checks_its_result || ctx.tree_version() >= ErgoTreeVersion::V3;
+    if checked && !fits_256_bits(&result) {
+        return Err(arithmetic_err(symbol, l, r, "overflow"));
+    }
+    Ok(Value::BigInt(result))
 }
 
 impl Evaluable for BinOp {
@@ -310,12 +352,12 @@ impl Evaluable for BinOp {
                 // version (SANTA `ArithOp.mixed_width`)
                 let op_tpe = self.left.tpe();
                 match op_tpe {
-                    SType::SByte => eval_arith::<i8>(op, lv, rv, false, ctx),
-                    SType::SShort => eval_arith::<i16>(op, lv, rv, false, ctx),
-                    SType::SInt => eval_arith::<i32>(op, lv, rv, false, ctx),
-                    SType::SLong => eval_arith::<i64>(op, lv, rv, false, ctx),
-                    SType::SBigInt => eval_arith::<BigInt256>(op, lv, rv, true, ctx),
-                    SType::SUnsignedBigInt => eval_arith::<UnsignedBigInt>(op, lv, rv, false, ctx),
+                    SType::SByte => eval_arith::<i8>(op, lv, rv, ctx),
+                    SType::SShort => eval_arith::<i16>(op, lv, rv, ctx),
+                    SType::SInt => eval_arith::<i32>(op, lv, rv, ctx),
+                    SType::SLong => eval_arith::<i64>(op, lv, rv, ctx),
+                    SType::SBigInt => eval_bigint_arith(op, lv, rv, ctx),
+                    SType::SUnsignedBigInt => eval_arith::<UnsignedBigInt>(op, lv, rv, ctx),
                     _ => Err(EvalError::UnexpectedValue(format!(
                         "{op:?}: no arithmetic for the left operand's type {op_tpe:?}"
                     ))),
@@ -791,6 +833,187 @@ mod comparison_type_tests {
     }
 }
 
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod bigint_range_tests {
+    use alloc::string::String;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
+    use num_bigint::BigInt;
+
+    use crate::eval::test_util::{bigint_x, bigint_y, eval_body, BIGINT_MAX_HEX};
+
+    const V0: ErgoTreeVersion = ErgoTreeVersion::V0;
+    const V1: ErgoTreeVersion = ErgoTreeVersion::V1;
+    const V2: ErgoTreeVersion = ErgoTreeVersion::V2;
+    const V3: ErgoTreeVersion = ErgoTreeVersion::V3;
+
+    /// 2^255: one above the 256-bit range
+    fn p() -> BigInt {
+        BigInt::from(1) << 255usize
+    }
+
+    fn big(v: BigInt) -> Option<Value<'static>> {
+        Some(Value::BigInt(v))
+    }
+
+    fn boolean(v: bool) -> Option<Value<'static>> {
+        Some(Value::Boolean(v))
+    }
+
+    /// A one-byte `BigInt` constant
+    fn b(n: i8) -> String {
+        format!("0601{:02x}", n as u8)
+    }
+
+    /// The body's value and cost at tree version 0, or that it errors there
+    fn at_v0(body: &str, expected: Option<Value<'static>>, cost: u64) {
+        let (res, c) = eval_body(body, V0);
+        match expected {
+            Some(v) => {
+                assert_eq!(res.as_ref().ok(), Some(&v), "{body}: {res:?}");
+                assert_eq!(c, cost, "{body}");
+            }
+            None => assert!(res.is_err(), "{body}: {res:?}"),
+        }
+    }
+
+    /// [`at_v0`], and an error at tree version 3: there sigmastate's `BigInt` constructor
+    /// throws at `X` itself
+    fn v0_only(body: &str, expected: Option<Value<'static>>, cost: u64) {
+        at_v0(body, expected, cost);
+        let (res, _) = eval_body(body, V3);
+        assert!(res.is_err(), "{body} at v3: {res:?}");
+    }
+
+    #[test]
+    fn santa_bigint_range_rows() {
+        // SANTA's reply `sigma-rust-bigint-range-reply.md` (sigma-state 6.0.7), measured; G0 and
+        // G1 are also `BigInt.range_check_tree_version` (`8798807`). `X` = `BigInt.MIN / -1`:
+        // 2^255 below tree version 3, where only the results of `+ - *` and negation are
+        // range-checked (v6.0.6 `CBigInt.scala:39-55`)
+        let x = bigint_x();
+        let x = x.as_str();
+        // G1 `X`
+        v0_only(x, big(p()), 35);
+        // G0 `X - 1`
+        v0_only(&format!("99{x}{}", b(1)), big(p() - 1), 60);
+        // B1 `X / 1`
+        v0_only(&format!("9d{x}{}", b(1)), big(p()), 65);
+        // B2 `X / -1`
+        v0_only(&format!("9d{x}{}", b(-1)), big(-p()), 65);
+        // B3 `X * 1`: the result is checked
+        v0_only(&format!("9c{x}{}", b(1)), None, 0);
+        // B4 `X * -1`
+        v0_only(&format!("9c{x}{}", b(-1)), big(-p()), 65);
+        // B5 `X * 0`
+        v0_only(&format!("9c{x}{}", b(0)), big(BigInt::from(0)), 65);
+        // B6 `X + 0`: the result is checked
+        v0_only(&format!("9a{x}{}", b(0)), None, 0);
+        // B7 `X + (-1)`
+        v0_only(&format!("9a{x}{}", b(-1)), big(p() - 1), 60);
+        // B8 `-X`
+        v0_only(&format!("f0{x}"), big(-p()), 65);
+        // B9 `min(X, 0)`
+        v0_only(&format!("a1{x}{}", b(0)), big(BigInt::from(0)), 50);
+        // B10 `max(X, 0)`
+        v0_only(&format!("a2{x}{}", b(0)), big(p()), 50);
+        // B11 `X > 0`
+        v0_only(&format!("91{x}{}", b(0)), boolean(true), 60);
+        // B12 `X > BigInt.MAX`
+        v0_only(&format!("91{x}{BIGINT_MAX_HEX}"), boolean(true), 60);
+        // B13 `X == X`
+        v0_only(&format!("93{x}{x}"), boolean(true), 75);
+        // B14 `X == BigInt.MAX`
+        v0_only(&format!("93{x}{BIGINT_MAX_HEX}"), boolean(false), 45);
+        // B15 `X % 7`
+        v0_only(&format!("9e{x}{}", b(7)), big(BigInt::from(1)), 65);
+        // B16 `7 % X`
+        v0_only(&format!("9e{}{x}", b(7)), big(BigInt::from(7)), 65);
+        // B17 `X % X`
+        v0_only(&format!("9e{x}{x}"), big(BigInt::from(0)), 95);
+
+        // The gate is the tree version: 2^255 at tree versions 1 and 2 as well
+        for version in [V1, V2] {
+            let (res, cost) = eval_body(x, version);
+            assert_eq!(res.ok(), big(p()), "{version:?}");
+            assert_eq!(cost, 35, "{version:?}");
+        }
+    }
+
+    #[test]
+    fn santa_bigint_range_rows_through_other_nodes() {
+        // SANTA's reply, section 2 (measured): nothing on the way refuses the value, and each
+        // row costs what its in-range twin costs. `Y` = `6 / -1` is the twin: -7 at both
+        // versions
+        const F: &str = "d9010106997201060101"; // `{ (a: BigInt) => a - 1 }`
+        type Body = fn(&str) -> String;
+        let rows: [(Body, u64); 5] = [
+            // `{ val x = X; x - 1 }`
+            (|v| format!("d801d601{v}997201{}", b(1)), 72),
+            // `(X, 1)._1 - 1`
+            (|v| format!("998c8602{v}040201{}", b(1)), 90),
+            // `Coll(X)(0) - 1`
+            (|v| format!("99b2830106{v}040000{}", b(1)), 115),
+            // `{ (a: BigInt) => a - 1 }(X)`
+            (|v| format!("da{F}01{v}"), 105),
+            // `Coll(X).map({ (a: BigInt) => a - 1 })(0)`
+            (|v| format!("b2ad830106{v}{F}040000"), 151),
+        ];
+        for (body, cost) in rows {
+            v0_only(&body(&bigint_x()), big(p() - 1), cost);
+            for version in [V0, V3] {
+                let (res, c) = eval_body(&body(&bigint_y()), version);
+                assert_eq!(res.ok(), big(BigInt::from(-7)), "{version:?}");
+                assert_eq!(c, cost, "{version:?}");
+            }
+        }
+
+        // A cast never takes a `BigInt` input below tree version 3, in range or not
+        for v in [bigint_x(), bigint_y()] {
+            // `Downcast(v, Long)`, `Upcast(v, BigInt)`
+            at_v0(&format!("7d{v}05"), None, 0);
+            at_v0(&format!("7e{v}06"), None, 0);
+        }
+        let (res, cost) = eval_body(&format!("7d{}05", bigint_y()), V3);
+        assert_eq!((res.ok(), cost), (Some(Value::Long(-6)), 45));
+        let (res, cost) = eval_body(&format!("7e{}06", bigint_y()), V3);
+        assert_eq!((res.ok(), cost), (big(BigInt::from(-6)), 65));
+    }
+
+    #[test]
+    fn a_wide_bigint_moves_through_other_nodes() {
+        // By reading: SANTA did not measure these one by one. A node that only moves a value
+        // passes the wide one through; the costs are the in-range twins', sigma-rust's own
+        let x = bigint_x();
+        // `If(true, X, 0) - 1`
+        v0_only(&format!("99950101{x}{}{}", b(0), b(1)), big(p() - 1), 75);
+        // `Coll(X) == Coll(X)`
+        v0_only(&format!("93830106{x}830106{x}"), boolean(true), 133);
+        // `min(max(X, 0), X)`
+        v0_only(&format!("a1a2{x}{}{x}", b(0)), big(p()), 95);
+    }
+
+    #[test]
+    fn a_wide_bigint_divides_without_panic() {
+        // By reading: `BigInteger.divide` throws on a zero divisor and `BigInteger.mod` on a
+        // modulus of zero or below. An error here, and not the panic of a division by zero
+        for v in [bigint_x(), bigint_y()] {
+            for body in [
+                format!("9d{v}{}", b(0)),  // `v / 0`
+                format!("9e{v}{}", b(0)),  // `v % 0`
+                format!("9e{v}{}", b(-1)), // `v % -1`
+            ] {
+                for version in [V0, V3] {
+                    let (res, _) = eval_body(&body, version);
+                    assert!(res.is_err(), "{body} at {version:?}: {res:?}");
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::panic)]
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -801,6 +1024,7 @@ mod tests {
     use crate::eval::test_util::try_eval_out_with_version;
     use crate::eval::test_util::try_eval_out_wo_ctx;
     use alloc::boxed::Box;
+    use ergotree_ir::bigint256::BigInt256;
     use ergotree_ir::ergo_tree::ErgoTree;
     use ergotree_ir::mir::constant::Constant;
     use ergotree_ir::mir::expr::Expr;
@@ -1098,7 +1322,24 @@ mod tests {
         assert!(eval_arith_op(ArithOp::Multiply, min(), b(2)).is_err());
         assert_eq!(eval_arith_op(ArithOp::Multiply, min(), b(1)), Ok(min()));
 
-        assert!(eval_arith_op(ArithOp::Divide, min(), b(-1)).is_err());
+        // `MIN / -1`: sigmastate's `divide` does not check its result (v6.0.6 `CBigInt.scala:45`),
+        // so below tree version 3 it is 2^255; from version 3 the constructor refuses it
+        // (`:18-20`). SANTA `BigInt.range_check_tree_version` G1
+        let min_div_minus_one = crate::eval::test_util::bigint_x();
+        let (res, cost) = crate::eval::test_util::eval_body(
+            &min_div_minus_one,
+            ergotree_ir::ergo_tree::ErgoTreeVersion::V0,
+        );
+        assert_eq!(
+            res.ok(),
+            Some(Value::BigInt(num_bigint::BigInt::from(1) << 255usize))
+        );
+        assert_eq!(cost, 35);
+        let (res, _) = crate::eval::test_util::eval_body(
+            &min_div_minus_one,
+            ergotree_ir::ergo_tree::ErgoTreeVersion::V3,
+        );
+        assert!(res.is_err());
         assert_eq!(
             eval_arith_op(ArithOp::Divide, min() + b(1), b(-1)),
             Ok(max())

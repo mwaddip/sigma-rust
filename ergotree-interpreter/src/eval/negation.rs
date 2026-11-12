@@ -1,14 +1,13 @@
-use ergotree_ir::bigint256::BigInt256;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::negation::Negation;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
 use crate::eval::env::Env;
+use crate::eval::fits_256_bits;
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
-use num_traits::CheckedNeg;
 
 impl Evaluable for Negation {
     fn eval<'ctx>(
@@ -51,13 +50,18 @@ impl Evaluable for Negation {
             SType::SShort => Ok(input_v.try_extract_into::<i16>()?.wrapping_neg().into()),
             SType::SInt => Ok(input_v.try_extract_into::<i32>()?.wrapping_neg().into()),
             SType::SLong => Ok(input_v.try_extract_into::<i64>()?.wrapping_neg().into()),
-            // BigInt256 stays checked: sigma-state's 256-bit BigInt also
-            // overflows negating its MIN (`-(2^255)`), so both sides error.
+            // sigmastate's `BigInt.negate` checks its RESULT against the 256-bit range at every
+            // tree version (v6.0.6 `CBigInt.scala:55`): negating `MIN` is refused, and negating
+            // 2^255, a value a tree below version 3 can hold, is `MIN` (SANTA's reply
+            // `sigma-rust-bigint-range-reply.md`, B8)
             SType::SBigInt => {
-                let v = input_v.try_extract_into::<BigInt256>()?;
-                v.checked_neg()
-                    .map(|v| v.into())
-                    .ok_or_else(|| overflow_err(&v))
+                let v = input_v.try_extract_into::<num_bigint::BigInt>()?;
+                let negated = -&v;
+                if fits_256_bits(&negated) {
+                    Ok(Value::BigInt(negated))
+                } else {
+                    Err(overflow_err(&v))
+                }
             }
             // `UnsignedBigInt` has its entry, and its `negate` is `???`
             // (`UnsignedBigIntegerOps.scala:48`): it throws once the cost is added
