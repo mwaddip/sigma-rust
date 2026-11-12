@@ -1,10 +1,15 @@
 use crate::eval::env::Env;
+use crate::eval::fits_256_bits;
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use ergotree_ir::ergo_tree::ErgoTree;
+use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::Constant;
 use ergotree_ir::mir::constant::TryExtractInto;
@@ -42,14 +47,26 @@ impl Evaluable for SubstConstants {
             .collect();
 
         // every item of the new values becomes a constant, whatever the collection's form
-        // (sigmastate's `toArrayOfConstants`, v6.0.7 `Extensions.scala:53-64`)
-        let new_constants = if let Value::Coll(coll) = new_values_v {
-            let mut items_const = vec![];
+        // (sigmastate's `toArrayOfConstants`, v6.0.7 `Extensions.scala:53-64`). The lift checks
+        // no `BigInt` range (`Platform.liftToConstant`): a `BigInt` outside 256 bits, which a
+        // tree below version 3 can hold, is refused later, by the constant WRITER
+        // (`CoreDataSerializer.scala:35`), and so only if it is written
+        let new_values = if let Value::Coll(coll) = new_values_v {
+            let mut new_values = vec![];
             for v in &coll.as_vec() {
-                let c = Constant::try_from(v.to_static()).map_err(EvalError::Misc)?;
-                items_const.push(c);
+                let v = v.to_static();
+                new_values.push(match Constant::try_from(v.clone()) {
+                    Ok(c) => NewValue::Constant(c),
+                    Err(e) => {
+                        // not a constant even with its `BigInt`s in range: the lift throws
+                        if Constant::try_from(with_bigints_in_range(v)).is_err() {
+                            return Err(EvalError::Misc(e));
+                        }
+                        NewValue::Unwritable(e)
+                    }
+                });
             }
-            items_const
+            new_values
         } else {
             return Err(EvalError::Misc(format!(
                 "SubstConstants: expected evaluation of `new_values` be of type `Coll[_]`, got \
@@ -58,16 +75,23 @@ impl Evaluable for SubstConstants {
             )));
         };
 
-        if new_constants.len() != positions.len() {
+        if new_values.len() != positions.len() {
             return Err(EvalError::Misc(format!(
                 "SubstConstants: `positions.len()` (== {}) and `new_values.len()` (== {}) differ",
                 positions.len(),
-                new_constants.len()
+                new_values.len()
             )));
         }
 
         // the bytes of any `Coll[Byte]`, specialised or generic (sigmastate reads `toArray`)
         if let Ok(b) = script_bytes_v.clone().try_extract_into::<Vec<i8>>() {
+            let (positions, new_constants) = written_values(
+                b.as_vec_u8(),
+                positions,
+                new_values,
+                ctx.activated_script_version(),
+                ctx.tree_version(),
+            )?;
             // Byte-level substitution mirroring sigma-state's
             // `ErgoTreeSerializer.substituteConstants`: the tree body is never
             // parsed and out-of-range positions are a no-op, so a malformed
@@ -99,6 +123,94 @@ impl Evaluable for SubstConstants {
 
 fn to_misc_err<T: core::fmt::Debug>(e: T) -> EvalError {
     EvalError::Misc(format!("{:?}", e))
+}
+
+/// A new value as sigmastate holds it once lifted to a constant
+enum NewValue {
+    /// A constant
+    Constant(Constant),
+    /// A constant on the JVM that its writer refuses: it holds a `BigInt` outside 256 bits.
+    /// The text is the refusal
+    Unwritable(String),
+}
+
+/// The positions and constants to substitute, without the new values sigmastate's writer never
+/// reaches; an error if it would reach one it refuses. The writer serializes a new value only
+/// when its position is inside the tree's constants and is the first to name it
+/// (`getPositionsBackref`, v6.0.6 `ErgoTreeSerializer.scala:286-300`, and the loop at
+/// `:345-361`), so dropping a value it does not reach changes nothing for the others
+fn written_values(
+    script_bytes: Vec<u8>,
+    positions: Vec<usize>,
+    new_values: Vec<NewValue>,
+    activated_version: ErgoTreeVersion,
+    tree_version: ErgoTreeVersion,
+) -> Result<(Vec<usize>, Vec<Constant>), EvalError> {
+    let mut unwritable = false;
+    let mut constants = Vec::with_capacity(new_values.len());
+    for v in &new_values {
+        match v {
+            NewValue::Constant(c) => constants.push(c.clone()),
+            NewValue::Unwritable(_) => unwritable = true,
+        }
+    }
+    if !unwritable {
+        return Ok((positions, constants));
+    }
+    // the tree's number of constants, by the read the substitution itself makes
+    let (_, num_constants) =
+        ErgoTree::substitute_constants(script_bytes, &[], &[], activated_version, tree_version)
+            .map_err(to_misc_err)?;
+    let mut named = vec![false; num_constants];
+    let mut kept_positions = Vec::with_capacity(positions.len());
+    let mut kept_constants = Vec::with_capacity(positions.len());
+    for (pos, v) in positions.into_iter().zip(new_values) {
+        let written = named.get(pos) == Some(&false);
+        if let Some(slot) = named.get_mut(pos) {
+            *slot = true;
+        }
+        match v {
+            NewValue::Constant(c) => {
+                kept_positions.push(pos);
+                kept_constants.push(c);
+            }
+            NewValue::Unwritable(refusal) if written => return Err(EvalError::Misc(refusal)),
+            NewValue::Unwritable(_) => {}
+        }
+    }
+    Ok((kept_positions, kept_constants))
+}
+
+/// The value with every `BigInt` outside the 256-bit range replaced by zero: what is left to
+/// refuse then is what sigmastate's lift itself refuses
+fn with_bigints_in_range(v: Value<'static>) -> Value<'static> {
+    match v {
+        Value::BigInt(b) if !fits_256_bits(&b) => Value::BigInt(num_bigint::BigInt::from(0)),
+        Value::Pair(pair) => {
+            let (l, r) = *pair;
+            Value::Pair(Box::new((
+                with_bigints_in_range(l),
+                with_bigints_in_range(r),
+            )))
+        }
+        Value::Opt(opt) => Value::Opt(opt.map(|v| Box::new(with_bigints_in_range(*v)))),
+        Value::Coll(coll) => Value::Coll(coll_with_bigints_in_range(coll)),
+        other => other,
+    }
+}
+
+fn coll_with_bigints_in_range(coll: CollValue<'static>) -> CollValue<'static> {
+    match coll {
+        CollValue::Generic { elem_tpe, items } => CollValue::Generic {
+            elem_tpe,
+            items: items.iter().cloned().map(with_bigints_in_range).collect(),
+        },
+        CollValue::Pairs { ls, rs } => CollValue::Pairs {
+            ls: Arc::new(coll_with_bigints_in_range((*ls).clone())),
+            rs: Arc::new(coll_with_bigints_in_range((*rs).clone())),
+        },
+        other => other,
+    }
 }
 
 /// SANTA `Tuple.non_pair_value_type_directed` #5 and #6 (sigma-state 6.0.7), and the positions'
@@ -378,5 +490,68 @@ mod tests {
              not on positions.len() (1 vs 3). Deltas diverged: {} vs {}",
             delta_1_position, delta_3_positions,
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod bigint_range_tests {
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
+
+    use crate::eval::test_util::{bigint_x, bigint_y, eval_body};
+
+    #[test]
+    fn santa_subst_constants_refuses_a_bigint_outside_256_bits() {
+        // SANTA's reply `sigma-rust-bigint-range-reply.md` (sigma-state 6.0.7), measured:
+        // `substConstants(t, Coll(0), Coll(BigInt.MIN / -1))` over a tree `t` with one
+        // segregated `BigInt` constant throws at the constant writer below tree version 3
+        // ("doesn't fit into 256 bits", v6.0.6 `CoreDataSerializer.scala:35`): the one consumer
+        // there that range-checks a value it is handed. Its in-range twin returns the tree
+        let t = "1001060101d1939f82730082";
+        let subst = |value: &str| format!("740e0c{t}100100830106{value}");
+        let (res, _) = eval_body(&subst(&bigint_x()), ErgoTreeVersion::V0);
+        assert!(res.is_err(), "{res:?}");
+
+        let (res, cost) = eval_body(&subst(&bigint_y()), ErgoTreeVersion::V0);
+        let bytes = base16::decode("10010601fad1939f82730082").unwrap();
+        assert_eq!(res.ok(), Some(Value::from(bytes)));
+        assert_eq!(cost, 265);
+    }
+
+    #[test]
+    fn a_bigint_outside_256_bits_is_refused_only_where_it_would_be_written() {
+        // By reading, not measured: sigmastate lifts every new value to a constant whatever a
+        // `BigInt`'s width (`toArrayOfConstants`, v6.0.6 `Extensions.scala:53-64`;
+        // `Platform.liftToConstant` checks no range), and only the constant WRITER requires 256
+        // bits. The writer reaches a new value only when its position is inside the tree's
+        // constants and is the first to name it (`ErgoTreeSerializer.scala:286-300`,
+        // `:345-361`). The costs are those of the in-range twins, sigma-rust's own
+        let t = "1001060101d1939f82730082"; // one constant
+        let (x, y) = (bigint_x(), bigint_y());
+        let unchanged = Some(Value::from(base16::decode(t).unwrap()));
+        let with_minus_six = Some(Value::from(
+            base16::decode("10010601fad1939f82730082").unwrap(),
+        ));
+        let subst = |positions: &str, values: &str| {
+            eval_body(
+                &format!("740e0c{t}{positions}{values}"),
+                ErgoTreeVersion::V0,
+            )
+        };
+
+        // `Coll(5)`: the position is outside the tree's constants
+        let (res, cost) = subst("10010a", &format!("830106{x}"));
+        assert_eq!((res.ok(), cost), (unchanged.clone(), 265));
+        // `Coll(-1)`
+        let (res, cost) = subst("100101", &format!("830106{x}"));
+        assert_eq!((res.ok(), cost), (unchanged, 265));
+        // `Coll(0, 0)` with `Coll(Y, X)`: the first to name a position wins, `X` is not written
+        let (res, cost) = subst("10020000", &format!("830206{y}{x}"));
+        assert_eq!((res.ok(), cost), (with_minus_six, 300));
+        // `Coll(0, 0)` with `Coll(X, Y)`: `X` is the one written
+        let (res, _) = subst("10020000", &format!("830206{x}{y}"));
+        assert!(res.is_err(), "{res:?}");
     }
 }

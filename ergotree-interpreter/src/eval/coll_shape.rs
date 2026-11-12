@@ -1010,7 +1010,7 @@ mod scala_eq_tests {
     fn other_kinds_do_not() {
         assert!(!scala_eq(&Value::Boolean(true), &Value::Int(1)));
         assert!(!scala_eq(
-            &Value::BigInt(BigInt256::from(1i64)),
+            &Value::from(BigInt256::from(1i64)),
             &Value::Long(1)
         ));
         let coll = |t: SType, v: Value<'static>| Value::Coll(CollValue::generic(t, vec![v]));

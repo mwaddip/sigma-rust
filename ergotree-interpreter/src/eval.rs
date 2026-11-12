@@ -196,6 +196,18 @@ fn convert_self_extension(ctx: &Context) -> Result<(), EvalError> {
         .map_err(EvalError::from)
 }
 
+/// sigmastate's `fitsIn256Bits` (v6.0.6 `Extensions.scala:199`): `bitLength() <= 255`, the range
+/// `-2^255 ..= 2^255 - 1` of a `BigInt` as data. A runtime `BigInt` can be wider below tree
+/// version 3 (`CBigInt.scala:18-20`)
+pub(crate) fn fits_256_bits(v: &num_bigint::BigInt) -> bool {
+    match v.bits() {
+        0..=255 => true,
+        // a magnitude of 256 bits fits only as -2^255
+        256 => v.sign() == num_bigint::Sign::Minus && v.trailing_zeros() == Some(255),
+        _ => false,
+    }
+}
+
 /// sigmastate's `Value.checkType` (v6.0.7 `values.scala:251-259`) through `SType.isValueOfType`
 /// (`SType.scala:187-213`), run wherever sigmastate evaluates a node whose value its static type
 /// does not guarantee. Shallow: only the type's root constructor is checked against the value, so
@@ -814,18 +826,51 @@ pub mod test_util {
             let (_, res, cost) = eval_v3_body(tree_hex);
             return (res, cost);
         }
-        let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
-        assert_eq!(bytes[0], 0x00, "{tree_hex}");
-        let expr = from_bytes(&bytes[1..])
-            .with_tree_version(ErgoTreeVersion::V0, Expr::sigma_parse)
+        assert!(tree_hex.starts_with("00"), "{tree_hex}");
+        eval_body(&tree_hex[2..], ErgoTreeVersion::V0)
+    }
+
+    /// The value and JIT cost of an expression's bytes, parsed and evaluated at the given tree
+    /// version, at activated version 3
+    #[cfg(test)]
+    pub(crate) fn eval_body(
+        body_hex: &str,
+        version: ErgoTreeVersion,
+    ) -> (Result<Value<'static>, EvalError>, u64) {
+        let bytes = base16::decode(body_hex.as_bytes()).unwrap();
+        let expr = from_bytes(&bytes)
+            .with_tree_version(version, Expr::sigma_parse)
             .unwrap();
         let mut ctx = force_any_val::<Context>();
         ctx.activated_script_version_byte = 3;
-        ctx.tree_version.set(ErgoTreeVersion::V0);
+        ctx.tree_version.set(version);
         ctx.jit_cost.set(0);
         let mut env = Env::empty();
         let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
         (res, ctx.jit_cost_value())
+    }
+
+    /// The constant `BigInt.MIN` (-2^255)
+    #[cfg(test)]
+    pub(crate) const BIGINT_MIN_HEX: &str =
+        "06208000000000000000000000000000000000000000000000000000000000000000";
+
+    /// The constant `BigInt.MAX` (2^255 - 1)
+    #[cfg(test)]
+    pub(crate) const BIGINT_MAX_HEX: &str =
+        "06207fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+    /// `BigInt.MIN / -1`: 2^255 below tree version 3 (sigmastate's `divide` does not check its
+    /// result there), a throw from version 3
+    #[cfg(test)]
+    pub(crate) fn bigint_x() -> alloc::string::String {
+        alloc::format!("9d{BIGINT_MIN_HEX}0601ff")
+    }
+
+    /// `6 / -1`: the in-range twin of [`bigint_x`], -6
+    #[cfg(test)]
+    pub(crate) fn bigint_y() -> alloc::string::String {
+        "9d0601060601ff".into()
     }
 
     /// Each tree's value and cost, or that it errors where no value is given
@@ -1755,7 +1800,7 @@ mod value_check_tests {
             (SType::SShort, Value::Short(1)),
             (SType::SInt, Value::Int(1)),
             (SType::SLong, Value::Long(1)),
-            (SType::SBigInt, Value::BigInt(BigInt256::from(1i64))),
+            (SType::SBigInt, Value::from(BigInt256::from(1i64))),
             (
                 SType::SUnsignedBigInt,
                 Value::UnsignedBigInt(UnsignedBigInt::from(1u64)),

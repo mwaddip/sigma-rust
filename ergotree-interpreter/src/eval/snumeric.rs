@@ -47,7 +47,7 @@ const TO_BYTES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         // `UnsignedBigInt.toBytes` = `BigIntegers.asUnsignedByteArray` (unsigned,
         // minimal length, `0 -> []`). `to_be_vec` already implements both (it is
         // what serialization uses); `to_be_bytes` is the fixed-width form.
-        Value::BigInt(obj) => obj.to_be_vec().into(),
+        Value::BigInt(obj) => bigint256(obj)?.to_be_vec().into(),
         Value::UnsignedBigInt(obj) => obj.to_be_vec().into(),
         other => {
             return Err(EvalError::UnexpectedValue(format!(
@@ -82,7 +82,7 @@ static TO_BITS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         Value::Long(obj) => to_bits(obj.to_be_bytes().as_slice()),
         // Minimal-length bytes, as in TO_BYTES_EVAL_FN: JVM `toBits` derives from
         // the same big-endian byte sequence, so it is minimal-length too.
-        Value::BigInt(obj) => to_bits(obj.to_be_vec().as_slice()),
+        Value::BigInt(obj) => to_bits(bigint256(obj)?.to_be_vec().as_slice()),
         Value::UnsignedBigInt(obj) => to_bits(obj.to_be_vec().as_slice()),
         other => {
             return Err(EvalError::UnexpectedValue(format!(
@@ -99,7 +99,7 @@ static BITWISE_INVERSE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         Value::Short(obj) => (!obj).into(),
         Value::Int(obj) => (!obj).into(),
         Value::Long(obj) => (!obj).into(),
-        Value::BigInt(obj) => (!obj).into(),
+        Value::BigInt(obj) => (!bigint256(obj)?).into(),
         Value::UnsignedBigInt(obj) => (!obj).into(),
         other => {
             return Err(EvalError::UnexpectedValue(format!(
@@ -214,6 +214,14 @@ static BITWISE_XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     })
 };
 
+/// The `BigInt` receiver of a method as the 256-bit type its operations are written for.
+/// sigmastate declares no `BigInt` method below tree version 3, and from version 3 its
+/// constructor refuses a value above 255 bits, so the receiver always fits; a wider one is
+/// an error
+fn bigint256(v: num_bigint::BigInt) -> Result<BigInt256, EvalError> {
+    BigInt256::try_from(v).map_err(EvalError::Misc)
+}
+
 #[inline(never)]
 fn invalid_shift_err() -> EvalError {
     EvalError::Misc("shift value is out of bounds".into())
@@ -245,7 +253,7 @@ static SHIFT_LEFT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             .checked_shl(shift_value)
             .ok_or_else(invalid_shift_err)?
             .into(),
-        Value::BigInt(obj) => obj
+        Value::BigInt(obj) => bigint256(obj)?
             .checked_shl(shift_value)
             .ok_or_else(invalid_shift_err)?
             .into(),
@@ -287,7 +295,7 @@ static SHIFT_RIGHT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             .checked_shr(shift_value)
             .ok_or_else(invalid_shift_err)?
             .into(),
-        Value::BigInt(obj) => obj
+        Value::BigInt(obj) => bigint256(obj)?
             .checked_shr(shift_value)
             .ok_or_else(invalid_shift_err)?
             .into(),

@@ -39,11 +39,13 @@ pub(crate) static NEGATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
 
 pub(crate) static EXPONENTIATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, mut args| {
     ctx.add_jit_cost(900)?;
-    let bigint = args
+    // the exponent as it is: this method is declared below tree version 3, where a `BigInt` can
+    // be outside the 256-bit range
+    let exponent = args
         .pop()
         .ok_or_else(|| EvalError::UnexpectedValue("exponentiate: first argument not found".into()))?
-        .try_extract_into()?;
-    crate::eval::exponentiate::exponentiate(obj.try_extract_into()?, bigint)
+        .try_extract_into::<num_bigint::BigInt>()?;
+    crate::eval::exponentiate::exponentiate(obj.try_extract_into()?, &exponent)
 };
 
 pub(crate) static MULTIPLY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, mut args| {
@@ -141,5 +143,43 @@ mod tests {
             let multiply_node: Expr = MultiplyGroup::new(Constant::from(a).into(), Constant::from(b).into()).unwrap().into();
             assert_eq!(try_eval_out_wo_ctx::<Value>(&mc), try_eval_out_wo_ctx::<Value>(&multiply_node))
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod wide_exponent_tests {
+    use ergo_chain_types::EcPoint;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
+
+    use crate::eval::test_util::{bigint_x, bigint_y, eval_body};
+
+    #[test]
+    fn the_exp_method_takes_a_wide_exponent() {
+        // By reading: `GroupElement.exp` is declared at every tree version (v6.0.6
+        // `methods.scala:647-654`, `:679-688`) and calls the `CGroupElement.exp` the
+        // `Exponentiate` node calls, so a tree below version 3 can hand it a `BigInt` outside
+        // 256 bits. SANTA measured the node (g^(2^255)); the method call is not measured, and
+        // its cost here is sigma-rust's own, that of the in-range twin
+        let point = |hex: &str| Some(Value::from(EcPoint::from_base16_str(hex.into()).unwrap()));
+        // `MethodCall(groupGenerator, GroupElement.exp, BigInt.MIN / -1)`
+        let wide = format!("dc07038201{}", bigint_x());
+        let (res, cost) = eval_body(&wide, ErgoTreeVersion::V0);
+        assert_eq!(
+            res.ok(),
+            point("02b23790a42be63e1b251ad6c94fdef07271ec0aada31db6c3e8bd32043f8be384")
+        );
+        assert_eq!(cost, 949);
+        let (res, _) = eval_body(&wide, ErgoTreeVersion::V3);
+        assert!(res.is_err(), "{res:?}");
+        // the twin, `6 / -1`
+        let (res, cost) = eval_body(&format!("dc07038201{}", bigint_y()), ErgoTreeVersion::V0);
+        assert_eq!(
+            res.ok(),
+            point("02fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556")
+        );
+        assert_eq!(cost, 949);
     }
 }

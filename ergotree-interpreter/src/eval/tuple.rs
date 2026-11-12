@@ -251,7 +251,7 @@ mod non_pair_value_rows {
         assert_throws("0b087b48020202010203");
         assert_accepts(
             "0b067b0e03010203",
-            Value::BigInt(BigInt256::from(66051i64)),
+            Value::from(BigInt256::from(66051i64)),
             35,
         );
         assert_throws("0b0a98040448080808d3d3d3");

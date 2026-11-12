@@ -128,11 +128,10 @@ pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx,
                 ));
             }
             let bytes_vec: Vec<u8> = bytes.iter().map(|&x| x as u8).collect();
-            Ok(Value::BigInt(
-                BigInt256::from_be_slice(&bytes_vec).ok_or_else(|| {
-                    EvalError::UnexpectedValue("Failed to convert to BigInt256".to_string())
-                })?,
-            ))
+            let n = BigInt256::from_be_slice(&bytes_vec).ok_or_else(|| {
+                EvalError::UnexpectedValue("Failed to convert to BigInt256".to_string())
+            })?;
+            Ok(n.into())
         }
         SType::SUnsignedBigInt => {
             if bytes.len() > 32 {
@@ -258,11 +257,13 @@ pub(crate) static DECODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
         .try_extract_into()?;
     // truncation is safe here, since only bottom 4 bytes are used in decode.
     // nbits is only i64 because Scala doesn't have an unsigned 32-bit type
-    Ok(Value::BigInt(
-        decode_compact_bits(nbits as u32)
-            .try_into()
-            .map_err(EvalError::UnexpectedValue)?,
-    ))
+    // A compact encoding can decode above 256 bits: narrowing to the 256-bit type is the
+    // range check sigmastate's `BigInt` constructor makes from tree version 3, where this
+    // method exists
+    let decoded: BigInt256 = decode_compact_bits(nbits as u32)
+        .try_into()
+        .map_err(EvalError::UnexpectedValue)?;
+    Ok(decoded.into())
 };
 pub(crate) static POW_HIT_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, mut args| {
     // Pop arguments first: the Scala cost depends on k and the msg/nonce/h lengths.

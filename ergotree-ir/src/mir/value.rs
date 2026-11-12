@@ -328,7 +328,7 @@ pub enum Value<'ctx> {
     /// Unit struct
     Unit,
     /// Big integer
-    BigInt(BigInt256),
+    BigInt(num_bigint::BigInt),
     /// GroupElement
     GroupElement(Ref<'ctx, EcPoint>),
     /// Sigma property
@@ -381,7 +381,7 @@ impl<'ctx> Value<'ctx> {
             Value::Int(b) => Value::Int(*b),
             Value::Long(b) => Value::Long(*b),
             Value::Unit => Value::Unit,
-            Value::BigInt(b) => Value::BigInt(*b),
+            Value::BigInt(b) => Value::BigInt(b.clone()),
             Value::GroupElement(b) => Value::GroupElement(b.to_static()),
             Value::SigmaProp(p) => Value::SigmaProp(p.clone()),
             Value::UnsignedBigInt(b) => Value::UnsignedBigInt(*b),
@@ -476,7 +476,7 @@ impl From<Literal> for Value<'static> {
             Literal::Short(s) => Value::Short(s),
             Literal::Int(i) => Value::Int(i),
             Literal::Long(l) => Value::Long(l),
-            Literal::BigInt(b) => Value::BigInt(b),
+            Literal::BigInt(b) => Value::BigInt(b.into()),
             Literal::String(s) => Value::String(s),
             Literal::Unit => Value::Unit,
             Literal::SigmaProp(s) => Value::SigmaProp(s),
@@ -806,10 +806,32 @@ impl<'ctx> TryExtractFrom<Value<'ctx>> for Value<'ctx> {
     }
 }
 
-impl TryExtractFrom<Value<'_>> for BigInt256 {
+/// A 256-bit value as a runtime `BigInt` (the enum's derived `From` takes the wide integer)
+impl From<BigInt256> for Value<'_> {
+    fn from(b: BigInt256) -> Self {
+        Value::BigInt(b.into())
+    }
+}
+
+/// A runtime `BigInt` as it is, whatever its width
+impl TryExtractFrom<Value<'_>> for num_bigint::BigInt {
     fn try_extract_from(v: Value) -> Result<Self, TryExtractFromError> {
         match v {
             Value::BigInt(bi) => Ok(bi),
+            _ => Err(TryExtractFromError(format!(
+                "expected {:?}, found {:?}",
+                core::any::type_name::<Self>(),
+                v
+            ))),
+        }
+    }
+}
+
+/// A runtime `BigInt` as the 256-bit data type: an error for a value outside its range
+impl TryExtractFrom<Value<'_>> for BigInt256 {
+    fn try_extract_from(v: Value) -> Result<Self, TryExtractFromError> {
+        match v {
+            Value::BigInt(bi) => BigInt256::try_from(bi).map_err(TryExtractFromError),
             _ => Err(TryExtractFromError(format!(
                 "expected {:?}, found {:?}",
                 core::any::type_name::<Self>(),
