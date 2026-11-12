@@ -18,6 +18,7 @@ impl Evaluable for PropertyCall {
         let ov = self.obj.eval(env, ectx)?;
         // a PropertyCall is sigmastate's MethodCall with no arguments (`values.scala:1351`)
         super::method_call::check_arity(&self.method, 0)?;
+        super::method_call::check_receiver(&self.method, &ov)?;
         let site = MethodCallSite {
             method: &self.method,
             args: &[],

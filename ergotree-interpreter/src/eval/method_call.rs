@@ -23,6 +23,7 @@ impl Evaluable for MethodCall {
             self.args.iter().map(|arg| arg.eval(env, ectx)).collect();
         let argsv = argsv?;
         check_arity(&self.method, argsv.len())?;
+        check_receiver(&self.method, &ov)?;
         let site = MethodCallSite {
             method: &self.method,
             args: &self.args,
@@ -30,6 +31,50 @@ impl Evaluable for MethodCall {
         smethod_eval_fn(&self.method)?(&site, env, ectx, ov, argsv)
     }
 }
+/// sigmastate's parser checks no receiver against the method: the owner is the type code in
+/// the bytes. Its evaluator then gives the receiver's value to the method (v6.0.6
+/// `values.scala:1361-1393`), and every way it does that refuses a value that is not of the
+/// owner's class: the reflective call of a fixed-cost method, looked up on the owner's class
+/// (`SMethod.scala:92-101`, `:119-126`); the `_eval` method of any other, whose receiver
+/// parameter has that class (`SMethod.scala:138-160`); and the numeric handlers' casts
+/// (`methods.scala:314-458`). The exception's class varies, so this is an error and no more.
+/// Measured by SANTA: `MethodCall.receiver_kind` and `MethodCall.numeric_receiver_width`.
+pub(crate) fn check_receiver(method: &SMethod, obj: &Value<'_>) -> Result<(), EvalError> {
+    if receiver_is_of(method.obj_type, obj) {
+        Ok(())
+    } else {
+        Err(EvalError::UnexpectedValue(format!(
+            "method {} of {:?} called on a receiver of another kind",
+            method.name(),
+            method.obj_type
+        )))
+    }
+}
+
+/// Whether `obj` is a value of the owner's class (`SType.scala`, each type's `reprClass`).
+/// The kind only: no range, no item type. A `BigInt` of any magnitude is a `BigInt`, a
+/// collection of any form a `Coll`; a pair is a `Tuple2` and not a collection.
+fn receiver_is_of(owner: STypeCompanion, obj: &Value<'_>) -> bool {
+    match owner {
+        STypeCompanion::SByte => matches!(obj, Value::Byte(_)),
+        STypeCompanion::SShort => matches!(obj, Value::Short(_)),
+        STypeCompanion::SInt => matches!(obj, Value::Int(_)),
+        STypeCompanion::SLong => matches!(obj, Value::Long(_)),
+        STypeCompanion::SBigInt => matches!(obj, Value::BigInt(_)),
+        STypeCompanion::SUnsignedBigInt => matches!(obj, Value::UnsignedBigInt(_)),
+        STypeCompanion::Context => matches!(obj, Value::Context),
+        STypeCompanion::Box => matches!(obj, Value::CBox(_)),
+        STypeCompanion::Coll => matches!(obj, Value::Coll(_)),
+        STypeCompanion::GroupElem => matches!(obj, Value::GroupElement(_)),
+        STypeCompanion::SigmaProp => matches!(obj, Value::SigmaProp(_)),
+        STypeCompanion::Global => matches!(obj, Value::Global),
+        STypeCompanion::Header => matches!(obj, Value::Header(_)),
+        STypeCompanion::PreHeader => matches!(obj, Value::PreHeader(_)),
+        STypeCompanion::Option => matches!(obj, Value::Opt(_)),
+        STypeCompanion::AvlTree => matches!(obj, Value::AvlTree(_)),
+    }
+}
+
 /// sigmastate parses a call of any arity, and its evaluator invokes the method with the
 /// arguments it has, after evaluating them all (v6.0.7 `values.scala:1361-1393`): a reflective
 /// invocation (`javaMethod.invoke`, `evalMethod.invoke`) fails on any other count than the
@@ -150,6 +195,258 @@ mod arity_tests {
             .into();
             assert!(try_eval_out_wo_ctx::<Value>(&mc).is_err());
         }
+    }
+}
+
+/// The call site refuses a receiver that is not of the kind of the method's owner
+/// ([`check_receiver`]): SANTA's rows, the owner table, and the receivers that must still pass
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod receiver_kind_tests {
+    use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use ergo_chain_types::ec_point::generator;
+    use ergo_chain_types::{Header, PreHeader};
+    use ergotree_ir::bigint256::BigInt256;
+    use ergotree_ir::chain::ergo_box::ErgoBox;
+    use ergotree_ir::mir::avl_tree_data::AvlTreeData;
+    use ergotree_ir::mir::coll_value::CollValue;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::value::{Lambda, Value};
+    use ergotree_ir::reference::Ref;
+    use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
+    use ergotree_ir::types::stype::SType;
+    use ergotree_ir::types::stype_companion::STypeCompanion;
+    use ergotree_ir::unsignedbigint256::UnsignedBigInt;
+    use num_traits::Num;
+    use sigma_test_util::force_any_val;
+
+    use super::receiver_is_of;
+    use crate::eval::test_util::{assert_trees, eval_v3_body};
+
+    #[test]
+    fn santa_receiver_kind_rows() {
+        // SANTA `eval/v6/authored/MethodCall.receiver_kind.json` (sigma-state 6.0.7), by row:
+        // the JVM parses each tree and refuses the wrong receiver when it invokes the method
+        let pow_hit = UnsignedBigInt::from_str_radix(
+            "326674862673836209462483453386286740270338859283019276168539876024851191344",
+            10,
+        )
+        .unwrap();
+        assert_trees(&[
+            // 1 `Global.encodeNbits(BigInt 1)`, 2 on `Int 1`, 3 on `CONTEXT`
+            ("0b08dc6a06dd01060101", Some((Value::Long(16842752), 39))),
+            ("0b09dc6a06040201060101", None),
+            ("0b08dc6a06fe01060101", None),
+            // 4 `Global.decodeNbits(16842752L)`, 5 on `Int 1`
+            (
+                "0b0adc6a07dd010580808810",
+                Some((BigInt256::from(1i64).into(), 64)),
+            ),
+            ("0b0bdc6a070402010580808810", None),
+            // 6 `Global.powHit(32, msg, nonce, h, 1048576)`, 7 on `Int 1`
+            (
+                "0b25dc6a08dd0504400e070a101b8c6a4f2e0e08000000000000002c0e04000000000480808001",
+                Some((Value::UnsignedBigInt(pow_hit), 765)),
+            ),
+            (
+                "0b26dc6a0804020504400e070a101b8c6a4f2e0e08000000000000002c0e04000000000480808001",
+                None,
+            ),
+            // 9 `getVarFromInput[Int](0, 1)` on `Global`, 10 on `Int 1`
+            ("0b0adc650cdd020300020104", None),
+            ("0b0bdc650c0402020300020104", None),
+        ]);
+        // 8 the same call on `CONTEXT`: `None` @25 in SANTA's context, which binds no variable.
+        // This context is random, so the row pins an option and the cost
+        let (_, res, cost) = eval_v3_body("0b0adc650cfe020300020104");
+        assert!(matches!(res, Ok(Value::Opt(_))), "{res:?}");
+        assert_eq!(cost, 25);
+    }
+
+    #[test]
+    fn santa_numeric_receiver_width_rows() {
+        // SANTA `eval/v6/authored/MethodCall.numeric_receiver_width.json` (sigma-state 6.0.7):
+        // the numeric handlers cast the receiver to the OWNER's class, the type code in the
+        // bytes (`methods.scala:314-458`), so a value of another width throws
+        let bytes = |b: &[i8]| Value::Coll(CollValue::Bytes(b.into()));
+        assert_trees(&[
+            // N0 `SLong.toBytes` on `Long 1`, N1 on `Int 1`
+            (
+                "0b05db05060502",
+                Some((bytes(&[0, 0, 0, 0, 0, 0, 0, 1]), 14)),
+            ),
+            ("0b05db05060402", None),
+            // N2 `SInt.toBytes`, N3 `SInt.toBits`, N4 `SInt.bitwiseInverse`, each on `Long 1`
+            ("0b05db04060502", None),
+            ("0b05db04070502", None),
+            ("0b05db04080502", None),
+            // N5 `SLong.shiftLeft(1)` on `Long 1`, N6 on `Int 1`; N7 `SLong.shiftRight(1)` on `Int 1`
+            ("0b08dc050c0502010402", Some((Value::Long(2), 19))),
+            ("0b08dc050c0402010402", None),
+            ("0b08dc050d0402010402", None),
+            // N8 `SBigInt.toBytes`, N9 `SByte.toBytes`, N10 `SLong.bitwiseOr(1)`, each on `Int 1`
+            ("0b05db06060402", None),
+            ("0b05db02060402", None),
+            ("0b08dc05090402010402", None),
+            // A1 `SLong.bitwiseOr(Int 1)` on `Long 1`: the ARGUMENT is of another width
+            ("0b08dc05090502010402", None),
+        ]);
+    }
+
+    /// The variant of a value, written out so that a new variant fails to compile here
+    fn variant(v: &Value) -> &'static str {
+        match v {
+            Value::Boolean(_) => "Boolean",
+            Value::Byte(_) => "Byte",
+            Value::Short(_) => "Short",
+            Value::Int(_) => "Int",
+            Value::Long(_) => "Long",
+            Value::Unit => "Unit",
+            Value::BigInt(_) => "BigInt",
+            Value::GroupElement(_) => "GroupElement",
+            Value::SigmaProp(_) => "SigmaProp",
+            Value::UnsignedBigInt(_) => "UnsignedBigInt",
+            Value::CBox(_) => "CBox",
+            Value::AvlTree(_) => "AvlTree",
+            Value::Coll(_) => "Coll",
+            Value::Pair(_) => "Pair",
+            Value::Context => "Context",
+            Value::String(_) => "String",
+            Value::Header(_) => "Header",
+            Value::PreHeader(_) => "PreHeader",
+            Value::Global => "Global",
+            Value::Opt(_) => "Opt",
+            Value::Lambda(_) => "Lambda",
+        }
+    }
+
+    #[test]
+    fn the_owner_table_accepts_exactly_its_own_kind() {
+        let ints = || CollValue::Ints(vec![1, 2].into());
+        let values: Vec<Value<'static>> = vec![
+            Value::Boolean(true),
+            Value::Byte(1),
+            Value::Short(1),
+            Value::Int(1),
+            Value::Long(1),
+            Value::Unit,
+            Value::BigInt(num_bigint::BigInt::from(1)),
+            // wider than 256 bits (below tree version 3): the check is of the kind only
+            Value::BigInt(num_bigint::BigInt::from(1) << 255u32),
+            Value::from(generator()),
+            Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
+            Value::UnsignedBigInt(UnsignedBigInt::from(1u32)),
+            Value::CBox(Ref::from(force_any_val::<ErgoBox>())),
+            Value::AvlTree(Box::new(force_any_val::<AvlTreeData>())),
+            // a collection in each of its forms
+            Value::Coll(CollValue::Bytes(vec![1i8].into())),
+            Value::Coll(CollValue::Booleans(vec![true].into())),
+            Value::Coll(ints()),
+            Value::Coll(CollValue::generic(SType::SLong, vec![Value::Long(1)])),
+            Value::Coll(CollValue::Pairs {
+                ls: Arc::new(ints()),
+                rs: Arc::new(ints()),
+            }),
+            Value::pair(Value::Int(1), Value::Int(2)),
+            Value::Context,
+            Value::String("a".into()),
+            Value::Header(Box::new(force_any_val::<Header>())),
+            Value::PreHeader(Box::new(force_any_val::<PreHeader>())),
+            Value::Global,
+            Value::Opt(Some(Box::new(Value::Int(1)))),
+            Value::Opt(None),
+            Value::Lambda(Lambda {
+                args: vec![],
+                body: Arc::new(Expr::Const(1i32.into())),
+                captured: Default::default(),
+            }),
+        ];
+        // every variant is offered
+        let mut offered: Vec<&str> = values.iter().map(variant).collect();
+        offered.sort_unstable();
+        offered.dedup();
+        assert_eq!(offered.len(), 21);
+        // sigmastate's class of each owner (`SType.scala`, `reprClass`), as the variant holding it
+        let owners = [
+            (STypeCompanion::SByte, "Byte"),
+            (STypeCompanion::SShort, "Short"),
+            (STypeCompanion::SInt, "Int"),
+            (STypeCompanion::SLong, "Long"),
+            (STypeCompanion::SBigInt, "BigInt"),
+            (STypeCompanion::SUnsignedBigInt, "UnsignedBigInt"),
+            (STypeCompanion::Context, "Context"),
+            (STypeCompanion::Box, "CBox"),
+            (STypeCompanion::Coll, "Coll"),
+            (STypeCompanion::GroupElem, "GroupElement"),
+            (STypeCompanion::SigmaProp, "SigmaProp"),
+            (STypeCompanion::Global, "Global"),
+            (STypeCompanion::Header, "Header"),
+            (STypeCompanion::PreHeader, "PreHeader"),
+            (STypeCompanion::Option, "Opt"),
+            (STypeCompanion::AvlTree, "AvlTree"),
+        ];
+        for (owner, takes) in owners {
+            for v in &values {
+                assert_eq!(
+                    receiver_is_of(owner, v),
+                    variant(v) == takes,
+                    "{owner:?} on a {}",
+                    variant(v)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_right_receiver_evaluates_for_every_owner() {
+        // Rust's own costs on fork `master` `f3c2cbc7`: a guard against a wrong row in the
+        // owner table. Header, PreHeader and AvlTree receivers are covered by the suites of
+        // `eval/sheader.rs`, `eval/spreheader.rs` and `eval/savltree.rs`
+        for (tree_hex, cost) in [
+            ("0b05db02060201", 14),           // SByte.toBytes on Byte 1
+            ("0b05db03060302", 14),           // SShort.toBytes on Short 1
+            ("0b05db04060402", 14),           // SInt.toBytes on Int 1
+            ("0b05db05060502", 14),           // SLong.toBytes on Long 1
+            ("0b06db0606060101", 14),         // SBigInt.toBytes on BigInt 1
+            ("0b06db0906090101", 14),         // SUnsignedBigInt.toBytes on UnsignedBigInt 1
+            ("0b0adb0c0183020404020404", 48), // Coll.size on Coll(1, 2)
+            ("0b08db2402db6a0add04", 28),     // Option.isDefined on Global.none[Int]
+            ("0b08dc6a06dd01060101", 39),     // Global.encodeNbits(BigInt 1)
+            ("0b0adc650cfe020300020104", 25), // CONTEXT.getVarFromInput[Int](0, 1)
+            ("0b04db6301a7", 22),             // Box.value on SELF
+            ("0b07db0702db6a01dd", 273),      // GroupElement.getEncoded on groupGenerator
+        ] {
+            let (_, res, c) = eval_v3_body(tree_hex);
+            assert!(res.is_ok(), "{tree_hex}: {res:?}");
+            assert_eq!(c, cost, "{tree_hex}");
+        }
+    }
+
+    #[test]
+    fn a_pair_is_not_a_collection_receiver() {
+        // by reading: a `Tuple` node of two items evaluates to a `Tuple2`, which is not a
+        // `Coll` (`values.scala:824-837`); a tuple CONSTANT of three items is the `Coll[Any]`
+        // its data holds (`Evaluation.scala:99-101`). `(1, 2).size`, the node, and
+        // `(1, 2, 3).size`, the constant, through `Coll.size`
+        assert_trees(&[
+            ("0b09db0c01860204020404", None),
+            ("0b0adb0c0148040404020406", Some((Value::Int(3), 23))),
+        ]);
+    }
+
+    #[test]
+    fn an_any_typed_receiver_is_judged_by_its_value() {
+        // by reading: the receiver is `(1, 2, 3)(0)`, an `Int` typed `Any`; the handler casts
+        // the VALUE to the owner's class (`methods.scala:314-321`), so `SLong.toBytes` throws
+        assert_trees(&[("0b0edb0506b248040404020406040000", None)]);
+        // and `SInt.toBytes` returns (Rust's own cost)
+        let (_, res, cost) = eval_v3_body("0b0edb0406b248040404020406040000");
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(cost, 49);
     }
 }
 

@@ -12,14 +12,8 @@ use ergotree_ir::types::stype::SType;
 use super::EvalError;
 use super::EvalFn;
 
-pub(crate) static DATA_INPUTS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+pub(crate) static DATA_INPUTS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
     ctx.add_jit_cost(15)?;
-    if obj != Value::Context {
-        return Err(EvalError::UnexpectedValue(format!(
-            "Context.dataInputs: expected object of Value::Context, got {:?}",
-            obj
-        )));
-    }
     Ok(Value::Coll(CollValue::Generic {
         items: ctx.data_inputs.clone().map_or(Arc::new([]), |d| {
             d.iter().map(|&di| Ref::from(di)).map(Value::CBox).collect()
@@ -28,14 +22,8 @@ pub(crate) static DATA_INPUTS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     }))
 };
 
-pub(crate) static SELF_BOX_INDEX_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+pub(crate) static SELF_BOX_INDEX_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
     ctx.add_jit_cost(20)?;
-    if obj != Value::Context {
-        return Err(EvalError::UnexpectedValue(format!(
-            "Context.selfBoxIndex: expected object of Value::Context, got {:?}",
-            obj
-        )));
-    }
     // JVM bug compatibility: selfBoxIndex always returned -1 before JIT
     // activation (v5.0). The bug was `eq` (reference equality) instead of
     // `==` (value equality) in CostingDataContext.scala — a global impl
@@ -53,14 +41,8 @@ pub(crate) static SELF_BOX_INDEX_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| 
     Ok(Value::Int(box_index as i32))
 };
 
-pub(crate) static HEADERS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+pub(crate) static HEADERS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
     ctx.add_jit_cost(15)?;
-    if obj != Value::Context {
-        return Err(EvalError::UnexpectedValue(format!(
-            "Context.headers: expected object of Value::Context, got {:?}",
-            obj
-        )));
-    }
     Ok(Value::Coll(CollValue::Generic {
         items: ctx
             .headers
@@ -71,38 +53,20 @@ pub(crate) static HEADERS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     }))
 };
 
-pub(crate) static PRE_HEADER_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+pub(crate) static PRE_HEADER_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
     ctx.add_jit_cost(15)?;
-    if obj != Value::Context {
-        return Err(EvalError::UnexpectedValue(format!(
-            "Context.preHeader: expected object of Value::Context, got {:?}",
-            obj
-        )));
-    }
     Ok(Box::from(ctx.pre_header.clone()).into())
 };
 
-pub(crate) static LAST_BLOCK_UTXO_ROOT_HASH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+pub(crate) static LAST_BLOCK_UTXO_ROOT_HASH_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
     ctx.add_jit_cost(15)?;
-    if obj != Value::Context {
-        return Err(EvalError::UnexpectedValue(format!(
-            "Context.LastBlockUtxoRootHash: expected object of Value::Context, got {:?}",
-            obj
-        )));
-    }
     // The root is a standalone context input, as in the JVM (`CContext` returns
     // `lastBlockUtxoRootHash` directly, never deriving it from `headers(0)`).
     Ok(Value::AvlTree(Box::from(ctx.last_block_utxo_root.clone())))
 };
 
-pub(crate) static MINER_PUBKEY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
+pub(crate) static MINER_PUBKEY_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
     ctx.add_jit_cost(20)?;
-    if obj != Value::Context {
-        return Err(EvalError::UnexpectedValue(format!(
-            "Context.preHeader: expected object of Value::Context, got {:?}",
-            obj
-        )));
-    }
     Ok(ctx
         .pre_header
         .miner_pk
