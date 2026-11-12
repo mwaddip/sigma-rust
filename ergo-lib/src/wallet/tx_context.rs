@@ -22,6 +22,7 @@ use ergotree_interpreter::sigma_protocol::verifier::{
 use ergotree_ir::chain::context::{CostLimitExceeded, TxIoVec};
 use ergotree_ir::chain::ergo_box::{BoxTokens, ErgoBox};
 use ergotree_ir::chain::token::{TokenAmount, TokenId};
+use ergotree_ir::ergo_tree::{ErgoTree, ErgoTreeHeader};
 use thiserror::Error;
 
 use super::signing::{make_context, update_context};
@@ -350,6 +351,21 @@ fn verify_output(
     output: &ErgoBox,
     max_creation_height: u32,
 ) -> Result<(), TxValidationError> {
+    // A tree that was kept without being parsed and has no size flag has no length on the
+    // wire: a reader of the box's bytes refuses the tree, or reads on into the box's next
+    // fields. Only `ErgoTree::sigma_parse_bytes` keeps one (JSON, P2S addresses, the
+    // bindings); the box and transaction reader never does, so no output read from the
+    // wire is refused here. sigmastate has no such tree (`ErgoTreeSerializer.scala:204-207`
+    // throws), so it has no such transaction to validate.
+    if let ErgoTree::Unparsed { tree_bytes, .. } = &output.ergo_tree {
+        let sized = matches!(
+            tree_bytes.first().map(|b| ErgoTreeHeader::new(*b)),
+            Some(Ok(header)) if header.has_size()
+        );
+        if !sized {
+            return Err(TxValidationError::UnsizedTreeNotParsed(output.box_id()));
+        }
+    }
     // `verifyOutput` measures `ErgoBox.bytes`, which ergo writes under its default version
     // context (`ErgoTransaction.scala:171-175`, `BoxUtils.scala:41`)
     let box_size = output.bytes()?.len() as u64;
@@ -848,6 +864,23 @@ mod test {
         tx_context.validate(&state_context).unwrap();
     }
     #[test]
+    // An output holding a tree that `sigma_parse_bytes` kept without a size flag (an `Int`
+    // root) makes the transaction invalid: its own bytes do not read back
+    fn a_transaction_creating_an_unsized_tree_that_did_not_parse_is_invalid((boxes, mut tx) in valid_transaction_generator()) {
+        use ergotree_ir::serialization::SigmaSerializable;
+        let state_context = force_any_val();
+        {
+            let slice: &mut [ErgoBox] = tx.outputs.as_mut();
+            slice[0].ergo_tree = ErgoTree::sigma_parse_bytes(&[0x00, 0x04, 0x02]).unwrap();
+        }
+        prop_assert!(Transaction::sigma_parse_bytes(&tx.sigma_serialize_bytes().unwrap()).is_err());
+        let tx_context = TransactionContext::new(tx, boxes, vec![]).unwrap();
+        match tx_context.validate(&state_context) {
+            Err(TxValidationError::UnsizedTreeNotParsed(_)) => {},
+            e => panic!("Expected validation to fail got {e:?}")
+        }
+    }
+    #[test]
     fn test_ergo_preservation((mut boxes, mut tx) in valid_transaction_generator(), positive_delta: bool, change_output: bool) {
         let state_context = force_any_val();
 
@@ -1048,6 +1081,46 @@ mod test {
             verify_output(&state_context, &output, 0),
             Err(TxValidationError::SigmaSerializationError(_))
         ));
+    }
+
+    #[test]
+    fn an_output_whose_unsized_tree_did_not_parse_is_refused() {
+        // `ErgoTree::sigma_parse_bytes` keeps a tree without the size flag that it cannot
+        // parse (JSON, P2S addresses and the bindings read trees through it). Such a tree
+        // has no length on the wire: the box's bytes do not read back as the box. sigmastate
+        // has no such tree (`ErgoTreeSerializer.scala:204-207`), so no such transaction.
+        use super::verify_output;
+        use ergotree_ir::serialization::SigmaSerializable;
+        let output = |tree: &[u8]| {
+            ErgoBox::new(
+                BoxValue::SAFE_USER_MIN,
+                ErgoTree::sigma_parse_bytes(tree).unwrap(),
+                None,
+                NonMandatoryRegisters::empty(),
+                0,
+                TxId::zero(),
+                0,
+            )
+            .unwrap()
+        };
+        let mut state_context: ErgoStateContext = force_any_val();
+        state_context.pre_header.height = 1;
+        // an `Int` root; a body that ends after the header
+        for tree in [&[0x00, 0x04, 0x02][..], &[0x00]] {
+            assert!(
+                matches!(
+                    verify_output(&state_context, &output(tree), 0),
+                    Err(TxValidationError::UnsizedTreeNotParsed(_))
+                ),
+                "{tree:02x?}"
+            );
+        }
+        // Controls. The same `Int` root behind a size degrades as on the JVM, and an output
+        // may hold such a tree; `sigmaProp(true)` without a size flag parses.
+        for tree in [&[0x08, 0x02, 0x04, 0x02][..], &[0x00, 0x08, 0xd3]] {
+            let res = verify_output(&state_context, &output(tree), 0);
+            assert!(res.is_ok(), "{tree:02x?}: {res:?}");
+        }
     }
 
     /// The state SANTA's spends are validated in (transaction tier): its parameters and

@@ -65,6 +65,11 @@ pub enum TxValidationError {
     #[error("Output box size {0} > maximum {max_size}", max_size = ErgoBox::MAX_SCRIPT_SIZE)]
     /// Script size is > [ErgoBox::MAX_SCRIPT_SIZE]
     ScriptSizeExceeded(usize),
+    /// An output's script was kept without being parsed and has no size flag
+    /// (`ErgoTree::sigma_parse_bytes` keeps such a tree). It has no length on the wire, so
+    /// the box's bytes cannot be read back as the box
+    #[error("Output {0}: its script has no size flag and did not parse, so the box cannot be read back from its bytes")]
+    UnsizedTreeNotParsed(BoxId),
     #[error("TX context error: {0}")]
     /// Transaction Context Error
     TransactionContextError(#[from] TransactionContextError),
