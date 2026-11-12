@@ -340,8 +340,9 @@ impl ErgoTree {
     ///
     /// `arbitrary`-gated test/conformance support (the same surface as
     /// `test_util`): it is NOT part of the default-shipped API — production parsing
-    /// (`sigma_parse` / `sigma_parse_bytes`) keeps the root check, as real
-    /// ErgoTrees are always `SigmaProp`-rooted. Used by this crate's and
+    /// keeps the root check, as real ErgoTrees are always `SigmaProp`-rooted
+    /// (`sigma_parse` rejects an unsized tree that fails it; `sigma_parse_bytes`
+    /// keeps such a tree as `Unparsed`). Used by this crate's and
     /// `ergotree-interpreter`'s blessed-byte eval tests and by the SANTA runner.
     #[cfg(feature = "arbitrary")]
     pub fn sigma_parse_bytes_lenient(bytes: &[u8]) -> Result<Self, SigmaParsingError> {
@@ -446,7 +447,9 @@ impl ErgoTree {
     /// The tree's bytes as sigmastate's `ErgoTree.bytes` gives them (v6.0.6
     /// `ErgoTree.scala:123-130`): the bytes a parsed tree was read from, whatever their
     /// encoding; the written tree for one built in memory; the raw bytes of a tree that
-    /// degraded. A script reads these (`Box.propositionBytes`, R1). A writer does not: it
+    /// degraded. A tree that [`SigmaSerializable::sigma_parse_bytes`] kept without a size
+    /// flag has no declared length: its raw bytes are the whole input, bytes after the tree
+    /// included. A script reads these (`Box.propositionBytes`, R1). A writer does not: it
     /// builds the bytes again ([`SigmaSerializable::sigma_serialize`], sigmastate's
     /// `serializeErgoTree`), so a box, an id or a transaction that a writer builds never
     /// carries them.
@@ -562,7 +565,8 @@ impl ErgoTree {
     /// sigmastate's `template` (v6.0.6 `ErgoTree.scala:168-171`): what follows the constants
     /// in the tree's bytes ([`ErgoTree::bytes`]). For a parsed tree that is its root in the
     /// encoding it was read in; for a tree built in memory, the written root; for a tree that
-    /// degraded, its raw bytes after the constants, or the error if its constants do not read.
+    /// degraded, its raw bytes after the constants, or the error if its constants do not read
+    /// (for a tree kept without a size flag, the rest of the whole input).
     pub fn template_bytes(&self) -> Result<Vec<u8>, ErgoTreeError> {
         match self {
             ErgoTree::Parsed(ParsedErgoTree {
@@ -2294,6 +2298,62 @@ mod tree_window_tests {
         assert!(matches!(
             ErgoTree::sigma_parse_bytes(&bytes),
             Err(SigmaParsingError::Io(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod unsized_fallback_tests {
+    //! `sigma_parse_bytes` keeps a tree without the size flag that it cannot parse as
+    //! `Unparsed`, with the whole input (upstream `develop`, `fff0d9d5`). This is not
+    //! sigmastate's behaviour: `deserializeErgoTree` throws there
+    //! (`ErgoTreeSerializer.scala:204-207`), as `ErgoTree::sigma_parse`, the box and
+    //! transaction reader, still does. These tests pin where the fallback stops.
+    use super::*;
+
+    #[test]
+    fn a_header_that_does_not_read_is_still_an_error() {
+        // no header byte; then a version 1 header without the size bit (rule 1012)
+        assert!(ErgoTree::sigma_parse_bytes(&[]).is_err());
+        assert_eq!(
+            ErgoTree::sigma_parse_bytes(&[0x01, 0x08, 0xd3]),
+            Err(SigmaParsingError::ErgoTreeHeaderError(
+                ErgoTreeHeaderError::InvalidSizeBit(1)
+            ))
+        );
+    }
+
+    #[test]
+    fn an_unsized_tree_is_kept_on_any_body_failure() {
+        // The body ends after the header: no `ValidationException` on the JVM, a failure a
+        // size-flagged tree does not degrade on either. Kept all the same.
+        let tree = ErgoTree::sigma_parse_bytes(&[0x00]).unwrap();
+        assert!(matches!(tree, ErgoTree::Unparsed { tree_bytes, .. } if tree_bytes == [0x00]));
+        // An `Int` root (rule 1001): the reader's own error is kept inside the tree
+        let tree = ErgoTree::sigma_parse_bytes(&[0x00, 0x04, 0x02]).unwrap();
+        assert!(matches!(
+            tree,
+            ErgoTree::Unparsed {
+                error: ErgoTreeError::SigmaParsingError(
+                    SigmaParsingError::UnsizedTreeValidationError(_)
+                ),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_sized_tree_degrades_with_its_declared_bytes_as_before() {
+        // the same `Int` root behind a size, and a byte after the tree: degraded by the
+        // reader, not by the fallback, so the byte after the declared size is not kept
+        let tree = ErgoTree::sigma_parse_bytes(&[0x08, 0x02, 0x04, 0x02, 0x00]).unwrap();
+        assert!(matches!(
+            tree,
+            ErgoTree::Unparsed {
+                tree_bytes,
+                error: ErgoTreeError::RootTpeError(SType::SInt),
+            } if tree_bytes == [0x08, 0x02, 0x04, 0x02]
         ));
     }
 }
