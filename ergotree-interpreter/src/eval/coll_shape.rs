@@ -169,10 +169,11 @@ fn matches_at<'ctx>(
 /// `safeConcatArrays_v5`): an empty left side, unless a `PairOfCols`, returns the right side as it
 /// is; a specialised left side casts the right side's array to its own, empty or not; a generic
 /// one copies both into an array of its own item type, where a primitive array takes only the
-/// same primitive array, even an empty one, and a reference array takes any item whose class fits
-/// it (none to check when empty), and the result keeps the LEFT's item type. A `PairOfCols` unzips
-/// the right side and appends side by side. SANTA `Coll.append_runtime_item_type`,
-/// `Append.reference_array_store`
+/// same primitive array, even an empty one, and a reference array takes any reference array's
+/// items whose class fits it (none to check when empty; [`CollValue::from_array`] refuses the
+/// others), and the result keeps the LEFT's item type. A `PairOfCols` unzips the right side and
+/// appends side by side. SANTA `Coll.append_runtime_item_type`, `Append.reference_array_store`,
+/// `Coll.append_node_array_class`
 pub(crate) fn append<'ctx>(
     left: &CollValue<'ctx>,
     right: &CollValue<'ctx>,
@@ -197,20 +198,17 @@ pub(crate) fn append<'ctx>(
             Ok(left.rebuild_like(left.as_vec().into_iter().chain(right.as_vec()).collect())?)
         }
         CollValue::Generic { elem_tpe, items } => {
-            let right_items = right.as_vec();
-            let fits = match primitive_array(left) {
+            // `arraycopy` looks at the two ARRAYS first: a primitive one takes only the same
+            // primitive one, a reference one no primitive one, whatever the lengths
+            let arrays_fit = match primitive_array(left) {
                 Some(_) => same_primitive_array(left, right),
-                None => {
-                    primitive_array(right).is_none()
-                        && right_items
-                            .iter()
-                            .all(|item| fits_reference_array(item, elem_tpe))
-                }
+                None => primitive_array(right).is_none(),
             };
-            if !fits {
+            if !arrays_fit {
                 return Err(refuse());
             }
-            let all = items.iter().cloned().chain(right_items).collect();
+            // then each item of a reference array is stored into the left's class
+            let all = items.iter().cloned().chain(right.as_vec()).collect();
             Ok(CollValue::from_array(elem_tpe.clone(), all)?)
         }
     }
@@ -229,31 +227,173 @@ fn unzip<'ctx>(coll: &CollValue<'ctx>) -> Option<(CollValue<'ctx>, CollValue<'ct
     }
 }
 
-/// Whether `item` fits a JVM array of `elem_tpe`'s reference class: `System.arraycopy` checks each
-/// item's class against the array's, so a `Coll` of any item type fits a `Coll` array, and a `Box`
-/// does not fit a `GroupElement` array (SANTA `Coll.append_runtime_item_type` #4, #5)
-fn fits_reference_array(item: &Value<'_>, elem_tpe: &SType) -> bool {
-    match elem_tpe {
-        SType::SAny => true,
-        SType::SColl(_) => matches!(item, Value::Coll(_)),
-        SType::STuple(t) if t.items.len() == 2 => matches!(item, Value::Pair(_)),
-        // a tuple of other than two items is a `Coll[Any]` on the JVM (`Tuple.value`)
-        SType::STuple(_) => matches!(item, Value::Coll(_)),
-        SType::SOption(_) => matches!(item, Value::Opt(_)),
-        SType::SBox => matches!(item, Value::CBox(_)),
-        SType::SGroupElement => matches!(item, Value::GroupElement(_)),
-        SType::SBigInt => matches!(item, Value::BigInt(_)),
-        SType::SUnsignedBigInt => matches!(item, Value::UnsignedBigInt(_)),
-        SType::SSigmaProp => matches!(item, Value::SigmaProp(_)),
-        SType::SAvlTree => matches!(item, Value::AvlTree(_)),
-        SType::SHeader => matches!(item, Value::Header(_)),
-        SType::SPreHeader => matches!(item, Value::PreHeader(_)),
-        SType::SUnit => matches!(item, Value::Unit),
-        SType::SContext => matches!(item, Value::Context),
-        SType::SGlobal => matches!(item, Value::Global),
-        SType::SString => matches!(item, Value::String(_)),
-        SType::SFunc(_) => matches!(item, Value::Lambda(_)),
-        _ => false,
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod typed_array_store {
+    use ergotree_ir::mir::value::Value;
+
+    use crate::eval::test_util::assert_trees;
+
+    /// An `Int` at a cost, as an `assert_trees` row expects it; every tree's root is a `SizeOf`
+    fn v(n: i32, cost: u64) -> Option<(Value<'static>, u64)> {
+        Some((Value::Int(n), cost))
+    }
+
+    /// A single store into a `Coll[Unit]` is checked like any other: `updated` casts the item to
+    /// `BoxedUnit`, `updateMany` and a pair's side store into a `BoxedUnit[]`, `Append` copies
+    /// arrays (SANTA 6.0.7, the third reply: R4, R5, R6, X7, X8)
+    #[test]
+    fn a_single_store_into_a_unit_array_is_checked() {
+        assert_trees(&[
+            ("0b0db1dc0c14830162620204000402", None), // R4 `ConcreteCollection[Unit](()).updated(0, 1)`
+            ("0b0fb1dc0c158301626202100100100102", None), // R5 `ConcreteCollection[Unit](()).updateMany(Coll(0), Coll[Int] constant (1))`
+            ("0b0ab1b383016262830163a7", None), // R6 `ConcreteCollection[Unit](()) ++ Coll[Box](SELF)`
+            (
+                "0b25b1dc0c15dc0c1d83010404020183016262028301040400dc0c1d830104040201830104040e",
+                None,
+            ), // X7 `Coll(1).zip(CC[Unit](())).updateMany(Coll(0), Coll(1).zip(Coll(7)))`
+            (
+                "0b1ab1dc0c14dc0c1d8301040402018301626202040086020402040e",
+                None,
+            ), // X8 `Coll(1).zip(CC[Unit](())).updated(0, (1, 7))`
+        ]);
+    }
+
+    /// `map` stores each result into an array of the STATIC result's class (the mapper
+    /// expression's range), from a plain receiver and from a `PairOfCols` alike (v6.0.6
+    /// `CollsOverArrays.scala:28-31`, `:317-323`). A mapper that is an `If` of two lambdas gets a
+    /// value past the lambdas' own result checks, and the array refuses it; a `Tuple2[]` takes
+    /// any pair (SANTA's third reply: P1-P4, X5, X6, X11)
+    #[test]
+    fn map_stores_into_an_array_of_the_static_result_class() {
+        assert_trees(&[
+            (
+                "0b19b1addc0c1d10010201100102950100d9010158a7d901015882",
+                None,
+            ), // P1 `Coll(1).zip(Coll(1)).map(If(false, {p => SELF}, {p => groupGenerator}))`
+            ("0b12b1ad100102950100d9010104a7d901010482", None), // P2 `Coll(1).map(If(false, {x => SELF}, {x => groupGenerator}))`
+            (
+                "0b21b1addc0c1d10010201100102950100d901015886020402a7d90101588602040282",
+                v(1, 115),
+            ), // P3 the pair receiver, `{p => (1, SELF)}` and `{p => (1, groupGenerator)}`
+            (
+                "0b1db1addc0c1d10010201100102950100d901015886020402a7d901015882",
+                None,
+            ), // P4 the pair receiver, `{p => (1, SELF)}` and `{p => groupGenerator}`
+            ("0b15b1ad8301040402950100d901010462d90101040402", None), // X5 `Coll(1).map(If(false, {x => ()}, {x => 1}))`
+            (
+                "0b1eb1addc0c1d8301040402018301040402950100d901015862d90101580402",
+                None,
+            ), // X6 the same over `Coll(1).zip(Coll(1))`
+            ("0b0cb1ad8301040402d901010462", v(1, 75)), // X11 `Coll(1).map({x => ()})`
+        ]);
+    }
+
+    /// No array can be built for a type variable (`stypeToRType` throws), so nothing is stored
+    /// under one (SANTA's third reply: R8, A2)
+    #[test]
+    fn a_type_variable_has_no_array() {
+        assert_trees(&[
+            ("0b17b1dc0c0f10010201d90101049501008300670154100102", None), // R8 `Coll(1).flatMap({x => If(false, Coll[T](), Coll[Int] constant (1))})`
+            (
+                "0b1cb1b3dc0c0f10010201d90101049501008300670154100102830163a7",
+                None,
+            ), // A2 R8 `++ Coll[Box](SELF)`
+        ]);
+    }
+
+    /// `updated` and `patch` store into the receiver's array, which takes only items of its class;
+    /// nothing compares item types (SANTA 6.0.7: `Coll.reference_store_ops`, the first reply's A, B and X
+    /// rows)
+    #[test]
+    fn the_store_goes_by_the_arrays_class() {
+        assert_trees(&[
+            // `updated`
+            ("0b0cb1dc0c14830163a702040082", None), // A1 `Coll[Box](SELF).updated(0, groupGenerator)`
+            ("0b17b1dc0c14dc0c1d10010201830163a70204008602040282", None), // A2 `Coll(1).zip(Coll[Box](SELF)).updated(0, (1, groupGenerator))`
+            (
+                "0b17b1dc0c14dc0c1d10010201830163a702040086020402a7",
+                v(1, 124),
+            ), // A3 `Coll(1).zip(Coll[Box](SELF)).updated(0, (1, SELF))`
+            ("0b0fb1dc0c144804040402040602040082", v(3, 59)), // A4 `(1,2,3).updated(0, groupGenerator)`
+            ("0b0db1dc0c14830163a70204000402", None),         // A5 `Coll[Box](SELF).updated(0, 1)`
+            // `patch`: only the patch's ITEMS reach the array
+            ("0b11b1dc0c13830163a7030400830107820400", None), // B1 `Coll[Box](SELF).patch(0, Coll[GroupElement](g), 0)`
+            ("0b10b1dc0c13830163a70304008300070400", v(1, 110)), // B2 `Coll[Box](SELF).patch(0, Coll[GroupElement](), 0)`
+            (
+                "0b19b1dc0c13830110830104040203040083011183010505020400",
+                v(2, 150),
+            ), // B3 `Coll[Coll[Int]](Coll(1)).patch(0, Coll[Coll[Long]](Coll(1L)), 0)`
+            ("0b10b1dc0c13830163a70304001001020400", None), // B4 `Coll[Box](SELF).patch(0, Coll[Int] constant (1), 0)`
+            ("0b15b1dc0c131003020406030400480404040e10120400", v(6, 70)), // B5 `Coll[Int] constant (1,2,3).patch(0, (7,8,9), 0)`
+            (
+                "0b19b1dc0c13830304040204040406030400480404040e10120400",
+                v(6, 100),
+            ), // B6 `ConcreteCollection[Int](1,2,3).patch(0, (7,8,9), 0)`
+            ("0b13b1dc0c131003020406030400830104040e0400", v(4, 90)), // B7 `Coll[Int] constant (1,2,3).patch(0, ConcreteCollection[Int](7), 0)`
+            ("0b11b1dc0c1310030204060304008300050400", v(3, 85)), // B8 `Coll[Int] constant (1,2,3).patch(0, ConcreteCollection[Long](), 0)`
+            // other item classes and receivers (SANTA X1-X5)
+            ("0b0eb1dc0c1483010606010102040082", None), // X1 `Coll[BigInt].updated(0, g)`
+            ("0b0eb1dc0c14830128e3070402040082", None), // X2 `Coll[Option[Int]].updated(0, g)`
+            ("0b15b1dc0c1483017001040400d9010104720102040082", None), // X3 `Coll[Int => Int].updated(0, g)`
+            ("0b0bb1dc0c140e010102040082", None), // X4 `Coll[Byte] const.updated(0, g)`
+            ("0b09b1dc0c14a402040082", None),     // X5 `INPUTS.updated(0, g)`
+        ]);
+    }
+
+    /// The array is the collection VALUE's, whatever the static type says (SANTA
+    /// `Coll.store_runtime_array_class`). K2-K4: the JVM by reading; Rust measured with blitzen on
+    /// `e46ed668` and on the trial
+    #[test]
+    fn the_store_goes_by_the_runtime_array() {
+        assert_trees(&[
+        // the collection VALUE's item type decides, never the static type (SANTA X9, X11, X20, X21)
+        ("0b16b1dc0c1495010083010404028301050502020400040a", None), // X9 `If(false, Coll(1), Coll(1L)).updated(0, 5)`
+        ("0b11b1db0c1e95010083010404028301050502", v(1, 80)), // X11 `If(false, Coll(1), Coll(1L)).reverse`
+        ("0b09b1b383006383010782", v(1, 86)), // X20 `Coll[Box]() ++ Coll[GroupElement](g)`
+        ("0b10b1dc0c14b383006383010782020400a7", None), // X21 `(Coll[Box]() ++ Coll[GroupElement](g)).updated(0, SELF)`
+        // decoded data is over a typed array too (K2, K3: the JVM by reading)
+        ("0b2bb1dc0c1413010279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798020400a7", None), // K2 `Coll[GroupElement] constant (g).updated(0, SELF)`
+        ("0b2bb1dc0c1413010279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179802040082", v(1, 59)), // K3 `Coll[GroupElement] constant (g).updated(0, groupGenerator)`
+        // an `Any` array takes everything (K4: the JVM by reading)
+        ("0b14b1dc0c1348040404020406030400830163a70400", v(4, 95)), // K4 `(1,2,3).patch(0, Coll[Box](SELF), 0)`
+        ]);
+    }
+
+    /// `map`, `flatMap` and a pair collection's sides fill arrays of the result's classes (SANTA's first
+    /// reply D rows, second reply G rows). K1: the JVM by reading, the mechanism of G3
+    #[test]
+    fn a_producer_stores_into_a_typed_array() {
+        assert_trees(&[
+        // `map`: the closure's result check comes first (D1, D7), a class-compatible lie passes (D2)
+        ("0b0eb1ad100102d9010104950100a782", None), // D1 `Coll(1).map({x => If(false, SELF, groupGenerator)})`
+        ("0b16b1ad100102d901010495010083010404028301050502", v(1, 90)), // D2 `Coll(1).map({x => If(false, Coll(1), Coll(1L))})`
+        ("0b15b1addc0c1d10010201100102d9010158950100a782", None), // D7 `Coll(1).zip(Coll(1)).map({p => If(false, SELF, groupGenerator)})`
+        ("0b11b1addc0c1d10010201100102d9010158a7", v(1, 80)), // D8 `Coll(1).zip(Coll(1)).map({p => SELF})`
+        // `flatMap` copies each part's items into the result's array
+        ("0b17b1dc0c0f10010201d9010104950100830163a783010782", None), // D3 `Coll(1).flatMap({x => If(false, Coll[Box](SELF), Coll[GroupElement](g))})`
+        ("0b1fb1dc0c0f10010201d901010495010083011083010404028301118301050502", v(1, 163)), // D4 `Coll(1).flatMap({x => If(false, Coll[Coll[Int]](Coll(1)), Coll[Coll[Long]](Coll(1L)))})`
+        // a pair's component is stored into its side's array (`fromBoxedPairs`)
+        ("0b16b1ad100102d901010495010086020402a78602040282", None), // G1 `Coll(1).map({x => If(false, (1, SELF), (1, g))})`
+        ("0b1db1addc0c1d10010201100102d901015895010086020402a78602040282", v(1, 115)), // G2 `Coll(1).zip(Coll(1)).map({p => If(false, (1, SELF), (1, g))})`
+        ("0b20b1db0c1eaddc0c1d10010201100102d901015895010086020402a78602040282", None), // G3 `G2.reverse`
+        ("0b28b1dc0c14addc0c1d10010201100102d901015895010086020402a7860204028202040086020402a7", v(1, 175)), // G4 `G2.updated(0, (1, SELF))`
+        // a rebuild of a collection that hides a misfit (K1: the JVM by reading, as G3)
+        ("0b22b1b4addc0c1d10010201100102d901015895010086020402a7860204028204000402", None), // K1 `G2.slice(0, 1)`
+        ]);
+    }
+
+    /// `Append` copies ARRAYS (`System.arraycopy`), so an empty array of another kind is refused where
+    /// an empty patch is not (SANTA `Coll.append_node_array_class`); unchanged by this round
+    #[test]
+    fn append_copies_arrays() {
+        assert_trees(&[
+            ("0b0ab1b3830163a783010782", None), // X8 `Coll[Box](SELF) ++ Coll[GroupElement](g)`
+            ("0b09b1b3830163a7830007", v(1, 86)), // X14 `Coll[Box](SELF) ++ Coll[GroupElement]()`
+            ("0b0ab1b31003020406830005", None), // X17 `Coll[Int] const (1,2,3) ++ ConcreteCollection[Long]()`
+            ("0b0fb1b310030204068603040e04100412", None), // X18 `Coll[Int] const (1,2,3) ++ (7,8,9)`
+            ("0b0cb1b31003020406830104040e", v(4, 66)), // X19 `Coll[Int] const (1,2,3) ++ ConcreteCollection[Int](7)`
+        ]);
     }
 }
 

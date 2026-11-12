@@ -63,9 +63,13 @@ impl<'ctx> CollValue<'ctx> {
     /// `CollsOverArrays.scala:226-232`): never specialised; a pair item type gives a `PairOfCols`
     /// whose sides are built the same way from each component (`fromBoxedPairs`, `:205-215`), any
     /// other item type a generic collection. A pair item type with an item that is not a pair is an
-    /// error, as the JVM's `asInstanceOf[(A, B)]` throws; so is a primitive item type (`Boolean`,
-    /// `Byte`, `Short`, `Int`, `Long`) with an item of another type, as the JVM holds those items
-    /// in a primitive array, whose store unboxes (SANTA `Coll.item_store_type_check` #0-#9)
+    /// error, as the JVM's `asInstanceOf[(A, B)]` throws. So is an item whose class does not fit
+    /// the array of the item type ([`fits_array`]): sigmastate hands `fromArray` an array of that
+    /// class, and the JVM refuses the store that would put another class into it, in `updated`,
+    /// `patch`, `updateMany`, `map`, `flatMap` and a pair collection's sides (SANTA
+    /// `Coll.item_store_type_check`, `Coll.reference_store_ops`, `Coll.store_runtime_array_class`).
+    /// One store is not checked on the JVM, and its caller leaves it out: a builder handed items
+    /// for a `Coll[Unit]` with `++=` (the interpreter's `coll_shape::unit_builder_items`)
     pub fn from_array(
         elem_tpe: SType,
         items: Vec<Value<'ctx>>,
@@ -78,7 +82,7 @@ impl<'ctx> CollValue<'ctx> {
             Err(_) if pair_item_types(&elem_tpe).is_some() => Err(TryExtractFromError(format!(
                 "a collection of {elem_tpe:?} holds an item that is not a pair"
             ))),
-            Err(items) => match items.iter().find(|v| !fits_primitive_array(&elem_tpe, v)) {
+            Err(items) => match items.iter().find(|v| !fits_array(&elem_tpe, v)) {
                 Some(item) => Err(TryExtractFromError(format!(
                     "a collection of {elem_tpe:?} cannot hold {item:?}"
                 ))),
@@ -208,16 +212,42 @@ impl<'ctx> CollValue<'ctx> {
     }
 }
 
-/// Whether `item` can be stored into a JVM array of `elem_tpe`'s items: a primitive item type takes
-/// only its own values; any other item type is not checked here
-fn fits_primitive_array(elem_tpe: &SType, item: &Value<'_>) -> bool {
+/// Whether `item` can be stored into the JVM array of `elem_tpe`'s items. A primitive item type
+/// has a primitive array, whose store unboxes the item, so it takes only its own values; any other
+/// has an array of the item type's class, which takes any item of that class and no other (an
+/// `ArrayStoreException`): a `Coll` of any item type fits a `Coll` array, a `Box` does not fit a
+/// `GroupElement` array. The classes are those of the item type's `RType` class tag (v6.0.6
+/// `Evaluation.scala:22-55`, `RType.scala`). SANTA `Coll.item_store_type_check`,
+/// `Coll.reference_store_ops`, `Coll.append_runtime_item_type` #4, #5
+fn fits_array(elem_tpe: &SType, item: &Value<'_>) -> bool {
     match elem_tpe {
         SType::SBoolean => matches!(item, Value::Boolean(_)),
         SType::SByte => matches!(item, Value::Byte(_)),
         SType::SShort => matches!(item, Value::Short(_)),
         SType::SInt => matches!(item, Value::Int(_)),
         SType::SLong => matches!(item, Value::Long(_)),
-        _ => true,
+        // an `Object[]`
+        SType::SAny => true,
+        // no JVM array exists for these (`stypeToRType` throws), so nothing can be stored
+        SType::STypeVar(_) | SType::SNoType => false,
+        SType::SColl(_) => matches!(item, Value::Coll(_)),
+        SType::STuple(t) if t.items.len() == 2 => matches!(item, Value::Pair(_)),
+        // a tuple of other than two items is a `Coll[Any]` on the JVM (`Tuple.value`)
+        SType::STuple(_) => matches!(item, Value::Coll(_)),
+        SType::SOption(_) => matches!(item, Value::Opt(_)),
+        SType::SBox => matches!(item, Value::CBox(_)),
+        SType::SGroupElement => matches!(item, Value::GroupElement(_)),
+        SType::SBigInt => matches!(item, Value::BigInt(_)),
+        SType::SUnsignedBigInt => matches!(item, Value::UnsignedBigInt(_)),
+        SType::SSigmaProp => matches!(item, Value::SigmaProp(_)),
+        SType::SAvlTree => matches!(item, Value::AvlTree(_)),
+        SType::SHeader => matches!(item, Value::Header(_)),
+        SType::SPreHeader => matches!(item, Value::PreHeader(_)),
+        SType::SUnit => matches!(item, Value::Unit),
+        SType::SContext => matches!(item, Value::Context),
+        SType::SGlobal => matches!(item, Value::Global),
+        SType::SString => matches!(item, Value::String(_)),
+        SType::SFunc(_) => matches!(item, Value::Lambda(_)),
     }
 }
 
@@ -364,6 +394,164 @@ impl<'ctx> TryFrom<CollValue<'ctx>> for CollKind<Literal> {
                     .collect::<Result<Arc<[Literal]>, String>>()?,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod array_class {
+    use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use ergo_chain_types::ec_point::generator;
+    use ergo_chain_types::{Header, PreHeader};
+    use sigma_test_util::force_any_val;
+
+    use super::CollValue;
+    use crate::chain::ergo_box::ErgoBox;
+    use crate::mir::avl_tree_data::AvlTreeData;
+    use crate::mir::constant::Constant;
+    use crate::mir::expr::Expr;
+    use crate::mir::func_value::FuncArg;
+    use crate::mir::value::{Lambda, Value};
+    use crate::sigma_protocol::sigma_boolean::SigmaProp;
+    use crate::types::sfunc::SFunc;
+    use crate::types::stuple::STuple;
+    use crate::types::stype::SType;
+    use crate::types::stype_param::STypeVar;
+    use crate::unsignedbigint256::UnsignedBigInt;
+
+    /// One item type per JVM array class, with a value of that class
+    fn classes() -> Vec<(SType, Value<'static>)> {
+        let lambda = Lambda {
+            args: vec![FuncArg {
+                idx: 1.into(),
+                tpe: SType::SInt,
+            }],
+            body: Arc::new(Expr::Const(Constant::from(1i32))),
+            captured: Default::default(),
+        };
+        vec![
+            (SType::SBoolean, Value::Boolean(true)),
+            (SType::SByte, Value::Byte(1)),
+            (SType::SShort, Value::Short(1)),
+            (SType::SInt, Value::Int(1)),
+            (SType::SLong, Value::Long(1)),
+            (SType::SBigInt, Value::BigInt(1.into())),
+            (
+                SType::SUnsignedBigInt,
+                Value::UnsignedBigInt(force_any_val::<UnsignedBigInt>()),
+            ),
+            (SType::SGroupElement, Value::from(generator())),
+            (
+                SType::SSigmaProp,
+                Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
+            ),
+            (SType::SBox, Value::CBox(force_any_val::<ErgoBox>().into())),
+            (
+                SType::SAvlTree,
+                Value::AvlTree(Box::new(force_any_val::<AvlTreeData>())),
+            ),
+            (
+                SType::SHeader,
+                Value::Header(Box::new(force_any_val::<Header>())),
+            ),
+            (
+                SType::SPreHeader,
+                Value::PreHeader(Box::new(force_any_val::<PreHeader>())),
+            ),
+            (SType::SUnit, Value::Unit),
+            (SType::SContext, Value::Context),
+            (SType::SGlobal, Value::Global),
+            (SType::SString, Value::String("a".into())),
+            (
+                SType::SOption(SType::SInt.into()),
+                Value::Opt(Some(Box::new(Value::Int(1)))),
+            ),
+            (
+                SType::SColl(SType::SInt.into()),
+                Value::Coll(CollValue::Ints([1].into())),
+            ),
+            (
+                SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)),
+                Value::Lambda(lambda),
+            ),
+        ]
+    }
+
+    /// A JVM array takes its own class and refuses every other: a primitive one unboxes the item
+    /// (`ClassCastException`), a reference one checks its class (`ArrayStoreException`); SANTA
+    /// `Coll.item_store_type_check`, `Coll.reference_store_ops`
+    #[test]
+    fn an_array_takes_only_its_own_class() {
+        let rows = classes();
+        for (i, (tpe, _)) in rows.iter().enumerate() {
+            for (j, (_, value)) in rows.iter().enumerate() {
+                let built = CollValue::from_array(tpe.clone(), vec![value.clone()]);
+                assert_eq!(built.is_ok(), i == j, "{tpe:?} <- {value:?}");
+            }
+        }
+    }
+
+    /// The class is all the array checks: the item type inside a collection or an option is not
+    /// looked at (SANTA U11), and a tuple of other than two items is a collection
+    #[test]
+    fn a_class_ignores_the_item_type_inside() {
+        let coll_of_longs = Value::Coll(CollValue::generic(SType::SLong, vec![Value::Long(1)]));
+        let option_of_long = Value::Opt(Some(Box::new(Value::Long(1))));
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        for (tpe, value) in [
+            (SType::SColl(SType::SInt.into()), coll_of_longs.clone()),
+            (SType::SOption(SType::SInt.into()), option_of_long),
+            (triple.clone(), coll_of_longs),
+        ] {
+            assert!(
+                CollValue::from_array(tpe.clone(), vec![value.clone()]).is_ok(),
+                "{tpe:?} <- {value:?}"
+            );
+        }
+        // and nothing else is a tuple of three
+        assert!(CollValue::from_array(triple, vec![Value::Int(1)]).is_err());
+    }
+
+    /// `Any` is an `Object[]`: it takes every class
+    #[test]
+    fn any_takes_everything() {
+        for (_, value) in classes() {
+            assert!(
+                CollValue::from_array(SType::SAny, vec![value.clone()]).is_ok(),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// A type variable and `NoType` have no JVM array at all (`stypeToRType` throws), so nothing
+    /// can be stored under one; SANTA's third reply R8, A2
+    #[test]
+    fn a_type_without_a_runtime_type_takes_no_item() {
+        for tpe in [SType::STypeVar(STypeVar::t()), SType::SNoType] {
+            for (_, value) in classes() {
+                assert!(
+                    CollValue::from_array(tpe.clone(), vec![value.clone()]).is_err(),
+                    "{tpe:?} <- {value:?}"
+                );
+            }
+            assert!(CollValue::from_array(tpe, vec![]).is_ok());
+        }
+    }
+
+    /// A pair collection stores each component into its side's array (`fromBoxedPairs`; SANTA G1)
+    #[test]
+    fn a_pair_collection_refuses_a_component_of_another_class() {
+        let tpe = SType::STuple(STuple::pair(SType::SInt, SType::SBox));
+        let a_box = Value::CBox(force_any_val::<ErgoBox>().into());
+        let good = CollValue::from_array(tpe.clone(), vec![Value::pair(Value::Int(1), a_box)]);
+        assert!(matches!(good, Ok(CollValue::Pairs { .. })), "{good:?}");
+        let lie = Value::pair(Value::Int(1), Value::from(generator()));
+        assert!(CollValue::from_array(tpe, vec![lie]).is_err());
     }
 }
 
