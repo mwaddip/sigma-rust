@@ -2,13 +2,11 @@
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use core::convert::TryInto;
-use num_bigint::ToBigInt;
 
 use alloc::vec::Vec;
 use ergo_chain_types::Header;
 use ergotree_ir::{
-    bigint256::BigInt256,
+    ergo_tree::ErgoTreeVersion,
     mir::{
         avl_tree_data::{AvlTreeData, AvlTreeFlags},
         constant::TryExtractInto,
@@ -16,7 +14,7 @@ use ergotree_ir::{
     },
 };
 
-use super::{EvalError, EvalFn};
+use super::{fits_256_bits, EvalError, EvalFn};
 
 pub(crate) static VERSION_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(10)?;
@@ -116,16 +114,18 @@ pub(crate) static POW_NONCE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
 pub(crate) static POW_DISTANCE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     ctx.add_jit_cost(10)?;
     let header = obj.try_extract_into::<Header>()?;
-    #[allow(clippy::unwrap_used)] // unsigned->signed conversion never fails
-    let pow_distance: BigInt256 = header
-        .autolykos_solution
-        .pow_distance
-        .unwrap_or_default()
-        .to_bigint()
-        .unwrap()
-        .try_into()
-        .map_err(EvalError::Misc)?;
-    Ok(pow_distance.into())
+    // A version 1 header carries a `d` of any width. sigmastate builds the `BigInt` at access,
+    // under the script's tree version (v6.0.6 `CHeader.scala:59`), and its constructor refuses
+    // a value above 255 bits from tree version 3 only (`CBigInt.scala:18-20`): below it the
+    // script gets `d` as it is (SANTA's reply `sigma-rust-bigint-range-reply.md`, section 4)
+    let pow_distance =
+        num_bigint::BigInt::from(header.autolykos_solution.pow_distance.unwrap_or_default());
+    if ctx.tree_version() >= ErgoTreeVersion::V3 && !fits_256_bits(&pow_distance) {
+        return Err(EvalError::Misc(format!(
+            "Header.powDistance: {pow_distance} does not fit into 256 bits"
+        )));
+    }
+    Ok(Value::BigInt(pow_distance))
 };
 
 pub(crate) static VOTES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
@@ -395,6 +395,89 @@ mod tests {
             base16::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn santa_pow_distance_rows() {
+        // SANTA's reply `sigma-rust-bigint-range-reply.md`, section 4 (sigma-state 6.0.7,
+        // measured through the transaction tier, so values and errors only). A version 1
+        // header carries a `d` of any width; `CHeader.powDistance` builds the `BigInt` at
+        // access, under the script's tree version (v6.0.6 `CHeader.scala:59`): below version 3
+        // the script gets `d` as it is, from version 3 a `d` above 255 bits throws at the read.
+        // The controls `d = 1` and `d = 2^255 - 1` are measured as in-range values at both
+        // versions; their `false` answers follow from the values (by reading)
+        use ergotree_ir::ergo_tree::ErgoTreeVersion;
+        use ergotree_ir::mir::bin_op::{ArithOp, BinOp, BinOpKind, RelationOp};
+        use num_bigint::BigUint;
+        use num_traits::Bounded;
+
+        let read = || create_get_header_property_expr(sheader::POW_DISTANCE_PROPERTY.clone());
+        let big = |v: BigInt256| Expr::Const(v.into());
+        let n = |v: i64| big(BigInt256::from(v));
+        let bin = |kind: BinOpKind, left: Expr, right: Expr| -> Expr {
+            BinOp {
+                kind,
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+            .into()
+        };
+        let gt = |left: Expr, right: Expr| bin(RelationOp::Gt.into(), left, right);
+        // P1 `powDistance > 0`
+        let p1 = gt(read(), n(0));
+        // P2 `powDistance == BigInt.MIN / -1`
+        let p2 = bin(
+            RelationOp::Eq.into(),
+            read(),
+            bin(ArithOp::Divide.into(), big(BigInt256::min_value()), n(-1)),
+        );
+        // P3 `powDistance / 1 > BigInt.MAX`: the division is unchecked
+        let p3 = gt(
+            bin(ArithOp::Divide.into(), read(), n(1)),
+            big(BigInt256::max_value()),
+        );
+        // P4 `powDistance - 1 > 0`: the subtraction checks its result
+        let p4 = gt(bin(ArithOp::Minus.into(), read(), n(1)), n(0));
+        // P0: reads no header
+        let p0 = gt(Expr::Const(1i64.into()), Expr::Const(2i64.into()));
+
+        let eval = |expr: &Expr, d: &BigUint, version: ErgoTreeVersion| -> Option<bool> {
+            let mut ctx = force_any_val::<Context>();
+            let mut headers = ctx.headers.as_vec().clone();
+            headers[HEADER_INDEX].version = 1;
+            headers[HEADER_INDEX].autolykos_solution.pow_distance = Some(d.clone());
+            ctx.headers = headers.try_into().unwrap();
+            ctx.tree_version.set(version);
+            crate::eval::test_util::try_eval_out::<bool>(expr, &ctx).ok()
+        };
+        let one = BigUint::from(1u8);
+        let p255: BigUint = one.clone() << 255usize;
+        let ds = [
+            one.clone(),
+            p255.clone() - 1u8,
+            p255.clone(),
+            (one.clone() << 256usize) + 1u8,
+            one.clone() << 2039usize,
+        ];
+        let (v0, v3) = (ErgoTreeVersion::V0, ErgoTreeVersion::V3);
+        let answers = |expr: &Expr, version| {
+            ds.iter()
+                .map(|d| eval(expr, d, version))
+                .collect::<Vec<_>>()
+        };
+        let (t, f) = (Some(true), Some(false));
+
+        // below tree version 3 the script holds `d` whatever its width
+        assert_eq!(answers(&p1, v0), [t, t, t, t, t]);
+        assert_eq!(answers(&p2, v0), [f, f, t, f, f]);
+        assert_eq!(answers(&p3, v0), [f, f, t, t, t]);
+        assert_eq!(answers(&p4, v0), [f, t, t, None, None]);
+        // from tree version 3 a `d` above 255 bits throws at the read
+        assert_eq!(answers(&p1, v3), [t, t, None, None, None]);
+        assert_eq!(answers(&p3, v3), [f, f, None, None, None]);
+        assert_eq!(answers(&p4, v3), [f, t, None, None, None]);
+        // and the header alone breaks nothing: a script that does not read it evaluates
+        assert_eq!(answers(&p0, v3), [f, f, f, f, f]);
     }
 
     #[test]
