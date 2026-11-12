@@ -132,7 +132,7 @@ mod size_tests {
         // versions, without a degrade (SANTA case 5b)
         let body = format!("d1938c8680{}010402", "0402".repeat(128));
         for hex in [format!("00{body}"), format!("0b8802{body}")] {
-            let res = ErgoTree::sigma_parse_bytes(&base16::decode(&hex).unwrap());
+            let res = ErgoTree::sigma_parse_bytes_no_fallback(&base16::decode(&hex).unwrap());
             assert!(
                 matches!(res, Err(SigmaParsingError::NegativeTupleSize(-128))),
                 "{res:?}"

@@ -116,10 +116,10 @@ mod tests {
 #[allow(clippy::unwrap_used)]
 mod register_id_tests {
     use crate::ergo_tree::ErgoTree;
-    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+    use crate::serialization::SigmaParsingError;
 
     fn tree(hex: &str) -> Result<ErgoTree, SigmaParsingError> {
-        ErgoTree::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap())
+        ErgoTree::sigma_parse_bytes_no_fallback(&base16::decode(hex.as_bytes()).unwrap())
     }
 
     #[test]

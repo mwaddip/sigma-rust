@@ -321,6 +321,16 @@ impl ErgoTree {
         tree
     }
 
+    /// A standalone tree read as a box or a transaction reads it: sigmastate's
+    /// `deserializeErgoTree`, on a reader set up as [`SigmaSerializable::sigma_parse_bytes`]
+    /// sets it up. Tests that pin a parse refusal read through it, so that they do not
+    /// depend on what `sigma_parse_bytes` does with a tree it cannot parse.
+    #[cfg(test)]
+    pub(crate) fn sigma_parse_bytes_no_fallback(bytes: &[u8]) -> Result<Self, SigmaParsingError> {
+        let mut r = SigmaByteReader::new(Cursor::new(bytes), ConstantStore::empty());
+        r.with_tree_version(ErgoTreeVersion::MAX_SCRIPT_VERSION, ErgoTree::sigma_parse)
+    }
+
     /// Parse an ErgoTree from bytes WITHOUT the `SigmaProp` root-type check.
     /// Mirrors sigma-state's `ErgoTreeSerializer.deserializeErgoTree(.., checkType
     /// = false)` (a `private[sigma]` overload): the real header parse runs (so
@@ -1632,7 +1642,7 @@ mod depth_limit_tests {
             unsized_bytes.extend([0x08, OpCode::TRIVIAL_PROP_TRUE.value()]);
             assert!(
                 matches!(
-                    ErgoTree::sigma_parse_bytes(&unsized_bytes),
+                    ErgoTree::sigma_parse_bytes_no_fallback(&unsized_bytes),
                     Err(SigmaParsingError::UnsizedTreeValidationError(_))
                 ),
                 "{constant:02x?}"
@@ -2809,7 +2819,7 @@ mod collection_input_tests {
         ] {
             assert!(
                 matches!(
-                    ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap()),
+                    ErgoTree::sigma_parse_bytes_no_fallback(&base16::decode(hex).unwrap()),
                     Err(SigmaParsingError::CollectionInputExpected(_))
                 ),
                 "{hex}"
@@ -2825,7 +2835,7 @@ mod collection_input_tests {
         for hex in ["00d193b183010405020402", "080ad193b183010405020402"] {
             assert!(
                 matches!(
-                    ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap()),
+                    ErgoTree::sigma_parse_bytes_no_fallback(&base16::decode(hex).unwrap()),
                     Err(SigmaParsingError::CollectionItemTypeMismatch(_))
                 ),
                 "{hex}"
@@ -3170,7 +3180,7 @@ mod small_tuple_tests {
     use super::*;
 
     fn parse(hex: &str) -> Result<ErgoTree, SigmaParsingError> {
-        ErgoTree::sigma_parse_bytes(&base16::decode(hex).unwrap())
+        ErgoTree::sigma_parse_bytes_no_fallback(&base16::decode(hex).unwrap())
     }
 
     #[test]

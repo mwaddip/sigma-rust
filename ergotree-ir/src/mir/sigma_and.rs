@@ -150,7 +150,7 @@ mod bounds_tests {
         // the change too: the cap is `Vec<T>`'s, and it is the one bound the node keeps. The
         // error is the cap's: no item follows the count, so any reader fails here.
         assert_eq!(
-            ErgoTree::sigma_parse_bytes(&tree(&[0xa1, 0x8d, 0x06], 0)),
+            ErgoTree::sigma_parse_bytes_no_fallback(&tree(&[0xa1, 0x8d, 0x06], 0)),
             Err(SigmaParsingError::ArrayLengthExceeded(100001))
         );
     }

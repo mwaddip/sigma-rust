@@ -224,7 +224,7 @@ mod tests {
         ]
         .concat();
         assert!(matches!(
-            ErgoTree::sigma_parse_bytes(&bytes),
+            ErgoTree::sigma_parse_bytes_no_fallback(&bytes),
             Err(SigmaParsingError::InvalidTypePrefix)
         ));
     }

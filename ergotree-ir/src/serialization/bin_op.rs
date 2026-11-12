@@ -194,7 +194,7 @@ mod pair_form_tests {
             for bytes in [unsized_tree, sized_tree] {
                 assert!(
                     matches!(
-                        ErgoTree::sigma_parse_bytes(&bytes),
+                        ErgoTree::sigma_parse_bytes_no_fallback(&bytes),
                         Err(SigmaParsingError::BitOpOperandsNotNumeric(..))
                     ),
                     "{bytes:02x?}"
