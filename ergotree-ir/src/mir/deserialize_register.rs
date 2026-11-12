@@ -131,7 +131,7 @@ mod tests {
 #[allow(clippy::unwrap_used)]
 mod register_id_tests {
     use crate::ergo_tree::ErgoTree;
-    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+    use crate::serialization::SigmaParsingError;
 
     #[test]
     fn a_register_id_outside_r0_to_r9_rejects_a_size_flagged_tree() {
@@ -139,7 +139,7 @@ mod register_id_tests {
         // here size-flagged: the NoSuchElementException does not degrade
         for hex in ["00d50a0800", "0804d50a0800"] {
             assert!(matches!(
-                ErgoTree::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap()),
+                ErgoTree::sigma_parse_bytes_no_fallback(&base16::decode(hex.as_bytes()).unwrap()),
                 Err(SigmaParsingError::RegisterIdOutOfRange(10))
             ));
         }

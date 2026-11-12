@@ -60,8 +60,11 @@ mod non_pair_value_rows {
     use alloc::vec::Vec;
     use ergotree_ir::bigint256::BigInt256;
     use ergotree_ir::ergo_tree::ErgoTree;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
     use ergotree_ir::mir::coll_value::CollValue;
     use ergotree_ir::mir::value::Value;
+    use ergotree_ir::serialization::sigma_byte_reader;
+    use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
     use ergotree_ir::serialization::SigmaSerializable;
     use ergotree_ir::sigma_protocol::sigma_boolean::{SigmaBoolean, SigmaProp};
     use ergotree_ir::types::stype::SType;
@@ -313,7 +316,11 @@ mod non_pair_value_rows {
             "00d191b2480404040204060400000402",
         ] {
             let bytes = base16::decode(tree_hex.as_bytes()).unwrap();
-            assert!(ErgoTree::sigma_parse_bytes(&bytes).is_err(), "{tree_hex}");
+            // read as a box reads it: `sigma_parse_bytes` is not the strict reader for an
+            // unsized tree
+            let res = sigma_byte_reader::from_bytes(&bytes)
+                .with_tree_version(ErgoTreeVersion::MAX_SCRIPT_VERSION, ErgoTree::sigma_parse);
+            assert!(res.is_err(), "{tree_hex}");
         }
         // EQ of two `Any` operands and an arithmetic operation parse and throw at evaluation
         // ("Unknown type SAny"; no `Any` in `ArithOp.impls`): SANTA

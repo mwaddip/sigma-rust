@@ -212,7 +212,7 @@ mod index_upcast_tests {
     use crate::serialization::{SigmaParsingError, SigmaSerializable};
 
     fn tree(hex: &str) -> Result<ErgoTree, SigmaParsingError> {
-        ErgoTree::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap())
+        ErgoTree::sigma_parse_bytes_no_fallback(&base16::decode(hex.as_bytes()).unwrap())
     }
 
     #[test]
