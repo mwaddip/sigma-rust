@@ -213,15 +213,13 @@ pub(crate) static INDICES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
 };
 
 pub(crate) static PATCH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let (normalized_input_vals, receiver) = match obj {
-        Value::Coll(coll) => Ok((coll.as_vec(), coll)),
+    let receiver = match obj {
+        Value::Coll(coll) => Ok(coll),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected obj to be Value::Coll, got: {0:?}",
             obj
         ))),
     }?;
-    let n = normalized_input_vals.len() as u32;
-    ctx.add_per_item_jit_cost(30, 2, 10, n)?;
     let from_index_val = args
         .first()
         .cloned()
@@ -238,22 +236,21 @@ pub(crate) static PATCH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let from = from_index_val.try_extract_into::<i32>()?.max(0) as usize;
     let replaced = replaced_val.try_extract_into::<i32>()?.max(0) as usize;
     let patch = match patch_val {
-        Value::Coll(coll) => Ok(coll.as_vec()),
+        Value::Coll(coll) => Ok(coll),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected patch arg to be Value::Coll, got: {0:?}",
             patch_val
         ))),
     }?;
-
-    let res = normalized_input_vals
-        .iter()
-        .take(from)
-        .chain(patch.iter())
-        .chain(normalized_input_vals.iter().skip(from + replaced))
-        .cloned()
-        .collect::<Arc<[_]>>();
-    // the receiver's class (`builder.fromArray` inside the receiver)
-    Ok(Value::Coll(receiver.rebuild_like(res.to_vec())?))
+    // `patch_eval` charges per item of the receiver and of the patch (v6.0.6
+    // `methods.scala:1027`, `nItems = xs.length + patch.length`; SANTA
+    // `Coll.reference_store_ops` F1: 10 + 1 items are two chunks). Its arguments are typed, so
+    // a patch that is not a collection fails before the charge
+    let n_items = receiver.len().saturating_add(patch.len());
+    ctx.add_per_item_jit_cost(30, 2, 10, n_items as u32)?;
+    Ok(Value::Coll(super::coll_shape::patch(
+        &receiver, from, &patch, replaced,
+    )?))
 };
 
 pub(crate) static UPDATED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {

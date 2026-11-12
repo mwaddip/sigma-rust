@@ -3,6 +3,7 @@
 //! answer
 
 use alloc::format;
+use alloc::vec::Vec;
 
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::value::Value;
@@ -211,6 +212,68 @@ pub(crate) fn append<'ctx>(
             let all = items.iter().cloned().chain(right.as_vec()).collect();
             Ok(CollValue::from_array(elem_tpe.clone(), all)?)
         }
+    }
+}
+
+/// `Coll.patch` as the receiver's JVM class runs it: `from` items of the receiver, then the
+/// items of `other`, then the receiver's from `from + replaced` on. A `PairOfCols` unzips `other`
+/// first and patches side by side (v6.0.6 `CollsOverArrays.scala:423-428`), and the unzip reads
+/// the item type of anything that is not a `PairOfCols` as a pair type (`:245-258`), so a patch
+/// that is not a collection of pairs is refused though it is empty (SANTA
+/// `Coll.reference_store_ops` B9). Any other receiver hands the builder of its own array the
+/// patch's ITEMS (`:94-98`): an empty patch stores nothing, whatever its class, a tuple's boxed
+/// `Int`s go into an `int[]` (SANTA B2, B5, B8), and a `Coll[Unit]` takes them all as units
+/// ([`unit_builder_items`])
+pub(crate) fn patch<'ctx>(
+    coll: &CollValue<'ctx>,
+    from: usize,
+    other: &CollValue<'ctx>,
+    replaced: usize,
+) -> Result<CollValue<'ctx>, EvalError> {
+    match coll {
+        CollValue::Pairs { ls, rs } => {
+            let (other_ls, other_rs) = unzip(other).ok_or_else(|| {
+                EvalError::UnexpectedValue(format!(
+                    "patch: a collection of {:?} cannot take a collection of {:?}",
+                    coll.elem_tpe(),
+                    other.elem_tpe()
+                ))
+            })?;
+            Ok(CollValue::pairs(
+                patch(ls, from, &other_ls, replaced)?,
+                patch(rs, from, &other_rs, replaced)?,
+            ))
+        }
+        _ => {
+            let items = coll.as_vec();
+            let kept_from = from.saturating_add(replaced);
+            let patched = items
+                .iter()
+                .take(from)
+                .cloned()
+                .chain(unit_builder_items(&coll.elem_tpe(), other.as_vec()))
+                .chain(items.iter().skip(kept_from).cloned())
+                .collect();
+            Ok(coll.rebuild_like(patched)?)
+        }
+    }
+}
+
+/// The items a Scala array builder of `elem_tpe` keeps of the `items` it is handed with `++=`,
+/// as `patch` hands it the patch and `flatMap` each part. `ArrayBuilder.ofUnit` only counts them
+/// and stores `()` for each, so a `Coll[Unit]` takes items of any class that way and holds units
+/// after; every other builder stores the items, and the array refuses the ones that do not fit
+/// ([`CollValue::from_array`]). A single store into a `Coll[Unit]` is checked like any other
+/// (`updated`, `updateMany`, `map`, `Append`). SANTA 6.0.7 on scala-library 2.12.20, the third
+/// reference-store reply: R1, R2, R3, Q1, R9, X9 against R4, R5, R6, X5-X8
+pub(crate) fn unit_builder_items<'ctx>(
+    elem_tpe: &SType,
+    items: Vec<Value<'ctx>>,
+) -> Vec<Value<'ctx>> {
+    if *elem_tpe == SType::SUnit {
+        items.into_iter().map(|_| Value::Unit).collect()
+    } else {
+        items
     }
 }
 
@@ -429,6 +492,74 @@ mod typed_array_store {
                 "0b1ddc0c1583020404020404028301040400950100830104040a830105050a",
                 None,
             ), // row 1: a `Long` into an `int[]` clone
+        ]);
+    }
+
+    /// Scala's `ArrayBuilder.ofUnit` counts what `++=` hands it and stores `()`: `patch` hands
+    /// its builder the patch's items that way (v6.0.6 `CollsOverArrays.scala:94-98`), so a
+    /// `Coll[Unit]` takes a patch of any class, on its own and as a pair's side, and holds units
+    /// after (SANTA's third reply: R1, R3, Q1, R7m)
+    #[test]
+    fn a_unit_array_takes_any_patch() {
+        assert_trees(&[
+            ("0b10b1dc0c13830162620304001001020400", v(2, 90)), // R1 `ConcreteCollection[Unit](()).patch(0, Coll[Int] constant (1), 0)`
+            ("0b11b1dc0c1383016262030400830163a70400", v(2, 115)), // R3 the same with `Coll[Box](SELF)`
+            (
+                "0b1eb1dc0c13dc0c1d1001020183016262030400dc0c1d1001020110010e0400",
+                v(2, 130),
+            ), // Q1 `Coll(1).zip(ConcreteCollection[Unit](())).patch(0, Coll(1).zip(Coll(7)), 0)`
+            (
+                "0b1c93addc0c13830162620304001001020400d901016272018302626262",
+                Some((Value::Boolean(true), 167)),
+            ), // R7m R1's patch`.map({x => x}) == ConcreteCollection[Unit]((), ())`
+        ]);
+    }
+
+    /// A `PairOfCols` unzips the patch before it patches each side (v6.0.6
+    /// `CollsOverArrays.scala:423-428`, `:245-258`): a patch that is not a collection of pairs is
+    /// refused on its item type, though it is empty (SANTA `Coll.reference_store_ops` B9, B10)
+    #[test]
+    fn patch_unzips_a_pair_receivers_patch() {
+        assert_trees(&[
+            // a pair receiver (K8, K9: the JVM by reading; equal on `master`)
+            ("0b15b1dc0c13dc0c1d1001020110010203040010000400", None), // B9 `Coll(1).zip(Coll(1)).patch(0, Coll[Int] constant (), 0)`
+            (
+                "0b1db1dc0c13dc0c1d10010201100102030400dc0c1d100102011001020400",
+                v(2, 110),
+            ), // B10 `Coll(1).zip(Coll(1)).patch(0, Coll(1).zip(Coll(1)), 0)`
+            (
+                "0b1eb1dc0c13dc0c1d100102011001020304c801dc0c1d100102011001020401",
+                v(2, 110),
+            ), // K8 `Coll(1).zip(Coll(1)).patch(100, Coll(1).zip(Coll(1)), -1)`
+            (
+                "0b1db1dc0c13dc0c1d10010201100102030400dc0c1d100102011001020402",
+                v(1, 110),
+            ), // K9 `Coll(1).zip(Coll(1)).patch(0, Coll(1).zip(Coll(1)), 1)`
+        ]);
+    }
+
+    /// `patch_eval` charges per item of the receiver AND of the patch (v6.0.6
+    /// `methods.scala:1027`; SANTA `Coll.reference_store_ops` F1-F3)
+    #[test]
+    fn patch_charges_for_both_collections() {
+        assert_trees(&[
+            // the cost counts the receiver's items and the patch's: 10 + 1 crosses the chunk of 10
+            (
+                "0b18b1dc0c13100a020406080a0c0e1012140304001001020400",
+                v(11, 72),
+            ), // F1 `(1..10).patch(0, Coll(1), 0)`
+            (
+                "0b17b1dc0c131009020406080a0c0e10120304001001020400",
+                v(10, 70),
+            ), // F2 `(1..9).patch(0, Coll(1), 0)`
+            (
+                "0b19b1dc0c13100b020406080a0c0e101214160304001001020400",
+                v(12, 72),
+            ), // F3 `(1..11).patch(0, Coll(1), 0)`
+            // the splice at and past the ends (K5-K7: the JVM by reading; equal on `master`)
+            ("0b11b1dc0c1310030204060304011001020401", v(4, 70)), // K5 `Coll[Int] constant (1,2,3).patch(-1, Coll(1), -1)`
+            ("0b13b1dc0c1310030204060304c80110010204c801", v(4, 70)), // K6 `Coll[Int] constant (1,2,3).patch(100, Coll(1), 100)`
+            ("0b12b1dc0c13100302040603040210010204c801", v(2, 70)), // K7 `Coll[Int] constant (1,2,3).patch(1, Coll(1), 100)`
         ]);
     }
 }
