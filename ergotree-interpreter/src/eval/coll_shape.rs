@@ -50,15 +50,7 @@ pub(crate) fn get_or_else<'ctx>(
 /// compare their item types first (`CollOverArray.equals`). SANTA
 /// `Coll.prefix_cross_type_equality`
 pub(crate) fn scala_eq(a: &Value<'_>, b: &Value<'_>) -> bool {
-    fn integral(v: &Value<'_>) -> Option<i64> {
-        match v {
-            Value::Byte(x) => Some(i64::from(*x)),
-            Value::Short(x) => Some(i64::from(*x)),
-            Value::Int(x) => Some(i64::from(*x)),
-            Value::Long(x) => Some(*x),
-            _ => None,
-        }
-    }
+    use crate::eval::data_value_comparer::integral;
     match (a, b) {
         (Value::Pair(l), Value::Pair(r)) => scala_eq(&l.0, &r.0) && scala_eq(&l.1, &r.1),
         // `Some.equals` compares the values the same way
