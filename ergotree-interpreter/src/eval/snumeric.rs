@@ -19,7 +19,7 @@ use ergotree_ir::{
 };
 use num_traits::{CheckedRem, CheckedShl, CheckedShr};
 
-use super::{EvalError, EvalFn};
+use super::{fits_256_bits, EvalError, EvalFn};
 
 /// Scala `FixedCost(JitCost(5))` charged per numeric 6.0 method call —
 /// `SNumericTypeMethods.{ToBytes,ToBits,BitwiseOp}_CostKind` and
@@ -253,10 +253,10 @@ static SHIFT_LEFT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             .checked_shl(shift_value)
             .ok_or_else(invalid_shift_err)?
             .into(),
-        Value::BigInt(obj) => bigint256(obj)?
-            .checked_shl(shift_value)
-            .ok_or_else(invalid_shift_err)?
-            .into(),
+        Value::BigInt(obj) => bigint_shift_left(obj, shift_value)?,
+        // Not as the JVM yet: this drops the bits shifted past 256 where the `CUnsignedBigInt`
+        // constructor throws (v6.0.6 `CUnsignedBigInt.scala:20-22`, `:86`; SANTA
+        // `UnsignedBigInt.shiftLeft_past_256_bits`)
         Value::UnsignedBigInt(obj) => obj
             .checked_shl(shift_value)
             .ok_or_else(invalid_shift_err)?
@@ -268,6 +268,29 @@ static SHIFT_LEFT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         }
     })
 };
+
+/// sigmastate's `BigInt.shiftLeft` (v6.0.6): the shift amount is refused from 256
+/// (`BigIntegerOps.scala:109-115`), then the value is shifted as an unbounded integer and
+/// refused if it left the 256-bit range (`CBigInt.scala:67`,
+/// `wrappedValue.shiftLeft(n).toSignedBigIntValueExact`; `Extensions.scala:219-223`). SANTA
+/// `BigInt.shift_and_inverse_range_edges`
+fn bigint_shift_left(
+    obj: num_bigint::BigInt,
+    shift_value: u32,
+) -> Result<Value<'static>, EvalError> {
+    let obj = bigint256(obj)?;
+    // A `u8` holds exactly the amounts the JVM accepts. The wide integer has no width of its
+    // own to bound a shift, so the amount it is shifted by is of this type: a larger one
+    // cannot reach it
+    let shift = u8::try_from(shift_value).map_err(|_| invalid_shift_err())?;
+    let shifted = num_bigint::BigInt::from(obj) << shift;
+    if !fits_256_bits(&shifted) {
+        return Err(EvalError::ArithmeticException(format!(
+            "BigInt.shiftLeft: {obj} << {shift} is out of the 256 bit range"
+        )));
+    }
+    Ok(Value::BigInt(shifted))
+}
 
 static SHIFT_RIGHT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
@@ -541,7 +564,10 @@ mod test {
     use proptest::prelude::*;
 
     use crate::eval::{
-        test_util::{eval_out_wo_ctx, try_eval_out_wo_ctx},
+        test_util::{
+            assert_trees, eval_out_wo_ctx, eval_tree, innermost, try_eval_out_wo_ctx,
+            BIGINT_MAX_HEX, BIGINT_MIN_HEX,
+        },
         EvalError,
     };
 
@@ -744,7 +770,7 @@ mod test {
         .into();
         eval_out_wo_ctx(&xor_mc)
     }
-    fn shl<T: Numeric>(v: T, rhs: u32, methods: &[SMethod]) -> T {
+    fn try_shl<T: Numeric>(v: T, rhs: u32, methods: &[SMethod]) -> Result<T, EvalError> {
         let shl_mc: Expr = MethodCall::new(
             <T as Into<Constant>>::into(v.clone()).into(),
             methods
@@ -756,7 +782,10 @@ mod test {
         )
         .unwrap()
         .into();
-        eval_out_wo_ctx(&shl_mc)
+        try_eval_out_wo_ctx(&shl_mc)
+    }
+    fn shl<T: Numeric>(v: T, rhs: u32, methods: &[SMethod]) -> T {
+        try_shl(v, rhs, methods).unwrap()
     }
     fn shr<T: Numeric>(v: T, rhs: u32, methods: &[SMethod]) -> T {
         let shr_mc: Expr = MethodCall::new(
@@ -772,6 +801,93 @@ mod test {
         .into();
         eval_out_wo_ctx(&shr_mc)
     }
+    fn two_pow(n: u32) -> num_bigint::BigInt {
+        num_bigint::BigInt::from(1) << n
+    }
+
+    /// A `BigInt` value at a cost, as a row of `assert_trees`
+    fn big(n: num_bigint::BigInt, cost: u64) -> Option<(Value<'static>, u64)> {
+        Some((Value::BigInt(n), cost))
+    }
+
+    /// The error a tree fails with, under the span wrapper each eval node adds
+    fn refusal(tree_hex: &str) -> EvalError {
+        innermost(&eval_tree(tree_hex).0.unwrap_err()).clone()
+    }
+
+    /// SANTA `BigInt.shift_and_inverse_range_edges` (`3870df6`, sigma-state 6.0.7, tree v3)
+    #[test]
+    fn santa_shift_and_inverse_range_edges() {
+        // H1 `BigInt(1).shiftLeft(255)`, H2 `BigInt(2).shiftLeft(255)`, H3 `BigInt.MAX.shiftLeft(1)`:
+        // the JVM throws `ArithmeticException: BigInteger out of 256 bit range`
+        for tree in [
+            "0b0adc060c0601010104fe03".to_string(),
+            "0b0adc060c0601020104fe03".to_string(),
+            format!("0b28dc060c{BIGINT_MAX_HEX}010402"),
+        ] {
+            assert!(
+                matches!(refusal(&tree), EvalError::ArithmeticException(_)),
+                "{tree}"
+            );
+        }
+        let min_shr = format!("0b29dc060d{BIGINT_MIN_HEX}0104fe03");
+        let max_shr = format!("0b29dc060d{BIGINT_MAX_HEX}0104fe03");
+        let min_inv = format!("0b25db0608{BIGINT_MIN_HEX}");
+        let max_inv = format!("0b25db0608{BIGINT_MAX_HEX}");
+        assert_trees(&[
+            // H4 `BigInt(1).shiftLeft(254)`
+            ("0b0adc060c0601010104fc03", big(two_pow(254), 19)),
+            // H5 `BigInt(-1).shiftLeft(255)`: `BigInt.MIN` fits
+            ("0b0adc060c0601ff0104fe03", big(-two_pow(255), 19)),
+            // R1 `BigInt.MIN.shiftRight(255)`, R2 `BigInt.MAX.shiftRight(255)`
+            (min_shr.as_str(), big((-1).into(), 19)),
+            (max_shr.as_str(), big(0.into(), 19)),
+            // I1 `BigInt.MIN.bitwiseInverse`, I2 `BigInt.MAX.bitwiseInverse`
+            (min_inv.as_str(), big(two_pow(255) - 1, 14)),
+            (max_inv.as_str(), big(-two_pow(255), 14)),
+        ]);
+    }
+
+    /// By reading (`CBigInt.scala:67`, `BigIntegerOps.scala:109-115`), not measured on the JVM;
+    /// the Rust side was measured with blitzen
+    #[test]
+    fn shift_left_by_reading_rows() {
+        // a negative receiver shifted out of the range
+        for tree in [
+            // `BigInt.MIN.shiftLeft(1)`
+            format!("0b28dc060c{BIGINT_MIN_HEX}010402"),
+            // `BigInt(-2).shiftLeft(255)`
+            "0b0adc060c0601fe0104fe03".to_string(),
+        ] {
+            assert!(
+                matches!(refusal(&tree), EvalError::ArithmeticException(_)),
+                "{tree}"
+            );
+        }
+        // the shift amount is refused first, with its own error, on a receiver whose shift
+        // would leave the range too: `BigInt.MAX` by 256, by `Int.MaxValue`, by -1
+        assert!(matches!(
+            refusal(&format!("0b29dc060c{BIGINT_MAX_HEX}01048004")),
+            EvalError::Misc(_)
+        ));
+        assert!(matches!(
+            refusal(&format!("0b2cdc060c{BIGINT_MAX_HEX}0104feffffff0f")),
+            EvalError::Misc(_)
+        ));
+        assert!(matches!(
+            refusal(&format!("0b28dc060c{BIGINT_MAX_HEX}010401")),
+            EvalError::UnexpectedValue(_)
+        ));
+        // values a shift keeps: both edges by 0, zero by 255
+        let min_by_0 = format!("0b28dc060c{BIGINT_MIN_HEX}010400");
+        let max_by_0 = format!("0b28dc060c{BIGINT_MAX_HEX}010400");
+        assert_trees(&[
+            (min_by_0.as_str(), big(-two_pow(255), 19)),
+            (max_by_0.as_str(), big(two_pow(255) - 1, 19)),
+            ("0b0adc060c0601000104fe03", big(0.into(), 19)),
+        ]);
+    }
+
     #[test]
     fn bitwise_or_byte() {
         assert_eq!(bitwise_or(127i8, -128i8, &snumeric::sbyte::METHODS), -1i8);
@@ -1182,7 +1298,21 @@ mod test {
         }
         #[test]
         fn shl_bigint_arbitrary(a in any::<BigInt256>(), shift in 0u32..256) {
-            assert_eq!(shl(a, shift, &snumeric::sbigint::METHODS), a << shift);
+            // the JVM's rule: the exact product where it fits 256 bits, a throw otherwise. The
+            // throw is matched by its variant: a wide value handed back would fail the test's
+            // extraction as `BigInt256`, an error of another kind
+            let res = try_shl(a, shift, &snumeric::sbigint::METHODS);
+            match BigInt256::try_from(num_bigint::BigInt::from(a) << shift) {
+                Ok(exact) => prop_assert_eq!(res.ok(), Some(exact)),
+                Err(_) => prop_assert!(
+                    matches!(
+                        res.as_ref().map_err(innermost),
+                        Err(EvalError::ArithmeticException(_))
+                    ),
+                    "{:?}",
+                    res
+                ),
+            }
         }
         #[test]
         fn shl_unsigned_bigint_arbitrary(a in any::<UnsignedBigInt>(), shift in 0u32..256) {

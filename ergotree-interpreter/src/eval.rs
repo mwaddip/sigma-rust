@@ -890,7 +890,7 @@ pub mod test_util {
 
     /// the error under the span wrapper each eval node adds
     #[cfg(test)]
-    fn innermost(e: &EvalError) -> &EvalError {
+    pub(crate) fn innermost(e: &EvalError) -> &EvalError {
         match e {
             EvalError::Spanned(s) => innermost(&s.error),
             e => e,
