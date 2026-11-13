@@ -43,6 +43,37 @@ fn tree_height(avl_tree_data: &AvlTreeData) -> u32 {
     avl_tree_data.digest.last().copied().unwrap_or(0) as u32
 }
 
+/// The items of a keys or entries argument, which the call has checked to be a collection.
+/// sigmastate reads such an argument item by item, each where it uses it
+/// (`CErgoTreeEvaluator.scala:78-241`), so nothing is cast here.
+fn coll_items(v: Value<'_>) -> Result<Vec<Value<'_>>, EvalError> {
+    match v {
+        Value::Coll(coll) => Ok(coll.as_vec()),
+        _ => Err(EvalError::UnexpectedValue(format!(
+            "expected a collection, found {v:?}"
+        ))),
+    }
+}
+
+/// One entry of a key-value collection. sigmastate takes it apart with `case (key, value)`
+/// BEFORE the operation's cost, so an entry that is no pair fails there
+/// (`CErgoTreeEvaluator.scala:140`, `:178`, `:209`).
+fn entry_of(entry: Value<'_>) -> Result<(Value<'_>, Value<'_>), EvalError> {
+    match entry {
+        Value::Pair(pair) => Ok(*pair),
+        _ => Err(EvalError::UnexpectedValue(format!(
+            "expected a pair of a key and a value, found {entry:?}"
+        ))),
+    }
+}
+
+/// A key's or a value's bytes: sigmastate's `toArray`, cast to a byte array where the
+/// operation is performed, so AFTER that item's cost. A collection of another item type
+/// fails here.
+fn bytes_of(v: Value<'_>) -> Result<Bytes, EvalError> {
+    Ok(Bytes::from(v.try_extract_into::<Vec<u8>>()?))
+}
+
 /// Build the batch AVL verifier for `avl_tree_data` over `proof`, charging the
 /// proof-size-scaled construction cost: `CreateAvlVerifier_Info` =
 /// PerItemCost(110, 20, 64) per proof byte (Scala `CErgoTreeEvaluator.createVerifier`
@@ -156,13 +187,10 @@ pub(crate) static UPDATE_DIGEST_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
 
 pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    let key = {
-        let v = args
-            .first()
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
-        v.try_extract_into::<Vec<u8>>()?
-    };
+    let key = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
     let proof = args
         .get(1)
         .cloned()
@@ -179,6 +207,7 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // charge are not construction failures — they propagate.
         Err(EvalError::AvlTree(_)) => {
             ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+            bytes_of(key)?;
             return Err(EvalError::AvlTree(format!(
                 "Tree proof is incorrect {:?}",
                 avl_tree_data
@@ -189,7 +218,7 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
     // PerItemCost(40, 10, 1) per height item (Scala `get_eval`).
     ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-    match bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
+    match bv.perform_one_operation(&Operation::Lookup(bytes_of(key)?)) {
         Ok(opt) => match opt {
             Some(v) => Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
                 v.iter().map(|&b| b as i8).collect(),
@@ -206,13 +235,10 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
 
-    let keys = {
-        let v = args
-            .first()
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
-        v.try_extract_into::<Vec<Vec<u8>>>()?
-    };
+    let keys =
+        coll_items(args.first().cloned().ok_or_else(|| {
+            EvalError::AvlTree("eval is missing first arg (entries)".to_string())
+        })?)?;
     let proof = args
         .get(1)
         .cloned()
@@ -236,6 +262,7 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
                 }))
             } else {
                 ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+                bytes_of(keys[0].clone())?;
                 Err(EvalError::AvlTree(format!(
                     "Tree proof is incorrect {:?}",
                     avl_tree_data
@@ -252,7 +279,7 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             // `LookupAvlTree_Info` = PerItemCost(40, 10, 1) per height item
             // (Scala `getMany_eval`).
             ctx.add_per_item_jit_cost(40, 10, 1, height)?;
-            if let Ok(r) = bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
+            if let Ok(r) = bv.perform_one_operation(&Operation::Lookup(bytes_of(key)?)) {
                 if let Some(v) = r {
                     Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
                         v.iter().map(|&b| b as i8).collect(),
@@ -284,13 +311,10 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         return Ok(Value::Opt(None));
     }
 
-    let entries = {
-        let v = args
-            .first()
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
-        v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
-    };
+    let entries =
+        coll_items(args.first().cloned().ok_or_else(|| {
+            EvalError::AvlTree("eval is missing first arg (entries)".to_string())
+        })?)?;
 
     let proof = args
         .get(1)
@@ -312,8 +336,11 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             if entries.is_empty() {
                 return Ok(Value::Opt(None));
             }
+            let (key, value) = entry_of(entries[0].clone())?;
             let n_items = tree_height(&avl_tree_data).max(1);
             ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
+            bytes_of(key)?;
+            bytes_of(value)?;
             return if ctx.tree_version() >= ErgoTreeVersion::V3 {
                 Ok(Value::Opt(None))
             } else {
@@ -328,15 +355,14 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     // When the tree is empty we still need to add the insert cost (Scala
     // `insert_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
     let n_items = tree_height(&avl_tree_data).max(1);
-    for (key, value) in entries {
+    for entry in entries {
+        let (key, value) = entry_of(entry)?;
         // The cost of a tree insert is O(treeHeight): `InsertIntoAvlTree_Info`
         // = PerItemCost(40, 10, 1) per height item.
         ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
+        let (key, value) = (bytes_of(key)?, bytes_of(value)?);
         if bv
-            .perform_one_operation(&Operation::Insert(KeyValue {
-                key: key.into(),
-                value: value.into(),
-            }))
+            .perform_one_operation(&Operation::Insert(KeyValue { key, value }))
             .is_err()
         {
             if ctx.tree_version() >= ErgoTreeVersion::V3 {
@@ -368,13 +394,11 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         return Ok(Value::Opt(None));
     }
 
-    let keys = {
-        let v = args
-            .first()
+    let keys = coll_items(
+        args.first()
             .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (keys)".to_string()))?;
-        v.try_extract_into::<Vec<Vec<u8>>>()?
-    };
+            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (keys)".to_string()))?,
+    )?;
 
     let proof = args
         .get(1)
@@ -393,8 +417,9 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // charge are not construction failures — they propagate.
         Err(EvalError::AvlTree(_)) => {
             let n_items = tree_height(&avl_tree_data).max(1);
-            for _ in 0..keys.len() {
+            for key in keys {
                 ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
+                bytes_of(key)?;
             }
             ctx.add_jit_cost(15)?;
             return Ok(Value::Opt(None));
@@ -412,7 +437,7 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // no break, no check (`CErgoTreeEvaluator.remove_eval`); a failed
         // op invalidates the verifier, so the digest below decides the
         // outcome
-        let _ = bv.perform_one_operation(&Operation::Remove(Bytes::from(key)));
+        let _ = bv.perform_one_operation(&Operation::Remove(bytes_of(key)?));
     }
     // Digest read after the operation loop: `digest_Info` = FixedCost(15)
     // (Scala `remove_eval` charges it unconditionally, unlike insert/update).
@@ -431,13 +456,10 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 
 pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    let key = {
-        let v = args
-            .first()
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (key)".to_string()))?;
-        Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-    };
+    let key = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (key)".to_string()))?;
 
     let proof = args
         .get(1)
@@ -454,6 +476,7 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // failures — they propagate.
         Err(EvalError::AvlTree(_)) => {
             ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+            bytes_of(key)?;
             return Ok(Value::Boolean(false));
         }
         Err(e) => return Err(e),
@@ -461,13 +484,15 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
     // PerItemCost(40, 10, 1) per height item (Scala `contains_eval`).
     ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-    Ok(match bv.perform_one_operation(&Operation::Lookup(key)) {
-        Ok(s) => match s {
-            Some(_e) => Value::Boolean(true),
-            _ => Value::Boolean(false),
+    Ok(
+        match bv.perform_one_operation(&Operation::Lookup(bytes_of(key)?)) {
+            Ok(s) => match s {
+                Some(_e) => Value::Boolean(true),
+                _ => Value::Boolean(false),
+            },
+            Err(_) => Value::Boolean(false),
         },
-        Err(_) => Value::Boolean(false),
-    })
+    )
 };
 
 pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -479,13 +504,10 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         return Ok(Value::Opt(None));
     }
 
-    let entries = {
-        let v = args
-            .first()
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
-        v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
-    };
+    let entries =
+        coll_items(args.first().cloned().ok_or_else(|| {
+            EvalError::AvlTree("eval is missing first arg (entries)".to_string())
+        })?)?;
 
     let proof = args
         .get(1)
@@ -504,8 +526,11 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // not construction failures — they propagate.
         Err(EvalError::AvlTree(_)) => {
             if !entries.is_empty() {
+                let (key, value) = entry_of(entries[0].clone())?;
                 let n_items = tree_height(&avl_tree_data).max(1);
                 ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+                bytes_of(key)?;
+                bytes_of(value)?;
             }
             return Ok(Value::Opt(None));
         }
@@ -514,15 +539,14 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     // When the tree is empty we still need to add the update cost (Scala
     // `update_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
     let n_items = tree_height(&avl_tree_data).max(1);
-    for (key, value) in entries {
+    for entry in entries {
+        let (key, value) = entry_of(entry)?;
         // The cost of a tree update is O(treeHeight): `UpdateAvlTree_Info`
         // = PerItemCost(120, 20, 1) per height item.
         ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+        let (key, value) = (bytes_of(key)?, bytes_of(value)?);
         if bv
-            .perform_one_operation(&Operation::Update(KeyValue {
-                key: key.into(),
-                value: value.into(),
-            }))
+            .perform_one_operation(&Operation::Update(KeyValue { key, value }))
             .is_err()
         {
             break;
@@ -549,13 +573,10 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         return Ok(Value::Opt(None));
     }
 
-    let entries = {
-        let v = args
-            .first()
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
-        v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
-    };
+    let entries =
+        coll_items(args.first().cloned().ok_or_else(|| {
+            EvalError::AvlTree("eval is missing first arg (entries)".to_string())
+        })?)?;
 
     let proof = args
         .get(1)
@@ -575,8 +596,11 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         // construction failures — they propagate.
         Err(EvalError::AvlTree(_)) => {
             if !entries.is_empty() {
+                let (key, value) = entry_of(entries[0].clone())?;
                 let n_items = tree_height(&avl_tree_data).max(1);
                 ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+                bytes_of(key)?;
+                bytes_of(value)?;
             }
             return Ok(Value::Opt(None));
         }
@@ -585,15 +609,14 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
     // When the tree is empty we still need to add the insert cost (Scala
     // `insertOrUpdate_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
     let n_items = tree_height(&avl_tree_data).max(1);
-    for (key, value) in entries {
+    for entry in entries {
+        let (key, value) = entry_of(entry)?;
         // Per entry, Scala `insertOrUpdate_eval` charges `UpdateAvlTree_Info`
         // = PerItemCost(120, 20, 1) per height item.
         ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+        let (key, value) = (bytes_of(key)?, bytes_of(value)?);
         if bv
-            .perform_one_operation(&Operation::InsertOrUpdate(KeyValue {
-                key: key.into(),
-                value: value.into(),
-            }))
+            .perform_one_operation(&Operation::InsertOrUpdate(KeyValue { key, value }))
             .is_err()
         {
             break;
@@ -2149,8 +2172,10 @@ mod tests {
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
 mod charge_order {
-    use crate::eval::test_util::eval_body_err;
+    use crate::eval::test_util::{eval_body, eval_body_err};
     use crate::eval::EvalError;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
 
     /// A tree constant: an all-zero 33-byte digest, every operation allowed, 32-byte keys,
     /// no fixed value length
@@ -2176,6 +2201,218 @@ mod charge_order {
             let body = alloc::format!("dc64{method_id}{TREE}{args}");
             let (e, c) = eval_body_err(&body);
             assert!(matches!(e, EvalError::TryExtractFrom(_)), "{body}: {e:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+    }
+
+    // `insert` (from tree version 3), `update` and `insertOrUpdate` stop at the first entry
+    // whose operation fails, so an entry after it is never read: a second entry of another
+    // item type, or one that is no pair, does not make the call fail. Each row's first entry
+    // is right in kind and fails its operation under a VALID proof (an insert of a key the
+    // tree holds, an update of a key it lacks); the JVM answers `None`. The last row is the
+    // control with that entry alone.
+    #[test]
+    fn an_entry_after_a_failed_one_is_never_read() {
+        #[rustfmt::skip]
+        let rows = [
+            // built-insert-first-fails-second-int
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010108000000000000000a01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", 244),
+            // built-insert-first-fails-second-nopair
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e0404010108000000000000000a0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", 244),
+            // built-update-first-fails-second-int
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", 344),
+            // built-update-first-fails-second-nopair
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e0404010308000000000000001e0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", 344),
+            // built-iou-first-fails-second-int
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010108000000000000000a01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", 359),
+            // built-insert-first-fails-control
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020c3c0e0e01010108000000000000000a0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", 244),
+        ];
+        for (body, cost) in rows {
+            let (res, c) = eval_body(body, ErgoTreeVersion::V3);
+            assert!(matches!(res, Ok(Value::Opt(None))), "{body}: {res:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+    }
+
+    #[derive(Debug)]
+    enum Refusal {
+        /// an array that is not of bytes
+        Cast,
+        /// an entry that is no pair
+        NoPair,
+    }
+
+    // sigmastate reads a key or an entry where it uses it: inside the operation's cost block,
+    // so after that item's cost (`CErgoTreeEvaluator.scala:78-241`: `key.toArray`,
+    // `performInsert(key.toArray, value.toArray)`), while an entry that is no pair fails the
+    // `case (key, value)` match before its cost. Each tree below holds {1: 10, 2: 20} under
+    // 1-byte keys with a VALID proof for its operation; a key is a `Coll[Int]`, and the keys
+    // and entries are 3-tuple constants (a `Coll[Any]` value) holding an item of another
+    // type first or second. Measured on the sigma-state 6.0.7 jars.
+    #[test]
+    fn a_key_or_entry_is_read_where_the_jvm_casts_it() {
+        use Refusal::*;
+        #[rustfmt::skip]
+        let refused = [
+            // contains|key-Coll[Int]
+            ("dc64096415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100021001020e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 229),
+            // get|key-Coll[Int]
+            ("dc640a6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100021001020e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 229),
+            // getMany|keys-second-Coll[Int]
+            ("dc640b6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002480e100401010104000e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", Cast, 289),
+            // getMany|keys-first-Coll[Int]
+            ("dc640b6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020701000248100e0401040101000e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", Cast, 229),
+            // insert|entries-second-key-Coll[Int]
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", Cast, 304),
+            // insert|entries-second-value-Coll[Int]
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c0e1004010308000000000000001e01050104000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", Cast, 304),
+            // insert|entries-second-no-pair
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e0404010308000000000000001e0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", NoPair, 244),
+            // insert|entries-first-no-pair
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020701000248043c0e0e040a010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", NoPair, 184),
+            // update|entries-second-key-Coll[Int]
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010108000000000000000b01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 504),
+            // update|entries-second-value-Coll[Int]
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c0e1004010108000000000000000b01050104000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 504),
+            // update|entries-second-no-pair
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e0404010108000000000000000b0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", NoPair, 344),
+            // update|entries-first-no-pair
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020701000248043c0e0e040a010108000000000000000b000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", NoPair, 184),
+            // insertOrUpdate|entries-second-key-Coll[Int]
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", Cast, 519),
+            // insertOrUpdate|entries-second-value-Coll[Int]
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c0e1004010308000000000000001e01050104000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", Cast, 519),
+            // insertOrUpdate|entries-second-no-pair
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e0404010308000000000000001e0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", NoPair, 359),
+            // insertOrUpdate|entries-first-no-pair
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020701000248043c0e0e040a010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", NoPair, 199),
+            // remove|keys-second-Coll[Int]
+            ("dc640e6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002480e100401010104000e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 424),
+            // remove|keys-first-Coll[Int]
+            ("dc640e6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020701000248100e0401040101000e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 294),
+        ];
+        for (body, refusal, cost) in refused {
+            let (e, c) = eval_body_err(body);
+            let named = match refusal {
+                Cast => matches!(e, EvalError::TryExtractFrom(_)),
+                NoPair => matches!(e, EvalError::UnexpectedValue(_)),
+            };
+            assert!(named, "{body}: expected {refusal:?}, got {e:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+        // the controls, and the same wrong entries or keys under a tree whose flag is off: the
+        // JVM answers `None` before it reads anything
+        #[rustfmt::skip]
+        let evaluated = [
+            // contains|control
+            ("dc64096415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020e01010e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", false, 229),
+            // get|control
+            ("dc640a6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020e01010e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", false, 229),
+            // getMany|control
+            ("dc640b6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100021a02010101020e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", false, 289),
+            // insert|control
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020c3c0e0e01010308000000000000001e0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", false, 284),
+            // insert|flag-off|entries-second-key-Coll[Int]
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0200010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 34),
+            // update|control
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020c3c0e0e01010108000000000000000b0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", false, 384),
+            // update|flag-off|entries-second-key-Coll[Int]
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0200010002483c0e0e3c100e04010108000000000000000b01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 34),
+            // insertOrUpdate|control
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020c3c0e0e01010308000000000000001e0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", false, 399),
+            // insertOrUpdate|flag-off|entries-second-key-Coll[Int]
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0200010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 49),
+            // remove|control
+            ("dc640e6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100021a0101010e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", false, 349),
+            // remove|flag-off|keys-second-Coll[Int]
+            ("dc640e6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0200010002480e100401010104000e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 34),
+        ];
+        for (body, is_none, cost) in evaluated {
+            let (res, c) = eval_body(body, ErgoTreeVersion::V3);
+            let v = res.unwrap();
+            assert_eq!(matches!(v, Value::Opt(None)), is_none, "{body}: {v:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+    }
+
+    // The same under a tree the proofs do not belong to ({5: 50}): sigmastate builds a verifier
+    // with no tree, every operation fails, and the order of each item's cost and its casts is
+    // the same. `insert`, `update` and `insertOrUpdate` stop at the first failed entry, so a
+    // wrong SECOND entry is never read; `remove` goes on. Measured on the jars.
+    #[test]
+    fn a_key_or_entry_is_read_where_the_jvm_casts_it_also_without_a_tree() {
+        #[rustfmt::skip]
+        let refused = [
+            // contains|other-tree|key-Coll[Int]
+            ("dc6409647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100021001020e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Cast", 219),
+            // get|other-tree|control
+            ("dc640a647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100020e01010e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Proof", 219),
+            // get|other-tree|key-Coll[Int]
+            ("dc640a647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100021001020e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Cast", 219),
+            // getMany|other-tree|control
+            ("dc640b647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100021a02010101020e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", "Proof", 219),
+            // getMany|other-tree|keys-first-Coll[Int]
+            ("dc640b647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee11010701000248100e0401040101000e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", "Cast", 219),
+            // getMany|other-tree|keys-second-Coll[Int]
+            ("dc640b647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002480e100401010104000e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", "Proof", 219),
+            // insert|other-tree|entries-first-key-Coll[Int]
+            ("dc640c647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c100e3c0e0e0401040105010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", "Cast", 234),
+            // insert|other-tree|entries-first-no-pair
+            ("dc640c647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee11010701000248043c0e0e040a010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", "NoPair", 184),
+            // update|other-tree|entries-first-key-Coll[Int]
+            ("dc640d647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c100e3c0e0e0401040105010108000000000000000b000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Cast", 324),
+            // update|other-tree|entries-first-no-pair
+            ("dc640d647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee11010701000248043c0e0e040a010108000000000000000b000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "NoPair", 184),
+            // insertOrUpdate|other-tree|entries-first-key-Coll[Int]
+            ("dc6410647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c100e3c0e0e0401040105010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", "Cast", 339),
+            // insertOrUpdate|other-tree|entries-first-no-pair
+            ("dc6410647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee11010701000248043c0e0e040a010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", "NoPair", 199),
+            // remove|other-tree|keys-first-Coll[Int]
+            ("dc640e647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee11010701000248100e0401040101000e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Cast", 279),
+            // remove|other-tree|keys-second-Coll[Int]
+            ("dc640e647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002480e100401010104000e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Cast", 394),
+        ];
+        for (body, refusal, cost) in refused {
+            let (e, c) = eval_body_err(body);
+            let named = match refusal {
+                "Cast" => matches!(e, EvalError::TryExtractFrom(_)),
+                "NoPair" => matches!(e, EvalError::UnexpectedValue(_)),
+                // "Tree proof is incorrect"
+                _ => matches!(e, EvalError::AvlTree(_)),
+            };
+            assert!(named, "{body}: expected {refusal}, got {e:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+        #[rustfmt::skip]
+        let evaluated = [
+            // contains|other-tree|control
+            ("dc6409647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100020e01010e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", false, 219),
+            // insert|other-tree|control
+            ("dc640c647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100020c3c0e0e01010308000000000000001e0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 234),
+            // insert|other-tree|entries-second-key-Coll[Int]
+            ("dc640c647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 234),
+            // insert|other-tree|entries-second-no-pair
+            ("dc640c647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e0404010308000000000000001e0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 234),
+            // update|other-tree|control
+            ("dc640d647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100020c3c0e0e01010108000000000000000b0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 324),
+            // update|other-tree|entries-second-key-Coll[Int]
+            ("dc640d647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e3c100e04010108000000000000000b01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 324),
+            // update|other-tree|entries-second-no-pair
+            ("dc640d647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e0404010108000000000000000b0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 324),
+            // insertOrUpdate|other-tree|control
+            ("dc6410647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100020c3c0e0e01010308000000000000001e0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 339),
+            // insertOrUpdate|other-tree|entries-second-key-Coll[Int]
+            ("dc6410647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 339),
+            // insertOrUpdate|other-tree|entries-second-no-pair
+            ("dc6410647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e0404010308000000000000001e0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 339),
+            // remove|other-tree|control
+            ("dc640e647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100021a0101010e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 294),
+        ];
+        for (body, is_none, cost) in evaluated {
+            let (res, c) = eval_body(body, ErgoTreeVersion::V3);
+            let v = res.unwrap();
+            assert_eq!(matches!(v, Value::Opt(None)), is_none, "{body}: {v:?}");
             assert_eq!(c, cost, "{body}");
         }
     }
