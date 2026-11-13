@@ -1260,10 +1260,6 @@ mod tests {
                 "0b1793dc0c218301040402010400dc0c218301040402010400",
                 Some((Value::Boolean(true), 135)),
             ),
-            // an operand check still refuses (E1 is in
-            // `the_refusals_in_the_evaluator_stop_where_the_jvm_stops`)
-            // E2: `(lie(1,1L), 2) == (1, 2)`, pinned with its cost in the `Tuple` task
-            ("0b12938602950100040205020404860204020404", None),
             // a left value that is not a primitive charges its own case
             // E9: `(big1,2) == lie((big1,2),(1L,2))`
             (
@@ -1408,16 +1404,22 @@ mod tests {
     }
 
     /// The trees the evaluator refuses around the comparer: each stops with the comparer's or
-    /// the operand check's error, at the cost the JVM's accumulator holds when it throws. The
-    /// JVM figures are measured on the sigma-state 6.0.7 jars with `Probe.java`
-    /// (`2026-11-13-deferred-minors/measure/`); a tree that reads `CONTEXT` needs a context
-    /// the harness has not, so its figure is Rust's, by reading
+    /// a type check's error, at the cost the JVM's accumulator holds when it throws. The
+    /// JVM figures are measured on the sigma-state 6.0.7 jars (a profiling evaluator on the
+    /// expression's bytes, its accumulator read at the throw); a tree that reads `CONTEXT`
+    /// needs a context that harness has not, so its figure is Rust's, by reading
     #[test]
     fn the_refusals_in_the_evaluator_stop_where_the_jvm_stops() {
         for (tree_hex, cost) in [
             // the operand check (`trees.scala:1204-1209`)
             // E1: `lie(1, 1L) == 1`, measured: `InterpreterException` @20
             ("0b0a93950100040205020402", 20),
+            // the `Tuple` node's item check (`values.scala:828-833`), before the node's cost
+            // E2: `(lie(1,1L), 2) == (1, 2)`, measured: `InterpreterException` @20
+            ("0b12938602950100040205020404860204020404", 20),
+            // E2m: `(2, lie(1,1L)) == (2, 1)`, the check of item 1, measured:
+            // `InterpreterException` @25
+            ("0b12938602040495010004020502860204040402", 25),
             // `Context` and `Global` have no case (`DataValueComparer.scala:413`)
             // K1: `CONTEXT == CONTEXT`, by reading
             ("0b0393fefe", 2),
