@@ -1260,10 +1260,9 @@ mod tests {
                 "0b1793dc0c218301040402010400dc0c218301040402010400",
                 Some((Value::Boolean(true), 135)),
             ),
-            // the operand checks still refuse
-            // E1: `lie(1, 1L) == 1`
-            ("0b0a93950100040205020402", None),
-            // E2: `(lie(1,1L), 2) == (1, 2)`
+            // an operand check still refuses (E1 is in
+            // `the_refusals_in_the_evaluator_stop_where_the_jvm_stops`)
+            // E2: `(lie(1,1L), 2) == (1, 2)`, pinned with its cost in the `Tuple` task
             ("0b12938602950100040205020404860204020404", None),
             // a left value that is not a primitive charges its own case
             // E9: `(big1,2) == lie((big1,2),(1L,2))`
@@ -1275,6 +1274,29 @@ mod tests {
             (
                 "0b0f938602060101040486020601010404",
                 Some((Value::Boolean(true), 62)),
+            ),
+            // `NEQ` hands its operands to the comparer in `EQ`'s order (v6.0.6
+            // `trees.scala:1224-1230`): the four rows below are measured on the sigma-state 6.0.7
+            // jars (a profiling evaluator on the expression's bytes), not by SANTA
+            // N9: `(big1,2) != lie((big1,2),(1L,2))`
+            (
+                "0b18948602060101040495010086020601010404860205020404",
+                Some((Value::Boolean(true), 74)),
+            ),
+            // N9m: `lie((big1,2),(1L,2)) != (big1,2)`
+            (
+                "0b18949501008602060101040486020502040486020601010404",
+                Some((Value::Boolean(true), 72)),
+            ),
+            // N9c: `(big1,2) != (big1,2)`
+            (
+                "0b0f948602060101040486020601010404",
+                Some((Value::Boolean(false), 62)),
+            ),
+            // E9m: `lie((big1,2),(1L,2)) == (big1,2)`
+            (
+                "0b18939501008602060101040486020502040486020601010404",
+                Some((Value::Boolean(false), 72)),
             ),
             // E11: `(g,2) == lie((g,2),(1L,2))`
             (
@@ -1356,17 +1378,6 @@ mod tests {
                 "0b12dc0c1a830104040202950100040201010400",
                 Some((Value::Int(-1), 87)),
             ),
-            // `Context` and `Global` have no case
-            // K1: `CONTEXT == CONTEXT`
-            ("0b0393fefe", None),
-            // K2: `Global == Global`
-            ("0b0393dddd", None),
-            // K3: `(CONTEXT, 1) == (CONTEXT, 1)`
-            ("0b0b938602fe04028602fe0402", None),
-            // K4: `(Global, 1) == (Global, 1)`
-            ("0b0b938602dd04028602dd0402", None),
-            // `NEQ` negates an answer, not an error: `CONTEXT != CONTEXT` (by reading)
-            ("0b0394fefe", None),
             // `String` items of pair constants
             // S1: `("a",1) == ("a",1)`
             (
@@ -1394,5 +1405,36 @@ mod tests {
                 Some((Value::Boolean(false), 52)),
             ),
         ]);
+    }
+
+    /// The trees the evaluator refuses around the comparer: each stops with the comparer's or
+    /// the operand check's error, at the cost the JVM's accumulator holds when it throws. The
+    /// JVM figures are measured on the sigma-state 6.0.7 jars with `Probe.java`
+    /// (`2026-11-13-deferred-minors/measure/`); a tree that reads `CONTEXT` needs a context
+    /// the harness has not, so its figure is Rust's, by reading
+    #[test]
+    fn the_refusals_in_the_evaluator_stop_where_the_jvm_stops() {
+        for (tree_hex, cost) in [
+            // the operand check (`trees.scala:1204-1209`)
+            // E1: `lie(1, 1L) == 1`, measured: `InterpreterException` @20
+            ("0b0a93950100040205020402", 20),
+            // `Context` and `Global` have no case (`DataValueComparer.scala:413`)
+            // K1: `CONTEXT == CONTEXT`, by reading
+            ("0b0393fefe", 2),
+            // K2: `Global == Global`, measured: `RuntimeException` @10
+            ("0b0393dddd", 10),
+            // K3: `(CONTEXT, 1) == (CONTEXT, 1)`, by reading: K4 with `CONTEXT`'s cost of 1 for
+            // `Global`'s 5, twice
+            ("0b0b938602fe04028602fe0402", 46),
+            // K4: `(Global, 1) == (Global, 1)`, measured: `RuntimeException` @54
+            ("0b0b938602dd04028602dd0402", 54),
+            // `NEQ` negates an answer, not an error: `CONTEXT != CONTEXT`, by reading
+            // (`Global != Global` is a `RuntimeException` @10 on the jars)
+            ("0b0394fefe", 2),
+        ] {
+            let (e, stopped_at) = crate::eval::test_util::eval_tree_err(tree_hex);
+            assert!(matches!(e, EvalError::Misc(_)), "{tree_hex}: {e:?}");
+            assert_eq!(stopped_at, cost, "{tree_hex}");
+        }
     }
 }
