@@ -132,15 +132,27 @@ pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, _ctx
     }
 };
 
+/// The length of an argument the call has checked to be a collection
+fn coll_len(v: &Value<'_>) -> Result<usize, EvalError> {
+    match v {
+        Value::Coll(coll) => Ok(coll.len()),
+        _ => Err(EvalError::UnexpectedValue(format!(
+            "expected a collection, found {v:?}"
+        ))),
+    }
+}
+
 pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
     let output_type = &mc.tpe().t_range;
-    let bytes = args
+    let arg = args
         .first()
         .ok_or_else(|| EvalError::NotFound("deserialize: missing first arg".into()))?
-        .clone()
-        .try_extract_into::<Vec<u8>>()?;
-    let n = bytes.len() as u32;
-    ctx.add_per_item_jit_cost(100, 32, 32, n)?;
+        .clone();
+    // `deserializeTo_eval` adds its per-item cost over the collection's LENGTH and reads the
+    // bytes inside that block (`methods.scala:1948-1955`): a collection of another item type
+    // has paid before its array fails the cast
+    ctx.add_per_item_jit_cost(100, 32, 32, coll_len(&arg)? as u32)?;
+    let bytes = arg.try_extract_into::<Vec<u8>>()?;
     let mut reader = sigma_byte_reader::from_bytes(&bytes);
     // sigmastate reads inside the spend's `VersionContext` (`Interpreter.scala:366`): a box's
     // tree is compared with the context's activated version
@@ -213,36 +225,31 @@ pub(crate) static DECODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, args| {
     Ok(decoded.into())
 };
 pub(crate) static POW_HIT_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, mut args| {
-    // Pop arguments first: the Scala cost depends on k and the msg/nonce/h lengths.
-    let big_n: u32 = args
-        .pop()
-        .ok_or_else(|| EvalError::NotFound("powHit: missing N".into()))?
-        .try_extract_into::<i32>()?
-        .try_into()
-        .map_err(|_| EvalError::Misc("N out of bounds".into()))?;
-    let h = args
-        .pop()
-        .ok_or_else(|| EvalError::NotFound("powHit: missing h".into()))?
-        .try_extract_into::<Vec<u8>>()?;
-    let nonce = args
-        .pop()
-        .ok_or_else(|| EvalError::NotFound("powHit: missing nonce".into()))?
-        .try_extract_into::<Vec<u8>>()?;
-    let msg = args
-        .pop()
-        .ok_or_else(|| EvalError::NotFound("powHit: missing msg".into()))?
-        .try_extract_into::<Vec<u8>>()?;
-    let k = args
-        .pop()
-        .ok_or_else(|| EvalError::NotFound("powHit: missing msg".into()))?
-        .try_extract_into::<i32>()?;
+    let mut pop = |name: &str| {
+        args.pop()
+            .ok_or_else(|| EvalError::NotFound(format!("powHit: missing {name}")))
+    };
+    let big_n = pop("N")?.try_extract_into::<i32>()?;
+    let h = pop("h")?;
+    let nonce = pop("nonce")?;
+    let msg = pop("msg")?;
+    let k = pop("k")?.try_extract_into::<i32>()?;
     // Scala PowHitCostKind.cost: baseCost(500) + (k+1) * (totalLen / chunkSize + 1)
     // * perChunkCost, where chunkSize=128 and perChunkCost=7 are CalcBlake2b256's
     // costKind (the heaviest part is k+1 Blake2b256 invocations over msg||nonce||h).
-    let total_len = msg.len() + nonce.len() + h.len();
+    // `powHit_eval` adds it from `k` and the three collections' LENGTHS and only then
+    // casts their arrays (`methods.scala:1897-1902`, `CostKind.scala:79-87`): a collection of
+    // another item type has paid before its array fails the cast
+    let total_len = coll_len(&msg)? + coll_len(&nonce)? + coll_len(&h)?;
     let chunks = total_len as u64 / 128 + 1;
     let k_plus_1 = u64::try_from(k).map_err(|_| EvalError::Misc("k out of bounds".into()))? + 1;
     ctx.add_jit_cost(500 + k_plus_1 * chunks * 7)?;
+    let msg = msg.try_extract_into::<Vec<u8>>()?;
+    let nonce = nonce.try_extract_into::<Vec<u8>>()?;
+    let h = h.try_extract_into::<Vec<u8>>()?;
+    let big_n: u32 = big_n
+        .try_into()
+        .map_err(|_| EvalError::Misc("N out of bounds".into()))?;
     Ok(UnsignedBigInt::try_from(
         AutolykosPowScheme::new(
             k.try_into()
@@ -1287,6 +1294,102 @@ mod tests {
         #[test]
         fn serialize_header(h in any::<Header>()) {
             assert_eq!(deserialize(&serialize(h.clone()), SType::SHeader), Constant::from(h));
+        }
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod charge_order {
+    use crate::eval::test_util::{eval_body, eval_body_err};
+    use crate::eval::EvalError;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
+
+    // A collection of another item type passes the call's class check (it is a `Coll`), and
+    // sigmastate's body adds its cost from the collection's LENGTH before it casts the array.
+    // Measured on the sigma-state 6.0.7 jars.
+
+    // `deserializeTo_eval`: `addSeqCost(.., bytes.length)`, then the read (`methods.scala:1948-1955`)
+    #[test]
+    fn deserialize_to_pays_per_item_before_it_reads_the_bytes() {
+        for (body, cost) in [
+            ("dc6a04dd011002020404", 146), // S1 deserializeTo[Int](Coll[Int](1, 2))
+            ("dc6a04dd019501000e01021002020404", 161), // S2 the same through an If
+        ] {
+            let (e, c) = eval_body_err(body);
+            assert!(matches!(e, EvalError::TryExtractFrom(_)), "{body}: {e:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+        let (res, c) = eval_body("dc6a04dd010e010204", ErgoTreeVersion::V3);
+        assert_eq!(res.unwrap(), Value::Int(1));
+        assert_eq!(c, 146);
+    }
+
+    // `powHit_eval`: the cost from `k` and the three lengths, then the arrays
+    // (`methods.scala:1897-1902`, `CostKind.scala:79-87`)
+    #[test]
+    fn pow_hit_pays_before_it_reads_the_bytes() {
+        for body in [
+            "dc6a08dd050440100202040e0800000000000000010e04000000010480808001", // P1 msg
+            "dc6a08dd0504400e0101100202040e04000000010480808001",               // P2 nonce
+            "dc6a08dd0504400e01010e080000000000000001100202040480808001",       // P3 h
+        ] {
+            let (e, c) = eval_body_err(body);
+            assert!(matches!(e, EvalError::TryExtractFrom(_)), "{body}: {e:?}");
+            assert_eq!(c, 765, "{body}");
+        }
+        let (res, c) = eval_body(
+            "dc6a08dd0504400e01010e0800000000000000010e04000000010480808001",
+            ErgoTreeVersion::V3,
+        );
+        assert!(matches!(res, Ok(Value::UnsignedBigInt(_))), "{res:?}");
+        assert_eq!(c, 765);
+        // the cost counts ALL three lengths: with an 8-byte nonce and a 4-byte h, a msg of
+        // 116 bytes reaches the second 128-byte chunk only with h, one of 123 only with the
+        // nonce, one of 128 by itself
+        for msg_len in [116usize, 123, 128] {
+            let len = if msg_len < 128 {
+                alloc::format!("{msg_len:02x}")
+            } else {
+                "8001".into()
+            };
+            let body = alloc::format!(
+                "dc6a08dd0504400e{len}{}0e0800000000000000010e04000000010480808001",
+                "01".repeat(msg_len)
+            );
+            let (res, c) = eval_body(&body, ErgoTreeVersion::V3);
+            assert!(
+                matches!(res, Ok(Value::UnsignedBigInt(_))),
+                "{msg_len}: {res:?}"
+            );
+            assert_eq!(c, 996, "{msg_len}");
+        }
+        // the range checks of N and of k come after the cost (`requirement failed` on the JVM)
+        for (body, cost) in [
+            (
+                "dc6a08dd0504400e01010e0800000000000000010e04000000010401",
+                765,
+            ), // N = -1
+            (
+                "dc6a08dd0504400e01010e0800000000000000010e04000000010402",
+                765,
+            ), // N = 1
+            (
+                "dc6a08dd0504020e01010e0800000000000000010e04000000010480808001",
+                548,
+            ), // k = 1
+        ] {
+            let (e, c) = eval_body_err(body);
+            assert!(
+                matches!(
+                    e,
+                    EvalError::Misc(_) | EvalError::AutolykosPowSchemeError(_)
+                ),
+                "{body}: {e:?}"
+            );
+            assert_eq!(c, cost, "{body}");
         }
     }
 }
