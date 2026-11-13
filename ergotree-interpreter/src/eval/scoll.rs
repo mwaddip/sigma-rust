@@ -162,9 +162,16 @@ pub(crate) fn flatmap_eval<'ctx>(
             input_v
         ))),
     }?;
+    // `xs.flatMap(f)` casts each result as it is produced: a result that is no collection
+    // fails there, before the lambda is applied to the next item (`methods.scala:1007`)
     let values = normalized_input_vals
         .iter()
-        .map(|item| lambda_call(item.clone()))
+        .map(|item| match lambda_call(item.clone())? {
+            v @ Value::Coll(_) => Ok(v),
+            v => Err(EvalError::UnexpectedValue(format!(
+                "flatMap: the lambda returned {v:?}, which is no collection"
+            ))),
+        })
         .collect::<Result<Vec<Value>, EvalError>>()?;
     let coll = flatten((**item_tpe).clone(), values).map_err(EvalError::TryExtractFrom)?;
     // flatMap cost scales with the OUTPUT (flattened) length, not the input
@@ -1500,5 +1507,29 @@ mod flat_map_element_type_tests {
             eval_out_wo_ctx::<Vec<i32>>(&flat_map_indices(int_colls_holding(no_longs))),
             Vec::<i32>::new()
         );
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod flat_map_charge_order {
+    use crate::eval::test_util::{eval_body, eval_body_err};
+    use crate::eval::EvalError;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+
+    // sigmastate's `xs.flatMap(f)` casts each result as it is produced, so a lambda that
+    // returns no collection fails at the FIRST item: the others are never applied
+    // (v6.0.6 `methods.scala:1000-1011`). Measured on the sigma-state 6.0.7 jars.
+    #[test]
+    fn flat_map_fails_at_the_first_result_that_is_no_collection() {
+        // F1 `Coll(0, 1, 2).flatMap(If(false, x => Coll(7), x => x))`: one application
+        let (e, c) = eval_body_err("dc0c0f100300020401950100d901010410010ed90101047201");
+        assert!(matches!(e, EvalError::UnexpectedValue(_)), "{e:?}");
+        assert_eq!(c, 39);
+        // the control `Coll(0, 1, 2).flatMap(x => Coll(7))`
+        let (res, c) = eval_body("dc0c0f100300020401d901010410010e", ErgoTreeVersion::V3);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(c, 114);
     }
 }
