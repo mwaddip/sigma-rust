@@ -1,11 +1,8 @@
 use crate::eval::Env;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 use ergotree_ir::mir::global_vars::GlobalVars;
 use ergotree_ir::mir::value::Value;
-use ergotree_ir::reference::Ref;
-use ergotree_ir::serialization::SigmaSerializable;
 
+use super::scontext;
 use super::Context;
 use super::EvalError;
 use super::Evaluable;
@@ -13,43 +10,31 @@ use super::Evaluable;
 impl Evaluable for GlobalVars {
     fn eval<'ctx>(&self, _env: &mut Env, ctx: &Context<'ctx>) -> Result<Value<'ctx>, EvalError> {
         match self {
+            // a context node adds its cost and reads the context's accessor, which the
+            // `Context` method of the same name reads too (`eval/scontext.rs`)
             GlobalVars::Height => {
                 ctx.add_jit_cost(26)?; // Height = Fixed(26)
-                Ok((ctx.height as i32).into())
+                Ok(scontext::height(ctx))
             }
             GlobalVars::SelfBox => {
                 ctx.add_jit_cost(10)?; // Self = Fixed(10)
-                Ok(Value::CBox(Ref::from(ctx.self_box)))
+                Ok(scontext::self_box(ctx))
             }
             GlobalVars::Outputs => {
                 ctx.add_jit_cost(10)?; // Outputs = Fixed(10)
-                Ok(ctx
-                    .outputs
-                    .iter()
-                    .map(Ref::Borrowed)
-                    .collect::<Vec<_>>()
-                    .into())
+                Ok(scontext::outputs(ctx))
             }
             GlobalVars::Inputs => {
                 ctx.add_jit_cost(10)?; // Inputs = Fixed(10)
-                Ok(ctx
-                    .inputs
-                    .iter()
-                    .map(|&i| Ref::Borrowed(i))
-                    .collect::<Vec<_>>()
-                    .into())
+                Ok(scontext::inputs(ctx))
             }
             GlobalVars::MinerPubKey => {
                 ctx.add_jit_cost(20)?; // MinerPubkey = Fixed(20)
-                Ok(ctx.pre_header.miner_pk.sigma_serialize_bytes()?.into())
+                scontext::miner_pub_key(ctx)
             }
             GlobalVars::LastBlockUtxoRootHash => {
-                // Same as the `Context.LastBlockUtxoRootHash` property eval
-                // (`LAST_BLOCK_UTXO_ROOT_HASH_EVAL_FN`) — the two wire forms of
-                // the property must agree on the value; the op form charges only
-                // the op's fixed cost.
                 ctx.add_jit_cost(15)?; // LastBlockUtxoRootHash = Fixed(15)
-                Ok(Value::AvlTree(Box::from(ctx.last_block_utxo_root.clone())))
+                Ok(scontext::last_block_utxo_root_hash(ctx))
             }
             GlobalVars::GroupGenerator => {
                 ctx.add_jit_cost(10)?; // GroupGenerator = Fixed(10)
@@ -74,6 +59,7 @@ mod tests {
     use ergotree_ir::mir::avl_tree_data::AvlTreeData;
     use ergotree_ir::mir::expr::Expr;
     use ergotree_ir::mir::property_call::PropertyCall;
+    use ergotree_ir::reference::Ref;
     use ergotree_ir::types::scontext;
     use sigma_test_util::force_any_val;
 

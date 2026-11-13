@@ -455,7 +455,7 @@ mod tests {
 
     // The call adds a fixed-cost method's cost, so its evaluator must add none of it: a
     // charge left in an evaluator would be paid twice by every script that calls the method,
-    // and the JVM's body of such a method adds nothing. Each of the 121 fixed-cost methods
+    // and the JVM's body of such a method adds nothing. Each of the 125 fixed-cost methods
     // that have an evaluator is run on a receiver of its owner's class with NO arguments: a
     // method without parameters evaluates in full, one with parameters stops where it reads
     // its first argument, and neither may have moved the counter. (A charge placed after
@@ -489,6 +489,6 @@ mod tests {
             assert_eq!(ctx.jit_cost_value(), 0, "{owner:?} {id} {}", method.name());
             run += 1;
         }
-        assert_eq!(run, 121);
+        assert_eq!(run, 125);
     }
 }
