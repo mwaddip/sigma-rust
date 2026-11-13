@@ -14,8 +14,16 @@ use super::stype_param::STypeVar;
 /// `TupleSerializer.scala:27-36`); it only refuses to write a tuple type of fewer than 2 items
 /// (`TypeSerializer.scala:94-95`), and to evaluate a tuple expression of other than 2
 /// (`values.scala:826-827`).
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct TupleItems<T>(Vec<T>);
+
+/// The items as a list, as [`STuple`] prints its item types: the wrapper adds nothing a reader
+/// of an error message or a debug text needs
+impl<T: core::fmt::Debug> core::fmt::Debug for TupleItems<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 impl<T> TupleItems<T> {
     /// The most items a tuple holds: a tuple type's item count is one unsigned byte
@@ -220,6 +228,14 @@ impl STuple {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tuple_items_debug_is_the_list() {
+        // what a tuple constant, a `Tuple` node and a tuple register value print
+        assert_eq!(format!("{:?}", TupleItems::from([1, 2])), "[1, 2]");
+        let one: TupleItems<i32> = vec![1].try_into().unwrap();
+        assert_eq!(format!("{one:?}"), "[1]");
+    }
 
     #[test]
     fn tuple_items_hold_zero_to_255() {
