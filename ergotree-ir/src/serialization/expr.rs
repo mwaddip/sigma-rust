@@ -684,6 +684,8 @@ mod depth_limit_tests {
 mod jvm_authored_unevaluated_nodes {
     use crate::chain::ergo_box::ErgoBox;
     use crate::ergo_tree::ErgoTree;
+    use crate::ergo_tree::ErgoTreeError;
+    use crate::serialization::SigmaParsingError;
     use crate::serialization::SigmaSerializable;
 
     const BOXES: &[(&str, &str, bool)] = &[
@@ -891,9 +893,36 @@ mod jvm_authored_unevaluated_nodes {
         ),
     ];
 
+    /// The class of error a refused box of `BOXES` is refused with, as the box reader reports
+    /// it: a row that fails for any other reason (a damaged hex string, say) is not the row.
+    /// A new refused row has no class until it is given one here
+    fn refusal(name: &str) -> fn(&SigmaParsingError) -> bool {
+        match name {
+            // an unsized tree whose body does not parse: an `Option` constant's data
+            "create-avl-tree-v0-reject" => |e| {
+                matches!(
+                    e,
+                    SigmaParsingError::UnsizedTreeValidationError(inner)
+                        if matches!(
+                            **inner,
+                            ErgoTreeError::SigmaParsingError(SigmaParsingError::NotSupported(_))
+                        )
+                )
+            },
+            "old-layout-v0-reject" | "old-layout-v3-reject" => {
+                |e| matches!(e, SigmaParsingError::InvalidTypePrefix)
+            }
+            "bool-operand-v0-reject" | "bool-operand-v3-reject" => {
+                |e| matches!(e, SigmaParsingError::BitOpOperandsNotNumeric(_))
+            }
+            "spip-filter-v0-reject" => |e| matches!(e, SigmaParsingError::TypeReadFailed(_)),
+            _ => panic!("{name}: a refused box with no error class"),
+        }
+    }
+
     /// A box the JVM accepts parses with its tree `Parsed` (asked directly: an `Unparsed` tree
     /// round-trips the same bytes) and is written back to the JVM's bytes; a box it refuses is
-    /// refused
+    /// refused, with the error of its own row
     #[test]
     fn jvm_authored_boxes_parse_as_sigmastate_judges_them() {
         for (name, hex, accept) in BOXES {
@@ -904,7 +933,10 @@ mod jvm_authored_unevaluated_nodes {
                 assert!(matches!(b.ergo_tree, ErgoTree::Parsed(_)), "{name}");
                 assert_eq!(b.sigma_serialize_bytes().unwrap(), bytes, "{name}");
             } else {
-                assert!(parsed.is_err(), "{name}: {parsed:?}");
+                let err = parsed
+                    .err()
+                    .unwrap_or_else(|| panic!("{name}: the box parses"));
+                assert!(refusal(name)(&err), "{name}: {err:?}");
             }
         }
     }

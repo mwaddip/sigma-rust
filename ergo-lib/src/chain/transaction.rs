@@ -607,6 +607,57 @@ mod tests {
     }
 
     #[test]
+    fn a_transaction_with_a_small_tuple_in_an_input_extension() {
+        // The same two values as in the register test below, in an input's context extension.
+        // A transaction's bytes to sign carry each input's extension (`Input.scala:50`,
+        // `inputToSign`), and ergo builds a transaction's id as it reads it
+        // (`ErgoTransaction.scala:68`), so what sigmastate cannot write cannot be in a
+        // transaction that reads: by reading for the extension; SANTA measured both values in
+        // a register (cases 6a, 6b)
+        let tx_with = |value: &str| {
+            let extension = ContextExtension::sigma_parse_bytes(
+                &base16::decode(&format!("0100{value}")).unwrap(),
+            )
+            .unwrap();
+            let input = Input::new(
+                BoxId::zero(),
+                ProverResult {
+                    proof: ProofBytes::Empty,
+                    extension,
+                },
+            );
+            let output = ErgoBoxCandidate {
+                value: BoxValue::SAFE_USER_MIN,
+                ergo_tree: ErgoTree::sigma_parse_bytes(&[0x00, 0x08, 0xd3]).unwrap(),
+                tokens: None,
+                additional_registers: NonMandatoryRegisters::empty(),
+                creation_height: 0,
+            };
+            Transaction::new_from_vec(vec![input], vec![], vec![output])
+        };
+        // `((1), 1)`, a tuple expression holding a one-item tuple: builds and reads back
+        let tx = tx_with("8602860104020402").unwrap();
+        let bytes = tx.sigma_serialize_bytes().unwrap();
+        assert_eq!(Transaction::sigma_parse_bytes(&bytes).unwrap(), tx);
+        // a `(Int)` constant: the transaction does not build,
+        assert!(matches!(
+            tx_with("60010402"),
+            Err(TransactionError::SigmaSerializationError(
+                SigmaSerializationError::NotSupported(_)
+            ))
+        ));
+        // and the first transaction's bytes with the constant in the expression's place do
+        // not read
+        let hex = base16::encode_lower(&bytes);
+        assert_eq!(hex.matches("8602860104020402").count(), 1);
+        let swapped = base16::decode(&hex.replace("8602860104020402", "60010402")).unwrap();
+        assert!(matches!(
+            Transaction::sigma_parse_bytes(&swapped),
+            Err(SigmaParsingError::Misc(_))
+        ));
+    }
+
+    #[test]
     fn a_transaction_with_a_small_tuple_output_does_not_build() {
         // ergo builds a transaction's id as it reads it (`ErgoTransaction.scala:68`), by writing
         // its outputs, and sigmastate cannot write a `(Int)` constant's type: SANTA measured the

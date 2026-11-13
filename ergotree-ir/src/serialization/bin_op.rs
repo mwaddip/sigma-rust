@@ -203,7 +203,7 @@ mod pair_form_tests {
         }
     }
 
-    /// sigmastate reads the three shifts as it reads `BitOr` (v6.0.7 `ValueSerializer.scala:44-46`,
+    /// sigmastate reads the three shifts as it reads `BitOr` (v6.0.6 `ValueSerializer.scala:73-75`,
     /// `SigmaBuilder.scala:646-653`): `sigmaProp(op(1, 2) == 4)`, unsized v0 and size-flagged v3
     #[test]
     fn shifts_parse_and_round_trip() {

@@ -28,9 +28,6 @@ impl Evaluable for Tuple {
                 self.items.len()
             )));
         };
-        // Tuple = Fixed(15)
-        ctx.add_jit_cost(15)?;
-
         // Mirror the JVM Tuple eval, which `checkType`s each item's value after
         // evaluating it (`values.scala:828-833`): an item whose type is an
         // unsupported tuple (arity != 2) is rejected ("Unsupported tuple
@@ -42,7 +39,12 @@ impl Evaluable for Tuple {
             crate::eval::check_value_of_type(&i.tpe(), &v, ctx.tree_version())?;
             Ok(v)
         };
-        Ok(Value::pair(item_v(first)?, item_v(second)?))
+        let first_v = item_v(first)?;
+        let second_v = item_v(second)?;
+        // Tuple = Fixed(15), added once both items are evaluated and checked
+        // (`values.scala:824-836`): an item that throws leaves the node uncharged
+        ctx.add_jit_cost(15)?;
+        Ok(Value::pair(first_v, second_v))
     }
 }
 
@@ -356,6 +358,40 @@ mod non_pair_value_rows {
         assert_throws("0b1ab1b0100302040648040404020406d901014c480404048c720101");
         // (1,2,3).map((x: Int) => x + 1), the METHOD: the receiver's item type is `Any`
         assert_throws("0b14dc0c034804040402040601d90101049a72010402");
+    }
+}
+
+/// Where the node's cost lands. sigmastate evaluates and checks item 0, then item 1, and only
+/// then adds the cost (v6.0.6 `values.scala:824-836`). Measured on the sigma-state 6.0.7 jars
+/// (a profiling evaluator on the expression's bytes, its accumulator read also at a throw)
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod charge_order {
+    use ergotree_ir::mir::value::Value;
+
+    use crate::eval::test_util::{assert_trees, eval_tree_err};
+    use crate::eval::EvalError;
+
+    #[test]
+    fn a_tuple_adds_its_cost_after_its_items() {
+        // T0 `(1, 2)`: the two constants and the node
+        assert_trees(&[(
+            "0b06860204020404",
+            Some((Value::pair(Value::Int(1), Value::Int(2)), 25)),
+        )]);
+        // T1 `(1 / 0, 2)`, T2 `(1, 1 / 0)`: an `ArithmeticException` on the JVM at 25 and at
+        // 30. The counter holds what was evaluated and not the node
+        for (tree_hex, cost) in [
+            ("0b0986029d040204000404", 25),
+            ("0b09860204029d04020400", 30),
+        ] {
+            let (e, stopped_at) = eval_tree_err(tree_hex);
+            assert!(
+                matches!(e, EvalError::ArithmeticException(_)),
+                "{tree_hex}: {e:?}"
+            );
+            assert_eq!(stopped_at, cost, "{tree_hex}");
+        }
     }
 }
 

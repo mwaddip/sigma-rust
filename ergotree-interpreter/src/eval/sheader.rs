@@ -405,7 +405,12 @@ mod tests {
         // access, under the script's tree version (v6.0.6 `CHeader.scala:59`): below version 3
         // the script gets `d` as it is, from version 3 a `d` above 255 bits throws at the read.
         // The controls `d = 1` and `d = 2^255 - 1` are measured as in-range values at both
-        // versions; their `false` answers follow from the values (by reading)
+        // versions; their `false` answers follow from the values (by reading). The rows ran at
+        // activated version 3 (the block is at version 4), so the contexts here set it.
+        // SANTA's P0, `sigmaProp(true)` at tree version 3 under the three wide headers, is valid
+        // on the JVM: the header alone breaks nothing, the `BigInt` is built when `powDistance`
+        // is read. It has no row here: a header the script does not read is inert data, so
+        // such a row could not fail
         use ergotree_ir::ergo_tree::ErgoTreeVersion;
         use ergotree_ir::mir::bin_op::{ArithOp, BinOp, BinOpKind, RelationOp};
         use num_bigint::BigUint;
@@ -438,8 +443,6 @@ mod tests {
         );
         // P4 `powDistance - 1 > 0`: the subtraction checks its result
         let p4 = gt(bin(ArithOp::Minus.into(), read(), n(1)), n(0));
-        // P0: reads no header
-        let p0 = gt(Expr::Const(1i64.into()), Expr::Const(2i64.into()));
 
         let eval = |expr: &Expr, d: &BigUint, version: ErgoTreeVersion| -> Option<bool> {
             let mut ctx = force_any_val::<Context>();
@@ -448,6 +451,7 @@ mod tests {
             headers[HEADER_INDEX].autolykos_solution.pow_distance = Some(d.clone());
             ctx.headers = headers.try_into().unwrap();
             ctx.tree_version.set(version);
+            ctx.activated_script_version_byte = 3;
             crate::eval::test_util::try_eval_out::<bool>(expr, &ctx).ok()
         };
         let one = BigUint::from(1u8);
@@ -476,8 +480,6 @@ mod tests {
         assert_eq!(answers(&p1, v3), [t, t, None, None, None]);
         assert_eq!(answers(&p3, v3), [f, f, None, None, None]);
         assert_eq!(answers(&p4, v3), [f, t, None, None, None]);
-        // and the header alone breaks nothing: a script that does not read it evaluates
-        assert_eq!(answers(&p0, v3), [f, f, f, f, f]);
     }
 
     #[test]

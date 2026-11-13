@@ -897,6 +897,15 @@ pub mod test_util {
         }
     }
 
+    /// The error of a tree that must not evaluate, under the span wrapper each eval node adds,
+    /// and the JIT cost counter where the evaluation stopped
+    #[cfg(test)]
+    pub(crate) fn eval_tree_err(tree_hex: &str) -> (EvalError, u64) {
+        let (res, cost) = eval_tree(tree_hex);
+        assert!(res.is_err(), "{tree_hex}: {res:?}");
+        (innermost(&res.unwrap_err()).clone(), cost)
+    }
+
     /// fails at eval in an evaluator, not for want of one
     #[cfg(test)]
     pub(crate) fn assert_evaluator_refuses(tree_hex: &str) {
