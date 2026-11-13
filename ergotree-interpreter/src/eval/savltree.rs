@@ -47,12 +47,26 @@ fn tree_height(avl_tree_data: &AvlTreeData) -> u32 {
 /// proof-size-scaled construction cost: `CreateAvlVerifier_Info` =
 /// PerItemCost(110, 20, 64) per proof byte (Scala `CErgoTreeEvaluator.createVerifier`
 /// — "the cost of tree reconstruction from proof is O(proof.length)").
+///
+/// The proof comes as the argument's VALUE, which the call has checked to be a collection:
+/// sigmastate adds the cost over the collection's length and builds the verifier inside that
+/// block, where the array is cast to bytes (`CErgoTreeEvaluator.scala:71-75`). So a proof of
+/// another item type has paid for the verifier before it is refused.
 fn create_verifier(
     ctx: &Context,
     avl_tree_data: &AvlTreeData,
-    proof: &Bytes,
+    proof: Value,
 ) -> Result<BatchAVLVerifier, EvalError> {
-    ctx.add_per_item_jit_cost(110, 20, 64, proof.len() as u32)?;
+    let proof_len = match &proof {
+        Value::Coll(coll) => coll.len(),
+        _ => {
+            return Err(EvalError::UnexpectedValue(format!(
+                "expected the proof to be a collection, found {proof:?}"
+            )))
+        }
+    };
+    ctx.add_per_item_jit_cost(110, 20, 64, proof_len as u32)?;
+    let proof = &Bytes::from(proof.try_extract_into::<Vec<u8>>()?);
     let starting_digest = Bytes::from(avl_tree_data.digest.clone());
     BatchAVLVerifier::new(
         &starting_digest,
@@ -140,288 +154,280 @@ pub(crate) static UPDATE_DIGEST_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     Ok(Value::AvlTree(Box::new(avl_tree_data)))
 };
 
-pub(crate) static GET_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, obj, args| {
-        let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-        let key = {
-            let v = args.first().cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing first arg (entries)".to_string())
-            })?;
-            v.try_extract_into::<Vec<u8>>()?
-        };
-        let proof = {
-            let v = args.get(1).cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
-            })?;
-            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-        };
+pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let key = {
+        let v = args
+            .first()
+            .cloned()
+            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
+        v.try_extract_into::<Vec<u8>>()?
+    };
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-            Ok(bv) => bv,
-            // The reference impl's verifier construction never throws: a proof that
-            // does not match the tree digest yields a verifier with no reconstructed
-            // tree, the lookup fails, and `get_eval` raises the same "Tree proof is
-            // incorrect" error as an op-level lookup failure
-            // (`CErgoTreeEvaluator.get_eval`). The JVM charges that lookup before
-            // raising — charge-then-throw. Cost-limit errors from the construction
-            // charge are not construction failures — they propagate.
-            Err(EvalError::AvlTree(_)) => {
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: a proof that
+        // does not match the tree digest yields a verifier with no reconstructed
+        // tree, the lookup fails, and `get_eval` raises the same "Tree proof is
+        // incorrect" error as an op-level lookup failure
+        // (`CErgoTreeEvaluator.get_eval`). The JVM charges that lookup before
+        // raising — charge-then-throw. Cost-limit errors from the construction
+        // charge are not construction failures — they propagate.
+        Err(EvalError::AvlTree(_)) => {
+            ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+            return Err(EvalError::AvlTree(format!(
+                "Tree proof is incorrect {:?}",
+                avl_tree_data
+            )));
+        }
+        Err(e) => return Err(e),
+    };
+    // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
+    // PerItemCost(40, 10, 1) per height item (Scala `get_eval`).
+    ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+    match bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
+        Ok(opt) => match opt {
+            Some(v) => Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
+                v.iter().map(|&b| b as i8).collect(),
+            )))))),
+            _ => Ok(Value::Opt(None)),
+        },
+        Err(_) => Err(EvalError::AvlTree(format!(
+            "Tree proof is incorrect {:?}",
+            avl_tree_data
+        ))),
+    }
+};
+
+pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+
+    let keys = {
+        let v = args
+            .first()
+            .cloned()
+            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
+        v.try_extract_into::<Vec<Vec<u8>>>()?
+    };
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
+
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: lookups
+        // fail on the no-tree verifier, so the first key raises the same
+        // "Tree proof is incorrect" error as an op-level lookup failure
+        // (charged like any first lookup — charge-then-throw) — and with no
+        // keys no lookup runs at all, leaving the empty collection
+        // (`CErgoTreeEvaluator.getMany_eval`). Cost-limit errors from the
+        // construction charge are not construction failures — they
+        // propagate.
+        Err(EvalError::AvlTree(_)) => {
+            return if keys.is_empty() {
+                Ok(Value::Coll(CollValue::Generic {
+                    elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
+                    items: Arc::new([]),
+                }))
+            } else {
                 ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-                return Err(EvalError::AvlTree(format!(
+                Err(EvalError::AvlTree(format!(
                     "Tree proof is incorrect {:?}",
+                    avl_tree_data
+                )))
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    let height = tree_height(&avl_tree_data);
+    let res = keys
+        .into_iter()
+        .map(|key| {
+            // Per key, the cost of a tree lookup is O(treeHeight):
+            // `LookupAvlTree_Info` = PerItemCost(40, 10, 1) per height item
+            // (Scala `getMany_eval`).
+            ctx.add_per_item_jit_cost(40, 10, 1, height)?;
+            if let Ok(r) = bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
+                if let Some(v) = r {
+                    Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
+                        v.iter().map(|&b| b as i8).collect(),
+                    ))))))
+                } else {
+                    Ok(Value::Opt(None))
+                }
+            } else {
+                Err(EvalError::AvlTree(format!(
+                    "Tree proof is incorrect {:?}",
+                    avl_tree_data
+                )))
+            }
+        })
+        .collect::<Result<Arc<[_]>, _>>()?;
+
+    Ok(Value::Coll(CollValue::Generic {
+        elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
+        items: res,
+    }))
+};
+
+pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+
+    // Flag-check cost: `isInsertAllowed_Info` = FixedCost(15) (Scala `insert_eval`).
+    ctx.add_jit_cost(15)?;
+    if !avl_tree_data.tree_flags.insert_allowed() {
+        return Ok(Value::Opt(None));
+    }
+
+    let entries = {
+        let v = args
+            .first()
+            .cloned()
+            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
+        v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
+    };
+
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
+
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: every
+        // insert fails on the no-tree verifier, which pre-v3 raises at the
+        // first failed op and from v3 fast-breaks (issue #908), leaving the
+        // None digest — so the method evaluates to None. With no entries no
+        // op runs and the digest is still None at every version
+        // (`CErgoTreeEvaluator.insert_eval`). The JVM charges that first
+        // (failing) insert before raising/breaking, so mirror the charge.
+        // Cost-limit errors from the construction charge are not
+        // construction failures — they propagate.
+        Err(EvalError::AvlTree(_)) => {
+            if entries.is_empty() {
+                return Ok(Value::Opt(None));
+            }
+            let n_items = tree_height(&avl_tree_data).max(1);
+            ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
+            return if ctx.tree_version() >= ErgoTreeVersion::V3 {
+                Ok(Value::Opt(None))
+            } else {
+                Err(EvalError::AvlTree(format!(
+                    "Incorrect insert for {:?}",
+                    avl_tree_data
+                )))
+            };
+        }
+        Err(e) => return Err(e),
+    };
+    // When the tree is empty we still need to add the insert cost (Scala
+    // `insert_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
+    let n_items = tree_height(&avl_tree_data).max(1);
+    for (key, value) in entries {
+        // The cost of a tree insert is O(treeHeight): `InsertIntoAvlTree_Info`
+        // = PerItemCost(40, 10, 1) per height item.
+        ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
+        if bv
+            .perform_one_operation(&Operation::Insert(KeyValue {
+                key: key.into(),
+                value: value.into(),
+            }))
+            .is_err()
+        {
+            if ctx.tree_version() >= ErgoTreeVersion::V3 {
+                break;
+            } else {
+                return Err(EvalError::AvlTree(format!(
+                    "Incorrect insert for {:?}",
                     avl_tree_data
                 )));
             }
-            Err(e) => return Err(e),
-        };
-        // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
-        // PerItemCost(40, 10, 1) per height item (Scala `get_eval`).
-        ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-        match bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
-            Ok(opt) => match opt {
-                Some(v) => Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
-                    v.iter().map(|&b| b as i8).collect(),
-                )))))),
-                _ => Ok(Value::Opt(None)),
-            },
-            Err(_) => Err(EvalError::AvlTree(format!(
-                "Tree proof is incorrect {:?}",
-                avl_tree_data
-            ))),
         }
+    }
+    Ok(if let Some(new_digest) = bv.digest() {
+        // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
+        ctx.add_jit_cost(40)?;
+        avl_tree_data.digest = new_digest.to_vec();
+        Value::Opt(Some(Box::new(Value::AvlTree(avl_tree_data.into()))))
+    } else {
+        Value::Opt(None)
+    })
+};
+
+pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+
+    // Flag-check cost: `isRemoveAllowed_Info` = FixedCost(15) (Scala `remove_eval`).
+    ctx.add_jit_cost(15)?;
+    if !avl_tree_data.tree_flags.remove_allowed() {
+        return Ok(Value::Opt(None));
+    }
+
+    let keys = {
+        let v = args
+            .first()
+            .cloned()
+            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (keys)".to_string()))?;
+        v.try_extract_into::<Vec<Vec<u8>>>()?
     };
 
-pub(crate) static GET_MANY_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, obj, args| {
-        let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-        let keys = {
-            let v = args.first().cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing first arg (entries)".to_string())
-            })?;
-            v.try_extract_into::<Vec<Vec<u8>>>()?
-        };
-        let proof = {
-            let v = args.get(1).cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
-            })?;
-            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-        };
-
-        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-            Ok(bv) => bv,
-            // The reference impl's verifier construction never throws: lookups
-            // fail on the no-tree verifier, so the first key raises the same
-            // "Tree proof is incorrect" error as an op-level lookup failure
-            // (charged like any first lookup — charge-then-throw) — and with no
-            // keys no lookup runs at all, leaving the empty collection
-            // (`CErgoTreeEvaluator.getMany_eval`). Cost-limit errors from the
-            // construction charge are not construction failures — they
-            // propagate.
-            Err(EvalError::AvlTree(_)) => {
-                return if keys.is_empty() {
-                    Ok(Value::Coll(CollValue::Generic {
-                        elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
-                        items: Arc::new([]),
-                    }))
-                } else {
-                    ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-                    Err(EvalError::AvlTree(format!(
-                        "Tree proof is incorrect {:?}",
-                        avl_tree_data
-                    )))
-                }
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: every
+        // remove fails on the no-tree verifier (op results are ignored —
+        // `remove_eval` loops with `cfor`, no break), and the final digest
+        // is None — so the method evaluates to None
+        // (`CErgoTreeEvaluator.remove_eval`). The JVM still attempts and
+        // charges EVERY remove plus the unconditional digest read, so
+        // mirror those charges. Cost-limit errors from the construction
+        // charge are not construction failures — they propagate.
+        Err(EvalError::AvlTree(_)) => {
+            let n_items = tree_height(&avl_tree_data).max(1);
+            for _ in 0..keys.len() {
+                ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
             }
-            Err(e) => return Err(e),
-        };
-        let height = tree_height(&avl_tree_data);
-        let res = keys
-            .into_iter()
-            .map(|key| {
-                // Per key, the cost of a tree lookup is O(treeHeight):
-                // `LookupAvlTree_Info` = PerItemCost(40, 10, 1) per height item
-                // (Scala `getMany_eval`).
-                ctx.add_per_item_jit_cost(40, 10, 1, height)?;
-                if let Ok(r) = bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
-                    if let Some(v) = r {
-                        Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
-                            v.iter().map(|&b| b as i8).collect(),
-                        ))))))
-                    } else {
-                        Ok(Value::Opt(None))
-                    }
-                } else {
-                    Err(EvalError::AvlTree(format!(
-                        "Tree proof is incorrect {:?}",
-                        avl_tree_data
-                    )))
-                }
-            })
-            .collect::<Result<Arc<[_]>, _>>()?;
-
-        Ok(Value::Coll(CollValue::Generic {
-            elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
-            items: res,
-        }))
-    };
-
-pub(crate) static INSERT_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, obj, args| {
-        let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-
-        // Flag-check cost: `isInsertAllowed_Info` = FixedCost(15) (Scala `insert_eval`).
-        ctx.add_jit_cost(15)?;
-        if !avl_tree_data.tree_flags.insert_allowed() {
+            ctx.add_jit_cost(15)?;
             return Ok(Value::Opt(None));
         }
-
-        let entries = {
-            let v = args.first().cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing first arg (entries)".to_string())
-            })?;
-            v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
-        };
-
-        let proof = {
-            let v = args.get(1).cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
-            })?;
-            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-        };
-
-        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-            Ok(bv) => bv,
-            // The reference impl's verifier construction never throws: every
-            // insert fails on the no-tree verifier, which pre-v3 raises at the
-            // first failed op and from v3 fast-breaks (issue #908), leaving the
-            // None digest — so the method evaluates to None. With no entries no
-            // op runs and the digest is still None at every version
-            // (`CErgoTreeEvaluator.insert_eval`). The JVM charges that first
-            // (failing) insert before raising/breaking, so mirror the charge.
-            // Cost-limit errors from the construction charge are not
-            // construction failures — they propagate.
-            Err(EvalError::AvlTree(_)) => {
-                if entries.is_empty() {
-                    return Ok(Value::Opt(None));
-                }
-                let n_items = tree_height(&avl_tree_data).max(1);
-                ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
-                return if ctx.tree_version() >= ErgoTreeVersion::V3 {
-                    Ok(Value::Opt(None))
-                } else {
-                    Err(EvalError::AvlTree(format!(
-                        "Incorrect insert for {:?}",
-                        avl_tree_data
-                    )))
-                };
-            }
-            Err(e) => return Err(e),
-        };
-        // When the tree is empty we still need to add the insert cost (Scala
-        // `insert_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
-        let n_items = tree_height(&avl_tree_data).max(1);
-        for (key, value) in entries {
-            // The cost of a tree insert is O(treeHeight): `InsertIntoAvlTree_Info`
-            // = PerItemCost(40, 10, 1) per height item.
-            ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
-            if bv
-                .perform_one_operation(&Operation::Insert(KeyValue {
-                    key: key.into(),
-                    value: value.into(),
-                }))
-                .is_err()
-            {
-                if ctx.tree_version() >= ErgoTreeVersion::V3 {
-                    break;
-                } else {
-                    return Err(EvalError::AvlTree(format!(
-                        "Incorrect insert for {:?}",
-                        avl_tree_data
-                    )));
-                }
-            }
-        }
-        Ok(if let Some(new_digest) = bv.digest() {
-            // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
-            ctx.add_jit_cost(40)?;
-            avl_tree_data.digest = new_digest.to_vec();
-            Value::Opt(Some(Box::new(Value::AvlTree(avl_tree_data.into()))))
-        } else {
-            Value::Opt(None)
-        })
+        Err(e) => return Err(e),
     };
-
-pub(crate) static REMOVE_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, obj, args| {
-        let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-
-        // Flag-check cost: `isRemoveAllowed_Info` = FixedCost(15) (Scala `remove_eval`).
-        ctx.add_jit_cost(15)?;
-        if !avl_tree_data.tree_flags.remove_allowed() {
-            return Ok(Value::Opt(None));
-        }
-
-        let keys = {
-            let v = args.first().cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing first arg (keys)".to_string())
-            })?;
-            v.try_extract_into::<Vec<Vec<u8>>>()?
-        };
-
-        let proof = {
-            let v = args.get(1).cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
-            })?;
-            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-        };
-
-        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-            Ok(bv) => bv,
-            // The reference impl's verifier construction never throws: every
-            // remove fails on the no-tree verifier (op results are ignored —
-            // `remove_eval` loops with `cfor`, no break), and the final digest
-            // is None — so the method evaluates to None
-            // (`CErgoTreeEvaluator.remove_eval`). The JVM still attempts and
-            // charges EVERY remove plus the unconditional digest read, so
-            // mirror those charges. Cost-limit errors from the construction
-            // charge are not construction failures — they propagate.
-            Err(EvalError::AvlTree(_)) => {
-                let n_items = tree_height(&avl_tree_data).max(1);
-                for _ in 0..keys.len() {
-                    ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
-                }
-                ctx.add_jit_cost(15)?;
-                return Ok(Value::Opt(None));
-            }
-            Err(e) => return Err(e),
-        };
-        // When the tree is empty we still need to add the remove cost (Scala
-        // `remove_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
-        let n_items = tree_height(&avl_tree_data).max(1);
-        for key in keys {
-            // The cost of a tree remove is O(treeHeight): `RemoveAvlTree_Info`
-            // = PerItemCost(100, 15, 1) per height item.
-            ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
-            // op results are ignored — the reference impl loops with `cfor`,
-            // no break, no check (`CErgoTreeEvaluator.remove_eval`); a failed
-            // op invalidates the verifier, so the digest below decides the
-            // outcome
-            let _ = bv.perform_one_operation(&Operation::Remove(Bytes::from(key)));
-        }
-        // Digest read after the operation loop: `digest_Info` = FixedCost(15)
-        // (Scala `remove_eval` charges it unconditionally, unlike insert/update).
-        ctx.add_jit_cost(15)?;
-        if let Some(new_digest) = bv.digest() {
-            // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
-            ctx.add_jit_cost(40)?;
-            avl_tree_data.digest = new_digest.to_vec();
-            Ok(Value::Opt(Some(Box::new(Value::AvlTree(
-                avl_tree_data.into(),
-            )))))
-        } else {
-            Ok(Value::Opt(None))
-        }
-    };
+    // When the tree is empty we still need to add the remove cost (Scala
+    // `remove_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
+    let n_items = tree_height(&avl_tree_data).max(1);
+    for key in keys {
+        // The cost of a tree remove is O(treeHeight): `RemoveAvlTree_Info`
+        // = PerItemCost(100, 15, 1) per height item.
+        ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
+        // op results are ignored — the reference impl loops with `cfor`,
+        // no break, no check (`CErgoTreeEvaluator.remove_eval`); a failed
+        // op invalidates the verifier, so the digest below decides the
+        // outcome
+        let _ = bv.perform_one_operation(&Operation::Remove(Bytes::from(key)));
+    }
+    // Digest read after the operation loop: `digest_Info` = FixedCost(15)
+    // (Scala `remove_eval` charges it unconditionally, unlike insert/update).
+    ctx.add_jit_cost(15)?;
+    if let Some(new_digest) = bv.digest() {
+        // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
+        ctx.add_jit_cost(40)?;
+        avl_tree_data.digest = new_digest.to_vec();
+        Ok(Value::Opt(Some(Box::new(Value::AvlTree(
+            avl_tree_data.into(),
+        )))))
+    } else {
+        Ok(Value::Opt(None))
+    }
+};
 
 pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
@@ -433,15 +439,12 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         Bytes::from(v.try_extract_into::<Vec<u8>>()?)
     };
 
-    let proof = {
-        let v = args
-            .get(1)
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
-        Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-    };
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: the lookup
         // fails on the no-tree verifier and `contains_eval` maps the failure to
@@ -467,75 +470,73 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     })
 };
 
-pub(crate) static UPDATE_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, obj, args| {
-        let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
 
-        // Flag-check cost: `isUpdateAllowed_Info` = FixedCost(15) (Scala `update_eval`).
-        ctx.add_jit_cost(15)?;
-        if !avl_tree_data.tree_flags.update_allowed() {
+    // Flag-check cost: `isUpdateAllowed_Info` = FixedCost(15) (Scala `update_eval`).
+    ctx.add_jit_cost(15)?;
+    if !avl_tree_data.tree_flags.update_allowed() {
+        return Ok(Value::Opt(None));
+    }
+
+    let entries = {
+        let v = args
+            .first()
+            .cloned()
+            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
+        v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
+    };
+
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
+
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: every
+        // update fails on the no-tree verifier (`update_eval`'s forall
+        // fast-breaks at the first failure), and the final digest is None —
+        // so the method evaluates to None
+        // (`CErgoTreeEvaluator.update_eval`). The JVM still charges the
+        // first (failing) update before its forall fast-breaks, so mirror
+        // that charge. Cost-limit errors from the construction charge are
+        // not construction failures — they propagate.
+        Err(EvalError::AvlTree(_)) => {
+            if !entries.is_empty() {
+                let n_items = tree_height(&avl_tree_data).max(1);
+                ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+            }
             return Ok(Value::Opt(None));
         }
-
-        let entries = {
-            let v = args.first().cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing first arg (entries)".to_string())
-            })?;
-            v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
-        };
-
-        let proof = {
-            let v = args.get(1).cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
-            })?;
-            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-        };
-
-        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-            Ok(bv) => bv,
-            // The reference impl's verifier construction never throws: every
-            // update fails on the no-tree verifier (`update_eval`'s forall
-            // fast-breaks at the first failure), and the final digest is None —
-            // so the method evaluates to None
-            // (`CErgoTreeEvaluator.update_eval`). The JVM still charges the
-            // first (failing) update before its forall fast-breaks, so mirror
-            // that charge. Cost-limit errors from the construction charge are
-            // not construction failures — they propagate.
-            Err(EvalError::AvlTree(_)) => {
-                if !entries.is_empty() {
-                    let n_items = tree_height(&avl_tree_data).max(1);
-                    ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
-                }
-                return Ok(Value::Opt(None));
-            }
-            Err(e) => return Err(e),
-        };
-        // When the tree is empty we still need to add the update cost (Scala
-        // `update_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
-        let n_items = tree_height(&avl_tree_data).max(1);
-        for (key, value) in entries {
-            // The cost of a tree update is O(treeHeight): `UpdateAvlTree_Info`
-            // = PerItemCost(120, 20, 1) per height item.
-            ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
-            if bv
-                .perform_one_operation(&Operation::Update(KeyValue {
-                    key: key.into(),
-                    value: value.into(),
-                }))
-                .is_err()
-            {
-                break;
-            }
-        }
-        Ok(if let Some(new_digest) = bv.digest() {
-            // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
-            ctx.add_jit_cost(40)?;
-            avl_tree_data.digest = new_digest.to_vec();
-            Value::Opt(Some(Value::AvlTree(avl_tree_data.into()).into()))
-        } else {
-            Value::Opt(None)
-        })
+        Err(e) => return Err(e),
     };
+    // When the tree is empty we still need to add the update cost (Scala
+    // `update_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
+    let n_items = tree_height(&avl_tree_data).max(1);
+    for (key, value) in entries {
+        // The cost of a tree update is O(treeHeight): `UpdateAvlTree_Info`
+        // = PerItemCost(120, 20, 1) per height item.
+        ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+        if bv
+            .perform_one_operation(&Operation::Update(KeyValue {
+                key: key.into(),
+                value: value.into(),
+            }))
+            .is_err()
+        {
+            break;
+        }
+    }
+    Ok(if let Some(new_digest) = bv.digest() {
+        // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
+        ctx.add_jit_cost(40)?;
+        avl_tree_data.digest = new_digest.to_vec();
+        Value::Opt(Some(Value::AvlTree(avl_tree_data.into()).into()))
+    } else {
+        Value::Opt(None)
+    })
+};
 
 pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
@@ -556,15 +557,12 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
     };
 
-    let proof = {
-        let v = args
-            .get(1)
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
-        Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-    };
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: with a proof
         // that does not match the tree digest it yields a verifier with no
@@ -2144,5 +2142,41 @@ mod tests {
         assert_eq!(tree_height(&tree(vec![1, 2, 3], 32)), 0);
         assert_eq!(tree_height(&tree(vec![0u8; 32], 32)), 0);
         assert_eq!(tree_height(&tree(vec![0u8; 34], 32)), 0);
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod charge_order {
+    use crate::eval::test_util::eval_body_err;
+    use crate::eval::EvalError;
+
+    /// A tree constant: an all-zero 33-byte digest, every operation allowed, 32-byte keys,
+    /// no fixed value length
+    const TREE: &str = "64000000000000000000000000000000000000000000000000000000000000000000072000";
+
+    // A proof that is a collection of another item type passes the call's class check.
+    // sigmastate's `createVerifier` adds its per-item cost over the proof's LENGTH and builds
+    // the verifier inside that block, where the proof's array is cast
+    // (`CErgoTreeEvaluator.scala:71-75`); a modifying method has added its flag costs before.
+    // Each row: an empty key, keys or entries, and an empty `Coll[Int]` as the proof.
+    // Measured on the sigma-state 6.0.7 jars.
+    #[test]
+    fn a_proof_of_another_item_type_pays_for_the_verifier() {
+        for (method_id, args, cost) in [
+            ("09", "020e001000", 149),       // contains
+            ("0a", "020e001000", 149),       // get
+            ("0b", "021a001000", 149),       // getMany
+            ("0c", "020c3c0e0e001000", 164), // insert
+            ("0d", "020c3c0e0e001000", 164), // update
+            ("0e", "021a001000", 164),       // remove
+            ("10", "020c3c0e0e001000", 179), // insertOrUpdate
+        ] {
+            let body = alloc::format!("dc64{method_id}{TREE}{args}");
+            let (e, c) = eval_body_err(&body);
+            assert!(matches!(e, EvalError::TryExtractFrom(_)), "{body}: {e:?}");
+            assert_eq!(c, cost, "{body}");
+        }
     }
 }
