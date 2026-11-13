@@ -12,8 +12,7 @@ use k256::Scalar;
 
 use super::EvalFn;
 
-pub(crate) static GET_ENCODED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(250)?;
+pub(crate) static GET_ENCODED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let encoded: Vec<u8> = match obj {
         Value::GroupElement(ec_point) => Ok(ec_point.sigma_serialize_bytes()?),
         _ => Err(EvalError::UnexpectedValue(format!(
@@ -25,8 +24,7 @@ pub(crate) static GET_ENCODED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     Ok(Value::from(encoded))
 };
 
-pub(crate) static NEGATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(45)?;
+pub(crate) static NEGATE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let negated: EcPoint = match obj {
         Value::GroupElement(ec_point) => Ok(-(*ec_point)),
         _ => Err(EvalError::UnexpectedValue(format!(
@@ -37,8 +35,7 @@ pub(crate) static NEGATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     Ok(Value::GroupElement(Ref::from(negated)))
 };
 
-pub(crate) static EXPONENTIATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, mut args| {
-    ctx.add_jit_cost(900)?;
+pub(crate) static EXPONENTIATE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, mut args| {
     // the exponent as it is: this method is declared below tree version 3, where a `BigInt` can
     // be outside the 256-bit range
     let exponent = args
@@ -48,8 +45,7 @@ pub(crate) static EXPONENTIATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, mut args|
     crate::eval::exponentiate::exponentiate(obj.try_extract_into()?, &exponent)
 };
 
-pub(crate) static MULTIPLY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, mut args| {
-    ctx.add_jit_cost(40)?;
+pub(crate) static MULTIPLY_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, mut args| {
     let obj = obj.try_extract_into::<EcPoint>()?;
     let right = args
         .pop()
@@ -58,8 +54,7 @@ pub(crate) static MULTIPLY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, mut args| {
     Ok((obj * &right).into())
 };
 
-pub(crate) static EXPONENTIATE_UNSIGNED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, mut args| {
-    ctx.add_jit_cost(900)?;
+pub(crate) static EXPONENTIATE_UNSIGNED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, mut args| {
     let exponent: Scalar = args
         .pop()
         .ok_or_else(|| EvalError::UnexpectedValue("exponentiate: first argument not found".into()))?

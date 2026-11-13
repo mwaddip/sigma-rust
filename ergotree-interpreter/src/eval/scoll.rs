@@ -440,8 +440,7 @@ pub(crate) static ENDS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     Ok(Value::from(super::coll_shape::ends_with(&coll, suffix)?))
 };
 
-pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(30)?;
+pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let Value::Coll(coll) = obj else {
         return Err(EvalError::UnexpectedValue(format!(
             "get: expected Coll, found {obj:?}"
@@ -475,16 +474,14 @@ fn coll_receiver<'ctx>(obj: Value<'ctx>, method: &str) -> Result<CollValue<'ctx>
 
 /// `Coll.size` (id 1): sigmastate calls `Coll.size` reflectively at `SizeOf`'s fixed cost
 /// (`invokeFixed`, v6.0.7 `methods.scala:821`)
-pub(crate) static SIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(14)?;
+pub(crate) static SIZE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let coll = coll_receiver(obj, "size")?;
     Ok(Value::Int(coll.len() as i32))
 };
 
 /// `Coll.apply` (id 10): sigmastate calls `Coll.apply` reflectively at `ByIndex`'s fixed cost
 /// (`methods.scala:940`); out of range it throws
-pub(crate) static APPLY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(30)?;
+pub(crate) static APPLY_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let coll = coll_receiver(obj, "apply")?;
     let index = args
         .first()

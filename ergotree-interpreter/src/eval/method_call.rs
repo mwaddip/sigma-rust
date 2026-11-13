@@ -3,6 +3,7 @@ use ergotree_ir::mir::expr::Expr;
 use ergotree_ir::mir::method_call::MethodCall;
 use ergotree_ir::mir::value::Value;
 
+use super::method_cost::fixed_method_cost;
 use super::smethod_eval_fn;
 use super::Context;
 use super::Env;
@@ -26,6 +27,8 @@ impl Evaluable for MethodCall {
 /// A method call, with or without arguments: sigmastate's `MethodCall.eval`
 /// (`values.scala:1361-1391`; a `PropertyCall` is the same node with no arguments, `:1351`).
 /// The receiver is evaluated first and the call's own cost is added after it (`:1362-1363`).
+/// Then the arguments, the method's cost if it is a fixed one, the refusals of a call the JVM's
+/// invoke refuses, and the evaluator.
 pub(crate) fn call_method<'ctx>(
     method: &SMethod,
     obj: &Expr,
@@ -37,6 +40,11 @@ pub(crate) fn call_method<'ctx>(
     ectx.add_jit_cost(4)?; // MethodCall = Fixed(4)
     let argsv: Result<Vec<Value>, EvalError> = args.iter().map(|arg| arg.eval(env, ectx)).collect();
     let argsv = argsv?;
+    // a fixed-cost method is paid for before it is invoked, so before every refusal below
+    // (`:1364-1380`); any other method adds its costs in its body (`:1381-1391`)
+    if let Some(cost) = fixed_method_cost(method) {
+        ectx.add_jit_cost(cost)?;
+    }
     check_arity(method, argsv.len())?;
     check_receiver(method, &ov)?;
     let argsv = widen_arguments(method, argsv);

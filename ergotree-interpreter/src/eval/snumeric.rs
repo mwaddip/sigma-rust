@@ -21,15 +21,10 @@ use num_traits::{CheckedRem, CheckedShr};
 
 use super::{fits_256_bits, EvalError, EvalFn};
 
-/// Scala `FixedCost(JitCost(5))` charged per numeric 6.0 method call —
-/// `SNumericTypeMethods.{ToBytes,ToBits,BitwiseOp}_CostKind` and
-/// `SBigIntMethods.ToUnsignedCostKind` in sigma-state `ast/methods.scala`.
-/// Charged inside each eval fn below, mirroring how every other method family
-/// charges its own costKind (scoll PerItemCost; sbox/savltree/sglobal FixedCost).
-const NUMERIC_METHOD_COST_KIND: u64 = 5;
+// Every method below has a fixed cost on the JVM, which the call adds before it invokes the
+// method: `fixed_method_cost` (`eval/method_cost.rs`).
 
-const TO_BYTES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
+const TO_BYTES_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     // the four fixed-width containers build a generic `Coll[Byte]`, the two arbitrary-precision
     // ones a specialised one (SANTA `Coll.producer_specialisation_witness` H3, H4, H12)
     fn generic_bytes(bytes: &[u8]) -> Value<'static> {
@@ -57,8 +52,7 @@ const TO_BYTES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     })
 };
 
-static TO_BITS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
+static TO_BITS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     fn byte_to_bits(mut byte: u8) -> [bool; 8] {
         let mut res = [false; 8];
         let mut i = 8;
@@ -92,8 +86,7 @@ static TO_BITS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     })
 };
 
-static BITWISE_INVERSE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
+static BITWISE_INVERSE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     Ok(match obj {
         Value::Byte(obj) => (!obj).into(),
         Value::Short(obj) => (!obj).into(),
@@ -109,8 +102,7 @@ static BITWISE_INVERSE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     })
 };
 
-static BITWISE_OR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
+static BITWISE_OR_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     // Checked rather than indexed: the argument count is the parser's to decide, and
     // sigmastate parses a zero-argument MethodCall below ErgoTree v3 (writing it back as a
     // PropertyCall). Indexing aborted the process on one.
@@ -145,8 +137,7 @@ static BITWISE_OR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     })
 };
 
-static BITWISE_AND_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
+static BITWISE_AND_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     // Checked rather than indexed: the argument count is the parser's to decide, and
     // sigmastate parses a zero-argument MethodCall below ErgoTree v3 (writing it back as a
     // PropertyCall). Indexing aborted the process on one.
@@ -181,8 +172,7 @@ static BITWISE_AND_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     })
 };
 
-static BITWISE_XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
+static BITWISE_XOR_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let rhs = args
         .first()
         .ok_or_else(|| EvalError::UnexpectedValue("rhs missing".into()))?
@@ -227,8 +217,7 @@ fn invalid_shift_err() -> EvalError {
     EvalError::Misc("shift value is out of bounds".into())
 }
 
-static SHIFT_LEFT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
+static SHIFT_LEFT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let shift_value: u32 = args
         .first()
         .ok_or_else(|| EvalError::UnexpectedValue("shift arg missing".into()))?
@@ -310,8 +299,7 @@ fn unsigned_bigint_shift_left(
         })
 }
 
-static SHIFT_RIGHT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
+static SHIFT_RIGHT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let shift_value: u32 = args
         .first()
         .ok_or_else(|| EvalError::UnexpectedValue("shift arg missing".into()))?
@@ -352,28 +340,14 @@ static SHIFT_RIGHT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     })
 };
 
-static TO_UNSIGNED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(NUMERIC_METHOD_COST_KIND)?;
+static TO_UNSIGNED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let signed = obj.try_extract_into::<BigInt256>()?;
     UnsignedBigInt::try_from(signed)
         .map_err(|err| EvalError::ArithmeticException(err.into()))
         .map(Value::from)
 };
 
-// UnsignedBigInt modular-method costKinds -- each a Scala FixedCost(JitCost(n))
-// (SBigIntMethods.toUnsignedMod / SUnsignedBigIntMethods.*, methods.scala
-// 551-609). Each eval fn charges its FixedCost per call, mirroring
-// NUMERIC_METHOD_COST_KIND above.
-const TO_UNSIGNED_MOD_COST: u64 = 15;
-const MOD_INVERSE_COST: u64 = 150;
-const PLUS_MOD_COST: u64 = 30;
-const SUBTRACT_MOD_COST: u64 = 30;
-const MULTIPLY_MOD_COST: u64 = 40;
-const MOD_COST: u64 = 20;
-const TO_SIGNED_COST: u64 = 10;
-
-static TO_UNSIGNED_MOD_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(TO_UNSIGNED_MOD_COST)?;
+static TO_UNSIGNED_MOD_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let signed = obj.try_extract_into::<BigInt256>()?;
     let modulus = args
         .first()
@@ -385,8 +359,7 @@ static TO_UNSIGNED_MOD_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::ArithmeticException("toUnsignedMod: can't divide by 0".into()))
 };
 
-static MOD_INVERSE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(MOD_INVERSE_COST)?;
+static MOD_INVERSE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let obj = obj.try_extract_into::<UnsignedBigInt>()?;
     let modulus = args
         .first()
@@ -398,8 +371,7 @@ static MOD_INVERSE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::ArithmeticException("modInv: can't divide by 0".into()))
 };
 
-static PLUS_MOD_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(PLUS_MOD_COST)?;
+static PLUS_MOD_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let obj = obj.try_extract_into::<UnsignedBigInt>()?;
     let b = args
         .first()
@@ -416,8 +388,7 @@ static PLUS_MOD_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::ArithmeticException("plusMod: can't divide by 0".into()))
 };
 
-static SUBTRACT_MOD_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(SUBTRACT_MOD_COST)?;
+static SUBTRACT_MOD_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let obj = obj.try_extract_into::<UnsignedBigInt>()?;
     let b = args
         .first()
@@ -434,8 +405,7 @@ static SUBTRACT_MOD_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::ArithmeticException("subtractMod: can't divide by 0".into()))
 };
 
-static MULTIPLY_MOD_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(MULTIPLY_MOD_COST)?;
+static MULTIPLY_MOD_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let obj = obj.try_extract_into::<UnsignedBigInt>()?;
     let b = args
         .first()
@@ -452,8 +422,7 @@ static MULTIPLY_MOD_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::ArithmeticException("multiplyMod: can't divide by 0".into()))
 };
 
-static MOD_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(MOD_COST)?;
+static MOD_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let obj = obj.try_extract_into::<UnsignedBigInt>()?;
     let modulus = args
         .first()
@@ -465,8 +434,7 @@ static MOD_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .ok_or_else(|| EvalError::ArithmeticException("mod: can't divide by 0".into()))
 };
 
-static TO_SIGNED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(TO_SIGNED_COST)?;
+static TO_SIGNED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let obj = obj.try_extract_into::<UnsignedBigInt>()?;
     BigInt256::try_from(obj)
         .map_err(|e| EvalError::ArithmeticException(e.into()))

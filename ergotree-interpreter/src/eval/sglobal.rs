@@ -22,10 +22,8 @@ use ergo_chain_types::{autolykos_pow_scheme::AutolykosPowScheme, ec_point::gener
 use ergotree_ir::bigint256::BigInt256;
 use ergotree_ir::types::stype::SType;
 
-pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
-    ctx.add_jit_cost(10)?;
-    Ok(Value::from(generator()))
-};
+pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn =
+    |_mc, _env, _ctx, _obj, _args| Ok(Value::from(generator()));
 
 pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
     let right_v = args
@@ -42,9 +40,7 @@ pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
     super::xor::xor_with_costing(ctx, &left_v, &right_v)
 };
 
-pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
-    ctx.add_jit_cost(10)?;
-
+pub(crate) static SGLOBAL_FROM_BIGENDIAN_BYTES_EVAL_FN: EvalFn = |mc, _env, _ctx, _obj, args| {
     let bytes_val = args
         .first()
         .cloned()
@@ -179,8 +175,7 @@ pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
     Ok(Value::from(buf))
 };
 
-pub(crate) static SGLOBAL_SOME_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
-    ctx.add_jit_cost(5)?;
+pub(crate) static SGLOBAL_SOME_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, args| {
     let value = args
         .first()
         .cloned()
@@ -188,14 +183,10 @@ pub(crate) static SGLOBAL_SOME_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
     Ok(Value::Opt(Some(Box::new(value))))
 };
 
-pub(crate) static SGLOBAL_NONE_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
-    ctx.add_jit_cost(5)?;
-    Ok(Value::Opt(None))
-};
+pub(crate) static SGLOBAL_NONE_EVAL_FN: EvalFn =
+    |_mc, _env, _ctx, _obj, _args| Ok(Value::Opt(None));
 
-pub(crate) static ENCODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
-    // Scala Global.encodeNbits EncodeNBitsCost = FixedCost(JitCost(25)).
-    ctx.add_jit_cost(25)?;
+pub(crate) static ENCODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, args| {
     let bigint: BigInt = args
         .first()
         .cloned()
@@ -205,9 +196,7 @@ pub(crate) static ENCODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
     Ok(Value::Long(encode_compact_bits(&bigint)))
 };
 
-pub(crate) static DECODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
-    // Scala Global.decodeNbits DecodeNBitsCost = FixedCost(JitCost(50)).
-    ctx.add_jit_cost(50)?;
+pub(crate) static DECODE_NBITS_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, args| {
     let nbits: i64 = args
         .first()
         .cloned()
