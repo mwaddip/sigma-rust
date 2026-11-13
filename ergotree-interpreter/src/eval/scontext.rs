@@ -1,6 +1,7 @@
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
@@ -9,8 +10,56 @@ use ergotree_ir::reference::Ref;
 use ergotree_ir::serialization::SigmaSerializable;
 use ergotree_ir::types::stype::SType;
 
+use super::Context;
 use super::EvalError;
 use super::EvalFn;
+
+// sigmastate's context has one accessor per value (`CContext.scala:36-48`). The value's node
+// reads it after adding its own cost (`values.scala:1465-1542`: `addCost(costKind)`, then
+// `E.context.<accessor>`), and so does the `Context` method declared by that node
+// (`property(name, type, id, <node>)`, `methods.scala:222-229`, `:1742-1748`), which invokes
+// the accessor on its receiver. The six functions below are those accessors, read by the
+// six nodes and by the two such methods that have an evaluator (`LastBlockUtxoRootHash`,
+// `minerPubKey`); none adds a cost: the node adds its own, the call adds the method's.
+
+/// `Context.INPUTS`: the boxes the transaction spends
+pub(crate) fn inputs<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
+    ctx.inputs
+        .iter()
+        .map(|&i| Ref::Borrowed(i))
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// `Context.OUTPUTS`: the boxes the transaction creates
+pub(crate) fn outputs<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
+    ctx.outputs
+        .iter()
+        .map(Ref::Borrowed)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// `Context.HEIGHT`
+pub(crate) fn height<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
+    (ctx.height as i32).into()
+}
+
+/// `Context.SELF`: the box whose script is evaluated
+pub(crate) fn self_box<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
+    Value::CBox(Ref::from(ctx.self_box))
+}
+
+/// `Context.LastBlockUtxoRootHash`. The root is a standalone context input, as in the JVM
+/// (`CContext` returns `lastBlockUtxoRootHash` directly, never deriving it from `headers(0)`)
+pub(crate) fn last_block_utxo_root_hash<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
+    Value::AvlTree(Box::from(ctx.last_block_utxo_root.clone()))
+}
+
+/// `Context.minerPubKey`: the pre-header's miner key, as its bytes
+pub(crate) fn miner_pub_key<'ctx>(ctx: &Context<'ctx>) -> Result<Value<'ctx>, EvalError> {
+    Ok(ctx.pre_header.miner_pk.sigma_serialize_bytes()?.into())
+}
 
 pub(crate) static DATA_INPUTS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
     Ok(Value::Coll(CollValue::Generic {
@@ -53,20 +102,10 @@ pub(crate) static HEADERS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
 pub(crate) static PRE_HEADER_EVAL_FN: EvalFn =
     |_mc, _env, ctx, _obj, _args| Ok(Box::from(ctx.pre_header.clone()).into());
 
-pub(crate) static LAST_BLOCK_UTXO_ROOT_HASH_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
-    // The root is a standalone context input, as in the JVM (`CContext` returns
-    // `lastBlockUtxoRootHash` directly, never deriving it from `headers(0)`).
-    Ok(Value::AvlTree(Box::from(ctx.last_block_utxo_root.clone())))
-};
+pub(crate) static LAST_BLOCK_UTXO_ROOT_HASH_EVAL_FN: EvalFn =
+    |_mc, _env, ctx, _obj, _args| Ok(last_block_utxo_root_hash(ctx));
 
-pub(crate) static MINER_PUBKEY_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
-    Ok(ctx
-        .pre_header
-        .miner_pk
-        .clone()
-        .sigma_serialize_bytes()?
-        .into())
-};
+pub(crate) static MINER_PUBKEY_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| miner_pub_key(ctx);
 
 pub(crate) static GET_VAR_FROM_INPUT_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
     #[allow(clippy::unreachable)] // getVarFromInput output type is always SOption[T]
