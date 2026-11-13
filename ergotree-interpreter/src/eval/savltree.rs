@@ -43,16 +43,61 @@ fn tree_height(avl_tree_data: &AvlTreeData) -> u32 {
     avl_tree_data.digest.last().copied().unwrap_or(0) as u32
 }
 
+/// The items of a keys or entries argument, which the call has checked to be a collection.
+/// sigmastate reads such an argument item by item, each where it uses it
+/// (`CErgoTreeEvaluator.scala:78-241`), so nothing is cast here.
+fn coll_items(v: Value<'_>) -> Result<Vec<Value<'_>>, EvalError> {
+    match v {
+        Value::Coll(coll) => Ok(coll.as_vec()),
+        _ => Err(EvalError::UnexpectedValue(format!(
+            "expected a collection, found {v:?}"
+        ))),
+    }
+}
+
+/// One entry of a key-value collection. sigmastate takes it apart with `case (key, value)`
+/// BEFORE the operation's cost, so an entry that is no pair fails there
+/// (`CErgoTreeEvaluator.scala:140`, `:178`, `:209`).
+fn entry_of(entry: Value<'_>) -> Result<(Value<'_>, Value<'_>), EvalError> {
+    match entry {
+        Value::Pair(pair) => Ok(*pair),
+        _ => Err(EvalError::UnexpectedValue(format!(
+            "expected a pair of a key and a value, found {entry:?}"
+        ))),
+    }
+}
+
+/// A key's or a value's bytes: sigmastate's `toArray`, cast to a byte array where the
+/// operation is performed, so AFTER that item's cost. A collection of another item type
+/// fails here.
+fn bytes_of(v: Value<'_>) -> Result<Bytes, EvalError> {
+    Ok(Bytes::from(v.try_extract_into::<Vec<u8>>()?))
+}
+
 /// Build the batch AVL verifier for `avl_tree_data` over `proof`, charging the
 /// proof-size-scaled construction cost: `CreateAvlVerifier_Info` =
 /// PerItemCost(110, 20, 64) per proof byte (Scala `CErgoTreeEvaluator.createVerifier`
 /// — "the cost of tree reconstruction from proof is O(proof.length)").
+///
+/// The proof comes as the argument's VALUE, which the call has checked to be a collection:
+/// sigmastate adds the cost over the collection's length and builds the verifier inside that
+/// block, where the array is cast to bytes (`CErgoTreeEvaluator.scala:71-75`). So a proof of
+/// another item type has paid for the verifier before it is refused.
 fn create_verifier(
     ctx: &Context,
     avl_tree_data: &AvlTreeData,
-    proof: &Bytes,
+    proof: Value,
 ) -> Result<BatchAVLVerifier, EvalError> {
-    ctx.add_per_item_jit_cost(110, 20, 64, proof.len() as u32)?;
+    let proof_len = match &proof {
+        Value::Coll(coll) => coll.len(),
+        _ => {
+            return Err(EvalError::UnexpectedValue(format!(
+                "expected the proof to be a collection, found {proof:?}"
+            )))
+        }
+    };
+    ctx.add_per_item_jit_cost(110, 20, 64, proof_len as u32)?;
+    let proof = &Bytes::from(proof.try_extract_into::<Vec<u8>>()?);
     let starting_digest = Bytes::from(avl_tree_data.digest.clone());
     BatchAVLVerifier::new(
         &starting_digest,
@@ -71,28 +116,24 @@ fn create_verifier(
     .map_err(map_eval_err)
 }
 
-pub(crate) static DIGEST_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(15)?;
+pub(crate) static DIGEST_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
     Ok(Value::Coll(CollValue::Bytes(
         avl_tree_data.digest.iter().map(|&b| b as i8).collect(),
     )))
 };
 
-pub(crate) static ENABLED_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(15)?;
+pub(crate) static ENABLED_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
     Ok(Value::Byte(avl_tree_data.tree_flags.serialize() as i8))
 };
 
-pub(crate) static KEY_LENGTH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(15)?;
+pub(crate) static KEY_LENGTH_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
     Ok(Value::Int(avl_tree_data.key_length as i32))
 };
 
-pub(crate) static VALUE_LENGTH_OPT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(15)?;
+pub(crate) static VALUE_LENGTH_OPT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
     Ok(Value::Opt(
         avl_tree_data
@@ -102,26 +143,22 @@ pub(crate) static VALUE_LENGTH_OPT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args
     ))
 };
 
-pub(crate) static IS_INSERT_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(15)?;
+pub(crate) static IS_INSERT_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
     Ok(Value::Boolean(avl_tree_data.tree_flags.insert_allowed()))
 };
 
-pub(crate) static IS_UPDATE_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(15)?;
+pub(crate) static IS_UPDATE_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
     Ok(Value::Boolean(avl_tree_data.tree_flags.update_allowed()))
 };
 
-pub(crate) static IS_REMOVE_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(15)?;
+pub(crate) static IS_REMOVE_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
     Ok(Value::Boolean(avl_tree_data.tree_flags.remove_allowed()))
 };
 
-pub(crate) static UPDATE_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(45)?;
+pub(crate) static UPDATE_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
     let new_operations = {
         let v = args.first().cloned().ok_or_else(|| {
@@ -133,8 +170,7 @@ pub(crate) static UPDATE_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args
     Ok(Value::AvlTree(Box::new(avl_tree_data)))
 };
 
-pub(crate) static UPDATE_DIGEST_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(40)?;
+pub(crate) static UPDATE_DIGEST_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
     // `CAvlTree.updateDigest` stores the new digest with no length check; mirror
     // that — accept any-length `Coll[Byte]`. A non-33 digest exists only in
@@ -149,308 +185,288 @@ pub(crate) static UPDATE_DIGEST_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     Ok(Value::AvlTree(Box::new(avl_tree_data)))
 };
 
-pub(crate) static GET_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, obj, args| {
-        let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-        let key = {
-            let v = args.first().cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing first arg (entries)".to_string())
-            })?;
-            v.try_extract_into::<Vec<u8>>()?
-        };
-        let proof = {
-            let v = args.get(1).cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
-            })?;
-            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-        };
+pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let key = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-            Ok(bv) => bv,
-            // The reference impl's verifier construction never throws: a proof that
-            // does not match the tree digest yields a verifier with no reconstructed
-            // tree, the lookup fails, and `get_eval` raises the same "Tree proof is
-            // incorrect" error as an op-level lookup failure
-            // (`CErgoTreeEvaluator.get_eval`). The JVM charges that lookup before
-            // raising — charge-then-throw. Cost-limit errors from the construction
-            // charge are not construction failures — they propagate.
-            Err(EvalError::AvlTree(_)) => {
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: a proof that
+        // does not match the tree digest yields a verifier with no reconstructed
+        // tree, the lookup fails, and `get_eval` raises the same "Tree proof is
+        // incorrect" error as an op-level lookup failure
+        // (`CErgoTreeEvaluator.get_eval`). The JVM charges that lookup before
+        // raising — charge-then-throw. Cost-limit errors from the construction
+        // charge are not construction failures — they propagate.
+        Err(EvalError::AvlTree(_)) => {
+            ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+            bytes_of(key)?;
+            return Err(EvalError::AvlTree(format!(
+                "Tree proof is incorrect {:?}",
+                avl_tree_data
+            )));
+        }
+        Err(e) => return Err(e),
+    };
+    // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
+    // PerItemCost(40, 10, 1) per height item (Scala `get_eval`).
+    ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+    match bv.perform_one_operation(&Operation::Lookup(bytes_of(key)?)) {
+        Ok(opt) => match opt {
+            Some(v) => Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
+                v.iter().map(|&b| b as i8).collect(),
+            )))))),
+            _ => Ok(Value::Opt(None)),
+        },
+        Err(_) => Err(EvalError::AvlTree(format!(
+            "Tree proof is incorrect {:?}",
+            avl_tree_data
+        ))),
+    }
+};
+
+pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+
+    let keys =
+        coll_items(args.first().cloned().ok_or_else(|| {
+            EvalError::AvlTree("eval is missing first arg (entries)".to_string())
+        })?)?;
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
+
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: lookups
+        // fail on the no-tree verifier, so the first key raises the same
+        // "Tree proof is incorrect" error as an op-level lookup failure
+        // (charged like any first lookup — charge-then-throw) — and with no
+        // keys no lookup runs at all, leaving the empty collection
+        // (`CErgoTreeEvaluator.getMany_eval`). Cost-limit errors from the
+        // construction charge are not construction failures — they
+        // propagate.
+        Err(EvalError::AvlTree(_)) => {
+            return if keys.is_empty() {
+                Ok(Value::Coll(CollValue::Generic {
+                    elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
+                    items: Arc::new([]),
+                }))
+            } else {
                 ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-                return Err(EvalError::AvlTree(format!(
+                bytes_of(keys[0].clone())?;
+                Err(EvalError::AvlTree(format!(
                     "Tree proof is incorrect {:?}",
+                    avl_tree_data
+                )))
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    let height = tree_height(&avl_tree_data);
+    let res = keys
+        .into_iter()
+        .map(|key| {
+            // Per key, the cost of a tree lookup is O(treeHeight):
+            // `LookupAvlTree_Info` = PerItemCost(40, 10, 1) per height item
+            // (Scala `getMany_eval`).
+            ctx.add_per_item_jit_cost(40, 10, 1, height)?;
+            if let Ok(r) = bv.perform_one_operation(&Operation::Lookup(bytes_of(key)?)) {
+                if let Some(v) = r {
+                    Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
+                        v.iter().map(|&b| b as i8).collect(),
+                    ))))))
+                } else {
+                    Ok(Value::Opt(None))
+                }
+            } else {
+                Err(EvalError::AvlTree(format!(
+                    "Tree proof is incorrect {:?}",
+                    avl_tree_data
+                )))
+            }
+        })
+        .collect::<Result<Arc<[_]>, _>>()?;
+
+    Ok(Value::Coll(CollValue::Generic {
+        elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
+        items: res,
+    }))
+};
+
+pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+
+    // Flag-check cost: `isInsertAllowed_Info` = FixedCost(15) (Scala `insert_eval`).
+    ctx.add_jit_cost(15)?;
+    if !avl_tree_data.tree_flags.insert_allowed() {
+        return Ok(Value::Opt(None));
+    }
+
+    let entries =
+        coll_items(args.first().cloned().ok_or_else(|| {
+            EvalError::AvlTree("eval is missing first arg (entries)".to_string())
+        })?)?;
+
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
+
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: every
+        // insert fails on the no-tree verifier, which pre-v3 raises at the
+        // first failed op and from v3 fast-breaks (issue #908), leaving the
+        // None digest — so the method evaluates to None. With no entries no
+        // op runs and the digest is still None at every version
+        // (`CErgoTreeEvaluator.insert_eval`). The JVM charges that first
+        // (failing) insert before raising/breaking, so mirror the charge.
+        // Cost-limit errors from the construction charge are not
+        // construction failures — they propagate.
+        Err(EvalError::AvlTree(_)) => {
+            if entries.is_empty() {
+                return Ok(Value::Opt(None));
+            }
+            let (key, value) = entry_of(entries[0].clone())?;
+            let n_items = tree_height(&avl_tree_data).max(1);
+            ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
+            bytes_of(key)?;
+            bytes_of(value)?;
+            return if ctx.tree_version() >= ErgoTreeVersion::V3 {
+                Ok(Value::Opt(None))
+            } else {
+                Err(EvalError::AvlTree(format!(
+                    "Incorrect insert for {:?}",
+                    avl_tree_data
+                )))
+            };
+        }
+        Err(e) => return Err(e),
+    };
+    // When the tree is empty we still need to add the insert cost (Scala
+    // `insert_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
+    let n_items = tree_height(&avl_tree_data).max(1);
+    for entry in entries {
+        let (key, value) = entry_of(entry)?;
+        // The cost of a tree insert is O(treeHeight): `InsertIntoAvlTree_Info`
+        // = PerItemCost(40, 10, 1) per height item.
+        ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
+        let (key, value) = (bytes_of(key)?, bytes_of(value)?);
+        if bv
+            .perform_one_operation(&Operation::Insert(KeyValue { key, value }))
+            .is_err()
+        {
+            if ctx.tree_version() >= ErgoTreeVersion::V3 {
+                break;
+            } else {
+                return Err(EvalError::AvlTree(format!(
+                    "Incorrect insert for {:?}",
                     avl_tree_data
                 )));
             }
-            Err(e) => return Err(e),
-        };
-        // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
-        // PerItemCost(40, 10, 1) per height item (Scala `get_eval`).
-        ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-        match bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
-            Ok(opt) => match opt {
-                Some(v) => Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
-                    v.iter().map(|&b| b as i8).collect(),
-                )))))),
-                _ => Ok(Value::Opt(None)),
-            },
-            Err(_) => Err(EvalError::AvlTree(format!(
-                "Tree proof is incorrect {:?}",
-                avl_tree_data
-            ))),
         }
-    };
+    }
+    Ok(if let Some(new_digest) = bv.digest() {
+        // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
+        ctx.add_jit_cost(40)?;
+        avl_tree_data.digest = new_digest.to_vec();
+        Value::Opt(Some(Box::new(Value::AvlTree(avl_tree_data.into()))))
+    } else {
+        Value::Opt(None)
+    })
+};
 
-pub(crate) static GET_MANY_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, obj, args| {
-        let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
 
-        let keys = {
-            let v = args.first().cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing first arg (entries)".to_string())
-            })?;
-            v.try_extract_into::<Vec<Vec<u8>>>()?
-        };
-        let proof = {
-            let v = args.get(1).cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
-            })?;
-            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-        };
+    // Flag-check cost: `isRemoveAllowed_Info` = FixedCost(15) (Scala `remove_eval`).
+    ctx.add_jit_cost(15)?;
+    if !avl_tree_data.tree_flags.remove_allowed() {
+        return Ok(Value::Opt(None));
+    }
 
-        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-            Ok(bv) => bv,
-            // The reference impl's verifier construction never throws: lookups
-            // fail on the no-tree verifier, so the first key raises the same
-            // "Tree proof is incorrect" error as an op-level lookup failure
-            // (charged like any first lookup — charge-then-throw) — and with no
-            // keys no lookup runs at all, leaving the empty collection
-            // (`CErgoTreeEvaluator.getMany_eval`). Cost-limit errors from the
-            // construction charge are not construction failures — they
-            // propagate.
-            Err(EvalError::AvlTree(_)) => {
-                return if keys.is_empty() {
-                    Ok(Value::Coll(CollValue::Generic {
-                        elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
-                        items: Arc::new([]),
-                    }))
-                } else {
-                    ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-                    Err(EvalError::AvlTree(format!(
-                        "Tree proof is incorrect {:?}",
-                        avl_tree_data
-                    )))
-                }
+    let keys = coll_items(
+        args.first()
+            .cloned()
+            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (keys)".to_string()))?,
+    )?;
+
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
+
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: every
+        // remove fails on the no-tree verifier (op results are ignored —
+        // `remove_eval` loops with `cfor`, no break), and the final digest
+        // is None — so the method evaluates to None
+        // (`CErgoTreeEvaluator.remove_eval`). The JVM still attempts and
+        // charges EVERY remove plus the unconditional digest read, so
+        // mirror those charges. Cost-limit errors from the construction
+        // charge are not construction failures — they propagate.
+        Err(EvalError::AvlTree(_)) => {
+            let n_items = tree_height(&avl_tree_data).max(1);
+            for key in keys {
+                ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
+                bytes_of(key)?;
             }
-            Err(e) => return Err(e),
-        };
-        let height = tree_height(&avl_tree_data);
-        let res = keys
-            .into_iter()
-            .map(|key| {
-                // Per key, the cost of a tree lookup is O(treeHeight):
-                // `LookupAvlTree_Info` = PerItemCost(40, 10, 1) per height item
-                // (Scala `getMany_eval`).
-                ctx.add_per_item_jit_cost(40, 10, 1, height)?;
-                if let Ok(r) = bv.perform_one_operation(&Operation::Lookup(Bytes::from(key))) {
-                    if let Some(v) = r {
-                        Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
-                            v.iter().map(|&b| b as i8).collect(),
-                        ))))))
-                    } else {
-                        Ok(Value::Opt(None))
-                    }
-                } else {
-                    Err(EvalError::AvlTree(format!(
-                        "Tree proof is incorrect {:?}",
-                        avl_tree_data
-                    )))
-                }
-            })
-            .collect::<Result<Arc<[_]>, _>>()?;
-
-        Ok(Value::Coll(CollValue::Generic {
-            elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
-            items: res,
-        }))
-    };
-
-pub(crate) static INSERT_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, obj, args| {
-        let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-
-        // Flag-check cost: `isInsertAllowed_Info` = FixedCost(15) (Scala `insert_eval`).
-        ctx.add_jit_cost(15)?;
-        if !avl_tree_data.tree_flags.insert_allowed() {
+            ctx.add_jit_cost(15)?;
             return Ok(Value::Opt(None));
         }
-
-        let entries = {
-            let v = args.first().cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing first arg (entries)".to_string())
-            })?;
-            v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
-        };
-
-        let proof = {
-            let v = args.get(1).cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
-            })?;
-            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-        };
-
-        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-            Ok(bv) => bv,
-            // The reference impl's verifier construction never throws: every
-            // insert fails on the no-tree verifier, which pre-v3 raises at the
-            // first failed op and from v3 fast-breaks (issue #908), leaving the
-            // None digest — so the method evaluates to None. With no entries no
-            // op runs and the digest is still None at every version
-            // (`CErgoTreeEvaluator.insert_eval`). The JVM charges that first
-            // (failing) insert before raising/breaking, so mirror the charge.
-            // Cost-limit errors from the construction charge are not
-            // construction failures — they propagate.
-            Err(EvalError::AvlTree(_)) => {
-                if entries.is_empty() {
-                    return Ok(Value::Opt(None));
-                }
-                let n_items = tree_height(&avl_tree_data).max(1);
-                ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
-                return if ctx.tree_version() >= ErgoTreeVersion::V3 {
-                    Ok(Value::Opt(None))
-                } else {
-                    Err(EvalError::AvlTree(format!(
-                        "Incorrect insert for {:?}",
-                        avl_tree_data
-                    )))
-                };
-            }
-            Err(e) => return Err(e),
-        };
-        // When the tree is empty we still need to add the insert cost (Scala
-        // `insert_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
-        let n_items = tree_height(&avl_tree_data).max(1);
-        for (key, value) in entries {
-            // The cost of a tree insert is O(treeHeight): `InsertIntoAvlTree_Info`
-            // = PerItemCost(40, 10, 1) per height item.
-            ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
-            if bv
-                .perform_one_operation(&Operation::Insert(KeyValue {
-                    key: key.into(),
-                    value: value.into(),
-                }))
-                .is_err()
-            {
-                if ctx.tree_version() >= ErgoTreeVersion::V3 {
-                    break;
-                } else {
-                    return Err(EvalError::AvlTree(format!(
-                        "Incorrect insert for {:?}",
-                        avl_tree_data
-                    )));
-                }
-            }
-        }
-        Ok(if let Some(new_digest) = bv.digest() {
-            // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
-            ctx.add_jit_cost(40)?;
-            avl_tree_data.digest = new_digest.to_vec();
-            Value::Opt(Some(Box::new(Value::AvlTree(avl_tree_data.into()))))
-        } else {
-            Value::Opt(None)
-        })
+        Err(e) => return Err(e),
     };
-
-pub(crate) static REMOVE_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, obj, args| {
-        let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-
-        // Flag-check cost: `isRemoveAllowed_Info` = FixedCost(15) (Scala `remove_eval`).
-        ctx.add_jit_cost(15)?;
-        if !avl_tree_data.tree_flags.remove_allowed() {
-            return Ok(Value::Opt(None));
-        }
-
-        let keys = {
-            let v = args.first().cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing first arg (keys)".to_string())
-            })?;
-            v.try_extract_into::<Vec<Vec<u8>>>()?
-        };
-
-        let proof = {
-            let v = args.get(1).cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
-            })?;
-            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-        };
-
-        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-            Ok(bv) => bv,
-            // The reference impl's verifier construction never throws: every
-            // remove fails on the no-tree verifier (op results are ignored —
-            // `remove_eval` loops with `cfor`, no break), and the final digest
-            // is None — so the method evaluates to None
-            // (`CErgoTreeEvaluator.remove_eval`). The JVM still attempts and
-            // charges EVERY remove plus the unconditional digest read, so
-            // mirror those charges. Cost-limit errors from the construction
-            // charge are not construction failures — they propagate.
-            Err(EvalError::AvlTree(_)) => {
-                let n_items = tree_height(&avl_tree_data).max(1);
-                for _ in 0..keys.len() {
-                    ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
-                }
-                ctx.add_jit_cost(15)?;
-                return Ok(Value::Opt(None));
-            }
-            Err(e) => return Err(e),
-        };
-        // When the tree is empty we still need to add the remove cost (Scala
-        // `remove_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
-        let n_items = tree_height(&avl_tree_data).max(1);
-        for key in keys {
-            // The cost of a tree remove is O(treeHeight): `RemoveAvlTree_Info`
-            // = PerItemCost(100, 15, 1) per height item.
-            ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
-            // op results are ignored — the reference impl loops with `cfor`,
-            // no break, no check (`CErgoTreeEvaluator.remove_eval`); a failed
-            // op invalidates the verifier, so the digest below decides the
-            // outcome
-            let _ = bv.perform_one_operation(&Operation::Remove(Bytes::from(key)));
-        }
-        // Digest read after the operation loop: `digest_Info` = FixedCost(15)
-        // (Scala `remove_eval` charges it unconditionally, unlike insert/update).
-        ctx.add_jit_cost(15)?;
-        if let Some(new_digest) = bv.digest() {
-            // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
-            ctx.add_jit_cost(40)?;
-            avl_tree_data.digest = new_digest.to_vec();
-            Ok(Value::Opt(Some(Box::new(Value::AvlTree(
-                avl_tree_data.into(),
-            )))))
-        } else {
-            Ok(Value::Opt(None))
-        }
-    };
+    // When the tree is empty we still need to add the remove cost (Scala
+    // `remove_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
+    let n_items = tree_height(&avl_tree_data).max(1);
+    for key in keys {
+        // The cost of a tree remove is O(treeHeight): `RemoveAvlTree_Info`
+        // = PerItemCost(100, 15, 1) per height item.
+        ctx.add_per_item_jit_cost(100, 15, 1, n_items)?;
+        // op results are ignored — the reference impl loops with `cfor`,
+        // no break, no check (`CErgoTreeEvaluator.remove_eval`); a failed
+        // op invalidates the verifier, so the digest below decides the
+        // outcome
+        let _ = bv.perform_one_operation(&Operation::Remove(bytes_of(key)?));
+    }
+    // Digest read after the operation loop: `digest_Info` = FixedCost(15)
+    // (Scala `remove_eval` charges it unconditionally, unlike insert/update).
+    ctx.add_jit_cost(15)?;
+    if let Some(new_digest) = bv.digest() {
+        // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
+        ctx.add_jit_cost(40)?;
+        avl_tree_data.digest = new_digest.to_vec();
+        Ok(Value::Opt(Some(Box::new(Value::AvlTree(
+            avl_tree_data.into(),
+        )))))
+    } else {
+        Ok(Value::Opt(None))
+    }
+};
 
 pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    let key = {
-        let v = args
-            .first()
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (key)".to_string()))?;
-        Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-    };
+    let key = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (key)".to_string()))?;
 
-    let proof = {
-        let v = args
-            .get(1)
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
-        Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-    };
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: the lookup
         // fails on the no-tree verifier and `contains_eval` maps the failure to
@@ -460,6 +476,7 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // failures — they propagate.
         Err(EvalError::AvlTree(_)) => {
             ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
+            bytes_of(key)?;
             return Ok(Value::Boolean(false));
         }
         Err(e) => return Err(e),
@@ -467,84 +484,83 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     // The cost of a tree lookup is O(treeHeight): `LookupAvlTree_Info` =
     // PerItemCost(40, 10, 1) per height item (Scala `contains_eval`).
     ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-    Ok(match bv.perform_one_operation(&Operation::Lookup(key)) {
-        Ok(s) => match s {
-            Some(_e) => Value::Boolean(true),
-            _ => Value::Boolean(false),
+    Ok(
+        match bv.perform_one_operation(&Operation::Lookup(bytes_of(key)?)) {
+            Ok(s) => match s {
+                Some(_e) => Value::Boolean(true),
+                _ => Value::Boolean(false),
+            },
+            Err(_) => Value::Boolean(false),
         },
-        Err(_) => Value::Boolean(false),
-    })
+    )
 };
 
-pub(crate) static UPDATE_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, obj, args| {
-        let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
+    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
 
-        // Flag-check cost: `isUpdateAllowed_Info` = FixedCost(15) (Scala `update_eval`).
-        ctx.add_jit_cost(15)?;
-        if !avl_tree_data.tree_flags.update_allowed() {
+    // Flag-check cost: `isUpdateAllowed_Info` = FixedCost(15) (Scala `update_eval`).
+    ctx.add_jit_cost(15)?;
+    if !avl_tree_data.tree_flags.update_allowed() {
+        return Ok(Value::Opt(None));
+    }
+
+    let entries =
+        coll_items(args.first().cloned().ok_or_else(|| {
+            EvalError::AvlTree("eval is missing first arg (entries)".to_string())
+        })?)?;
+
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
+
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+        Ok(bv) => bv,
+        // The reference impl's verifier construction never throws: every
+        // update fails on the no-tree verifier (`update_eval`'s forall
+        // fast-breaks at the first failure), and the final digest is None —
+        // so the method evaluates to None
+        // (`CErgoTreeEvaluator.update_eval`). The JVM still charges the
+        // first (failing) update before its forall fast-breaks, so mirror
+        // that charge. Cost-limit errors from the construction charge are
+        // not construction failures — they propagate.
+        Err(EvalError::AvlTree(_)) => {
+            if !entries.is_empty() {
+                let (key, value) = entry_of(entries[0].clone())?;
+                let n_items = tree_height(&avl_tree_data).max(1);
+                ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+                bytes_of(key)?;
+                bytes_of(value)?;
+            }
             return Ok(Value::Opt(None));
         }
-
-        let entries = {
-            let v = args.first().cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing first arg (entries)".to_string())
-            })?;
-            v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
-        };
-
-        let proof = {
-            let v = args.get(1).cloned().ok_or_else(|| {
-                EvalError::AvlTree("eval is missing second arg (proof)".to_string())
-            })?;
-            Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-        };
-
-        let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
-            Ok(bv) => bv,
-            // The reference impl's verifier construction never throws: every
-            // update fails on the no-tree verifier (`update_eval`'s forall
-            // fast-breaks at the first failure), and the final digest is None —
-            // so the method evaluates to None
-            // (`CErgoTreeEvaluator.update_eval`). The JVM still charges the
-            // first (failing) update before its forall fast-breaks, so mirror
-            // that charge. Cost-limit errors from the construction charge are
-            // not construction failures — they propagate.
-            Err(EvalError::AvlTree(_)) => {
-                if !entries.is_empty() {
-                    let n_items = tree_height(&avl_tree_data).max(1);
-                    ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
-                }
-                return Ok(Value::Opt(None));
-            }
-            Err(e) => return Err(e),
-        };
-        // When the tree is empty we still need to add the update cost (Scala
-        // `update_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
-        let n_items = tree_height(&avl_tree_data).max(1);
-        for (key, value) in entries {
-            // The cost of a tree update is O(treeHeight): `UpdateAvlTree_Info`
-            // = PerItemCost(120, 20, 1) per height item.
-            ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
-            if bv
-                .perform_one_operation(&Operation::Update(KeyValue {
-                    key: key.into(),
-                    value: value.into(),
-                }))
-                .is_err()
-            {
-                break;
-            }
-        }
-        Ok(if let Some(new_digest) = bv.digest() {
-            // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
-            ctx.add_jit_cost(40)?;
-            avl_tree_data.digest = new_digest.to_vec();
-            Value::Opt(Some(Value::AvlTree(avl_tree_data.into()).into()))
-        } else {
-            Value::Opt(None)
-        })
+        Err(e) => return Err(e),
     };
+    // When the tree is empty we still need to add the update cost (Scala
+    // `update_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
+    let n_items = tree_height(&avl_tree_data).max(1);
+    for entry in entries {
+        let (key, value) = entry_of(entry)?;
+        // The cost of a tree update is O(treeHeight): `UpdateAvlTree_Info`
+        // = PerItemCost(120, 20, 1) per height item.
+        ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+        let (key, value) = (bytes_of(key)?, bytes_of(value)?);
+        if bv
+            .perform_one_operation(&Operation::Update(KeyValue { key, value }))
+            .is_err()
+        {
+            break;
+        }
+    }
+    Ok(if let Some(new_digest) = bv.digest() {
+        // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
+        ctx.add_jit_cost(40)?;
+        avl_tree_data.digest = new_digest.to_vec();
+        Value::Opt(Some(Value::AvlTree(avl_tree_data.into()).into()))
+    } else {
+        Value::Opt(None)
+    })
+};
 
 pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
@@ -557,23 +573,17 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         return Ok(Value::Opt(None));
     }
 
-    let entries = {
-        let v = args
-            .first()
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing first arg (entries)".to_string()))?;
-        v.try_extract_into::<Vec<(Vec<u8>, Vec<u8>)>>()?
-    };
+    let entries =
+        coll_items(args.first().cloned().ok_or_else(|| {
+            EvalError::AvlTree("eval is missing first arg (entries)".to_string())
+        })?)?;
 
-    let proof = {
-        let v = args
-            .get(1)
-            .cloned()
-            .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
-        Bytes::from(v.try_extract_into::<Vec<u8>>()?)
-    };
+    let proof = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, &proof) {
+    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: with a proof
         // that does not match the tree digest it yields a verifier with no
@@ -586,8 +596,11 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         // construction failures — they propagate.
         Err(EvalError::AvlTree(_)) => {
             if !entries.is_empty() {
+                let (key, value) = entry_of(entries[0].clone())?;
                 let n_items = tree_height(&avl_tree_data).max(1);
                 ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+                bytes_of(key)?;
+                bytes_of(value)?;
             }
             return Ok(Value::Opt(None));
         }
@@ -596,15 +609,14 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
     // When the tree is empty we still need to add the insert cost (Scala
     // `insertOrUpdate_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
     let n_items = tree_height(&avl_tree_data).max(1);
-    for (key, value) in entries {
+    for entry in entries {
+        let (key, value) = entry_of(entry)?;
         // Per entry, Scala `insertOrUpdate_eval` charges `UpdateAvlTree_Info`
         // = PerItemCost(120, 20, 1) per height item.
         ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
+        let (key, value) = (bytes_of(key)?, bytes_of(value)?);
         if bv
-            .perform_one_operation(&Operation::InsertOrUpdate(KeyValue {
-                key: key.into(),
-                value: value.into(),
-            }))
+            .perform_one_operation(&Operation::InsertOrUpdate(KeyValue { key, value }))
             .is_err()
         {
             break;
@@ -1664,8 +1676,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ergo_avltree_rust no-panic fix (ergoplatform/ergo_avltree_rust#14); \
-                un-ignore on its release + version bump"]
     fn eval_avl_contains_garbage_proof_bytes() {
         let (obj, proof) = bad_proof_bytes_fixture(AvlTreeFlags::new(false, false, false));
         let key: Constant = vec![1u8].into();
@@ -1680,8 +1690,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ergo_avltree_rust no-panic fix (ergoplatform/ergo_avltree_rust#14); \
-                un-ignore on its release + version bump"]
     fn eval_avl_get_garbage_proof_bytes() {
         let (obj, proof) = bad_proof_bytes_fixture(AvlTreeFlags::new(false, false, false));
         let key: Constant = vec![1u8].into();
@@ -1696,8 +1704,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ergo_avltree_rust no-panic fix (ergoplatform/ergo_avltree_rust#14); \
-                un-ignore on its release + version bump"]
     fn eval_avl_contains_negative_key_length() {
         let (obj, proof) = negative_keylength_fixture(AvlTreeFlags::new(false, false, false));
         let key: Constant = vec![1u8].into();
@@ -2153,5 +2159,302 @@ mod tests {
         assert_eq!(tree_height(&tree(vec![1, 2, 3], 32)), 0);
         assert_eq!(tree_height(&tree(vec![0u8; 32], 32)), 0);
         assert_eq!(tree_height(&tree(vec![0u8; 34], 32)), 0);
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod charge_order {
+    use crate::eval::test_util::{eval_body, eval_body_err, innermost};
+    use crate::eval::EvalError;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
+
+    /// A tree constant: an all-zero 33-byte digest, every operation allowed, 32-byte keys,
+    /// no fixed value length
+    const TREE: &str = "64000000000000000000000000000000000000000000000000000000000000000000072000";
+
+    // A proof that is a collection of another item type passes the call's class check.
+    // sigmastate's `createVerifier` adds its per-item cost over the proof's LENGTH and builds
+    // the verifier inside that block, where the proof's array is cast
+    // (`CErgoTreeEvaluator.scala:71-75`); a modifying method has added its flag costs before.
+    // Each row: an empty key, keys or entries, and an empty `Coll[Int]` as the proof.
+    // Measured on the sigma-state 6.0.7 jars.
+    #[test]
+    fn a_proof_of_another_item_type_pays_for_the_verifier() {
+        for (method_id, args, cost) in [
+            ("09", "020e001000", 149),       // contains
+            ("0a", "020e001000", 149),       // get
+            ("0b", "021a001000", 149),       // getMany
+            ("0c", "020c3c0e0e001000", 164), // insert
+            ("0d", "020c3c0e0e001000", 164), // update
+            ("0e", "021a001000", 164),       // remove
+            ("10", "020c3c0e0e001000", 179), // insertOrUpdate
+        ] {
+            let body = alloc::format!("dc64{method_id}{TREE}{args}");
+            let (e, c) = eval_body_err(&body);
+            assert!(matches!(e, EvalError::TryExtractFrom(_)), "{body}: {e:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+    }
+
+    // `insert` (from tree version 3), `update` and `insertOrUpdate` stop at the first entry
+    // whose operation fails, so an entry after it is never read: a second entry of another
+    // item type, or one that is no pair, does not make the call fail. Each row's first entry
+    // is right in kind and fails its operation under a VALID proof (an insert of a key the
+    // tree holds, an update of a key it lacks); the JVM answers `None`. The last row is the
+    // control with that entry alone.
+    #[test]
+    fn an_entry_after_a_failed_one_is_never_read() {
+        #[rustfmt::skip]
+        let rows = [
+            // built-insert-first-fails-second-int
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010108000000000000000a01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", 244),
+            // built-insert-first-fails-second-nopair
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e0404010108000000000000000a0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", 244),
+            // built-update-first-fails-second-int
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", 344),
+            // built-update-first-fails-second-nopair
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e0404010308000000000000001e0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", 344),
+            // built-iou-first-fails-second-int
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010108000000000000000a01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", 359),
+            // built-insert-first-fails-control
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020c3c0e0e01010108000000000000000a0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", 244),
+        ];
+        for (body, cost) in rows {
+            let (res, c) = eval_body(body, ErgoTreeVersion::V3);
+            assert!(matches!(res, Ok(Value::Opt(None))), "{body}: {res:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+    }
+
+    #[derive(Debug)]
+    enum Refusal {
+        /// an array that is not of bytes
+        Cast,
+        /// an entry that is no pair
+        NoPair,
+    }
+
+    // sigmastate reads a key or an entry where it uses it: inside the operation's cost block,
+    // so after that item's cost (`CErgoTreeEvaluator.scala:78-241`: `key.toArray`,
+    // `performInsert(key.toArray, value.toArray)`), while an entry that is no pair fails the
+    // `case (key, value)` match before its cost. Each tree below holds {1: 10, 2: 20} under
+    // 1-byte keys with a VALID proof for its operation; a key is a `Coll[Int]`, and the keys
+    // and entries are 3-tuple constants (a `Coll[Any]` value) holding an item of another
+    // type first or second. Measured on the sigma-state 6.0.7 jars.
+    #[test]
+    fn a_key_or_entry_is_read_where_the_jvm_casts_it() {
+        use Refusal::*;
+        #[rustfmt::skip]
+        let refused = [
+            // contains|key-Coll[Int]
+            ("dc64096415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100021001020e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 229),
+            // get|key-Coll[Int]
+            ("dc640a6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100021001020e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 229),
+            // getMany|keys-second-Coll[Int]
+            ("dc640b6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002480e100401010104000e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", Cast, 289),
+            // getMany|keys-first-Coll[Int]
+            ("dc640b6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020701000248100e0401040101000e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", Cast, 229),
+            // insert|entries-second-key-Coll[Int]
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", Cast, 304),
+            // insert|entries-second-value-Coll[Int]
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c0e1004010308000000000000001e01050104000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", Cast, 304),
+            // insert|entries-second-no-pair
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e0404010308000000000000001e0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", NoPair, 244),
+            // insert|entries-first-no-pair
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020701000248043c0e0e040a010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", NoPair, 184),
+            // update|entries-second-key-Coll[Int]
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010108000000000000000b01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 504),
+            // update|entries-second-value-Coll[Int]
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c0e1004010108000000000000000b01050104000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 504),
+            // update|entries-second-no-pair
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e0404010108000000000000000b0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", NoPair, 344),
+            // update|entries-first-no-pair
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020701000248043c0e0e040a010108000000000000000b000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", NoPair, 184),
+            // insertOrUpdate|entries-second-key-Coll[Int]
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", Cast, 519),
+            // insertOrUpdate|entries-second-value-Coll[Int]
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e3c0e1004010308000000000000001e01050104000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", Cast, 519),
+            // insertOrUpdate|entries-second-no-pair
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002483c0e0e0404010308000000000000001e0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", NoPair, 359),
+            // insertOrUpdate|entries-first-no-pair
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020701000248043c0e0e040a010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", NoPair, 199),
+            // remove|keys-second-Coll[Int]
+            ("dc640e6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0207010002480e100401010104000e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 424),
+            // remove|keys-first-Coll[Int]
+            ("dc640e6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020701000248100e0401040101000e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", Cast, 294),
+        ];
+        for (body, refusal, cost) in refused {
+            let (e, c) = eval_body_err(body);
+            let named = match refusal {
+                Cast => matches!(e, EvalError::TryExtractFrom(_)),
+                NoPair => matches!(e, EvalError::UnexpectedValue(_)),
+            };
+            assert!(named, "{body}: expected {refusal:?}, got {e:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+        // the controls, and the same wrong entries or keys under a tree whose flag is off: the
+        // JVM answers `None` before it reads anything
+        #[rustfmt::skip]
+        let evaluated = [
+            // contains|control
+            ("dc64096415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020e01010e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", false, 229),
+            // get|control
+            ("dc640a6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020e01010e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", false, 229),
+            // getMany|control
+            ("dc640b6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100021a02010101020e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", false, 289),
+            // insert|control
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020c3c0e0e01010308000000000000001e0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", false, 284),
+            // insert|flag-off|entries-second-key-Coll[Int]
+            ("dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0200010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 34),
+            // update|control
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020c3c0e0e01010108000000000000000b0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", false, 384),
+            // update|flag-off|entries-second-key-Coll[Int]
+            ("dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0200010002483c0e0e3c100e04010108000000000000000b01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 34),
+            // insertOrUpdate|control
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100020c3c0e0e01010308000000000000001e0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", false, 399),
+            // insertOrUpdate|flag-off|entries-second-key-Coll[Int]
+            ("dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0200010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 49),
+            // remove|control
+            ("dc640e6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100021a0101010e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", false, 349),
+            // remove|flag-off|keys-second-Coll[Int]
+            ("dc640e6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd0200010002480e100401010104000e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 34),
+        ];
+        for (body, is_none, cost) in evaluated {
+            let (res, c) = eval_body(body, ErgoTreeVersion::V3);
+            let v = res.unwrap();
+            assert_eq!(matches!(v, Value::Opt(None)), is_none, "{body}: {v:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+    }
+
+    // The same under a tree the proofs do not belong to ({5: 50}): sigmastate builds a verifier
+    // with no tree, every operation fails, and the order of each item's cost and its casts is
+    // the same. `insert`, `update` and `insertOrUpdate` stop at the first failed entry, so a
+    // wrong SECOND entry is never read; `remove` goes on. Measured on the jars.
+    #[test]
+    fn a_key_or_entry_is_read_where_the_jvm_casts_it_also_without_a_tree() {
+        #[rustfmt::skip]
+        let refused = [
+            // contains|other-tree|key-Coll[Int]
+            ("dc6409647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100021001020e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Cast", 219),
+            // get|other-tree|control
+            ("dc640a647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100020e01010e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Proof", 219),
+            // get|other-tree|key-Coll[Int]
+            ("dc640a647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100021001020e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Cast", 219),
+            // getMany|other-tree|control
+            ("dc640b647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100021a02010101020e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", "Proof", 219),
+            // getMany|other-tree|keys-first-Coll[Int]
+            ("dc640b647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee11010701000248100e0401040101000e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", "Cast", 219),
+            // getMany|other-tree|keys-second-Coll[Int]
+            ("dc640b647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002480e100401010104000e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402", "Proof", 219),
+            // insert|other-tree|entries-first-key-Coll[Int]
+            ("dc640c647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c100e3c0e0e0401040105010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", "Cast", 234),
+            // insert|other-tree|entries-first-no-pair
+            ("dc640c647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee11010701000248043c0e0e040a010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", "NoPair", 184),
+            // update|other-tree|entries-first-key-Coll[Int]
+            ("dc640d647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c100e3c0e0e0401040105010108000000000000000b000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Cast", 324),
+            // update|other-tree|entries-first-no-pair
+            ("dc640d647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee11010701000248043c0e0e040a010108000000000000000b000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "NoPair", 184),
+            // insertOrUpdate|other-tree|entries-first-key-Coll[Int]
+            ("dc6410647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c100e3c0e0e0401040105010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", "Cast", 339),
+            // insertOrUpdate|other-tree|entries-first-no-pair
+            ("dc6410647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee11010701000248043c0e0e040a010308000000000000001e000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", "NoPair", 199),
+            // remove|other-tree|keys-first-Coll[Int]
+            ("dc640e647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee11010701000248100e0401040101000e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Cast", 279),
+            // remove|other-tree|keys-second-Coll[Int]
+            ("dc640e647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002480e100401010104000e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", "Cast", 394),
+        ];
+        for (body, refusal, cost) in refused {
+            let (e, c) = eval_body_err(body);
+            let named = match refusal {
+                "Cast" => matches!(e, EvalError::TryExtractFrom(_)),
+                "NoPair" => matches!(e, EvalError::UnexpectedValue(_)),
+                // "Tree proof is incorrect"
+                _ => matches!(e, EvalError::AvlTree(_)),
+            };
+            assert!(named, "{body}: expected {refusal}, got {e:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+        #[rustfmt::skip]
+        let evaluated = [
+            // contains|other-tree|control
+            ("dc6409647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100020e01010e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", false, 219),
+            // insert|other-tree|control
+            ("dc640c647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100020c3c0e0e01010308000000000000001e0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 234),
+            // insert|other-tree|entries-second-key-Coll[Int]
+            ("dc640c647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 234),
+            // insert|other-tree|entries-second-no-pair
+            ("dc640c647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e0404010308000000000000001e0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 234),
+            // update|other-tree|control
+            ("dc640d647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100020c3c0e0e01010108000000000000000b0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 324),
+            // update|other-tree|entries-second-key-Coll[Int]
+            ("dc640d647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e3c100e04010108000000000000000b01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 324),
+            // update|other-tree|entries-second-no-pair
+            ("dc640d647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e0404010108000000000000000b0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 324),
+            // insertOrUpdate|other-tree|control
+            ("dc6410647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100020c3c0e0e01010308000000000000001e0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 339),
+            // insertOrUpdate|other-tree|entries-second-key-Coll[Int]
+            ("dc6410647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e3c100e04010308000000000000001e01040105000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 339),
+            // insertOrUpdate|other-tree|entries-second-no-pair
+            ("dc6410647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee110107010002483c0e0e0404010308000000000000001e0a000e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400", true, 339),
+            // remove|other-tree|control
+            ("dc640e647ca99024833a7c538e35710c94acf164ca93693117acee3a5bfdd3035810ee1101070100021a0101010e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402", true, 294),
+        ];
+        for (body, is_none, cost) in evaluated {
+            let (res, c) = eval_body(body, ErgoTreeVersion::V3);
+            let v = res.unwrap();
+            assert_eq!(matches!(v, Value::Opt(None)), is_none, "{body}: {v:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+    }
+
+    // A degenerate proof. sigmastate's verifier construction never throws: a proof that cannot
+    // be read gives a verifier with no tree, the operation fails, and each method maps that
+    // failure as it does for a proof of another tree. The one-byte proof rows are each method
+    // on an all-zero digest; the last two are `contains` and `get` with a `Coll[Int]` key and
+    // an EMPTY proof, where the key is cast after the verifier's and the lookup's cost.
+    // `ergo_avltree_rust` 0.1.1 panics on such a proof; the workspace takes the crate from the
+    // fork that returns an error. Measured on the sigma-state 6.0.7 jars.
+    #[test]
+    fn a_degenerate_proof_answers_or_errors_as_the_jvm() {
+        #[rustfmt::skip]
+        let rows: [(&str, Result<&str, &str>, u64); 9] = [
+            // AvlTree.contains#9|control|-
+            ("dc640964000000000000000000000000000000000000000000000000000000000000000000072000020e01010e0102", Ok("false"), 189),
+            // AvlTree.get#10|control|-
+            ("dc640a64000000000000000000000000000000000000000000000000000000000000000000072000020e01010e0102", Err("AvlTree"), 189),
+            // AvlTree.getMany#11|control|-
+            ("dc640b64000000000000000000000000000000000000000000000000000000000000000000072000021a0101010e0102", Err("AvlTree"), 189),
+            // AvlTree.insert#12|control|-
+            ("dc640c64000000000000000000000000000000000000000000000000000000000000000000072000020c3c0e0e000e0102", Ok("None"), 164),
+            // AvlTree.update#13|control|-
+            ("dc640d64000000000000000000000000000000000000000000000000000000000000000000072000020c3c0e0e000e0102", Ok("None"), 164),
+            // AvlTree.remove#14|control|-
+            ("dc640e64000000000000000000000000000000000000000000000000000000000000000000072000021a0101010e0102", Ok("None"), 294),
+            // AvlTree.insertOrUpdate#16|control|-
+            ("dc641064000000000000000000000000000000000000000000000000000000000000000000072000020c3c0e0e000e0102", Ok("None"), 179),
+            // AvlTree.contains|arg|EmptyCollInt|direct
+            ("dc6409640000000000000000000000000000000000000000000000000000000000000000000720000210000e00", Err("TryExtractFrom"), 189),
+            // AvlTree.get|arg|EmptyCollInt|direct
+            ("dc640a640000000000000000000000000000000000000000000000000000000000000000000720000210000e00", Err("TryExtractFrom"), 189),
+        ];
+        for (body, expected, cost) in rows {
+            let (res, c) = eval_body(body, ErgoTreeVersion::V3);
+            let as_expected = match (expected, &res) {
+                (Ok("false"), Ok(Value::Boolean(false))) | (Ok("None"), Ok(Value::Opt(None))) => {
+                    true
+                }
+                (Err("AvlTree"), Err(e)) => matches!(innermost(e), EvalError::AvlTree(_)),
+                (Err("TryExtractFrom"), Err(e)) => {
+                    matches!(innermost(e), EvalError::TryExtractFrom(_))
+                }
+                _ => false,
+            };
+            assert!(as_expected, "{body}: expected {expected:?}, got {res:?}");
+            assert_eq!(c, cost, "{body}");
+        }
     }
 }

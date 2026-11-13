@@ -1,12 +1,10 @@
 use ergotree_ir::mir::property_call::PropertyCall;
 use ergotree_ir::mir::value::Value;
 
-use super::smethod_eval_fn;
 use super::Context;
 use super::Env;
 use super::EvalError;
 use super::Evaluable;
-use super::MethodCallSite;
 
 impl Evaluable for PropertyCall {
     fn eval<'ctx>(
@@ -14,16 +12,8 @@ impl Evaluable for PropertyCall {
         env: &mut Env<'ctx>,
         ectx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        ectx.add_jit_cost(4)?; // PropertyCall = Fixed(4)
-        let ov = self.obj.eval(env, ectx)?;
         // a PropertyCall is sigmastate's MethodCall with no arguments (`values.scala:1351`)
-        super::method_call::check_arity(&self.method, 0)?;
-        super::method_call::check_receiver(&self.method, &ov)?;
-        let site = MethodCallSite {
-            method: &self.method,
-            args: &[],
-        };
-        smethod_eval_fn(&self.method)?(&site, env, ectx, ov, vec![])
+        super::method_call::call_method(&self.method, &self.obj, &[], env, ectx)
     }
 }
 

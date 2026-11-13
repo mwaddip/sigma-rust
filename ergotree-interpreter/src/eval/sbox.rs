@@ -16,8 +16,7 @@ use ergotree_ir::types::stype::SType;
 
 use super::EvalFn;
 
-pub(crate) static VALUE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(8)?;
+pub(crate) static VALUE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     Ok(Value::Long(
         obj.try_extract_into::<Ref<'_, ErgoBox>>()?.value.as_i64(),
     ))
@@ -75,7 +74,6 @@ pub(crate) fn get_register_script_value(
 }
 
 pub(crate) static GET_REG_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(50)?;
     if ctx.tree_version() < ErgoTreeVersion::V3 {
         return Err(EvalError::ScriptVersionError {
             required_version: ErgoTreeVersion::V3,
@@ -116,8 +114,7 @@ pub(crate) static GET_REG_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
     }
 };
 
-pub(crate) static TOKENS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(15)?;
+pub(crate) static TOKENS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let res: Value = obj
         .try_extract_into::<Ref<'_, ErgoBox>>()?
         .tokens_raw()
@@ -127,43 +124,38 @@ pub(crate) static TOKENS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
 
 // The accessor method-forms (PropertyCall 99:2..6) dispatch through the same box
 // accessors as their op-form twins (ExtractScriptBytes/ExtractBytes/ExtractBytesWithNoRef/
-// ExtractId/ExtractCreationInfo) and charge the op-form's `costKind`; the MethodCall/
-// PropertyCall envelope (Fixed(4)) is charged by the call site, so the full-tree cost is
-// `receiver(ConstantPlaceholder 1) + envelope(4) + op-form costKind` (JVM
-// `MethodCall.eval` -> `invokeFixed`, methods.scala SBoxMethods).
+// ExtractId/ExtractCreationInfo) at the op-form's `costKind`, which is each method's fixed
+// cost. The call site adds it, as it adds the MethodCall/PropertyCall envelope (Fixed(4)),
+// so the full-tree cost is `receiver(ConstantPlaceholder 1) + envelope(4) + op-form
+// costKind` (JVM `MethodCall.eval` -> `invokeFixed`, methods.scala SBoxMethods).
 
-pub(crate) static PROPOSITION_BYTES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(10)?; // ExtractScriptBytes = Fixed(10)
+pub(crate) static PROPOSITION_BYTES_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     Ok(obj
         .try_extract_into::<Ref<'_, ErgoBox>>()?
         .script_bytes()?
         .into())
 };
 
-pub(crate) static BYTES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(12)?; // ExtractBytes = Fixed(12)
-                           // `Box.bytes` returns the parse-retained wire slice (the reference impl's
-                           // `ErgoBox.bytes`), so a non-canonically-encoded box keeps its on-the-wire
-                           // image — unlike `bytesWithoutRef`, which re-serializes canonically.
+pub(crate) static BYTES_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
+    // `Box.bytes` returns the parse-retained wire slice (the reference impl's
+    // `ErgoBox.bytes`), so a non-canonically-encoded box keeps its on-the-wire
+    // image — unlike `bytesWithoutRef`, which re-serializes canonically.
     Ok(obj.try_extract_into::<Ref<'_, ErgoBox>>()?.bytes()?.into())
 };
 
 pub(crate) static BYTES_WITHOUT_REF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(12)?; // ExtractBytesWithNoRef = Fixed(12)
     Ok(obj
         .try_extract_into::<Ref<'_, ErgoBox>>()?
         .bytes_without_ref(ctx.tree_version())?
         .into())
 };
 
-pub(crate) static ID_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(12)?; // ExtractId = Fixed(12)
+pub(crate) static ID_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let bytes: Vec<i8> = obj.try_extract_into::<Ref<'_, ErgoBox>>()?.box_id().into();
     Ok(bytes.into())
 };
 
-pub(crate) static CREATION_INFO_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(16)?; // ExtractCreationInfo = Fixed(16)
+pub(crate) static CREATION_INFO_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let ergo_box = obj.try_extract_into::<Ref<'_, ErgoBox>>()?;
     Ok(super::extract_creation_info::creation_info_value(&ergo_box))
 };

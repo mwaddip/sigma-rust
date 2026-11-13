@@ -162,9 +162,16 @@ pub(crate) fn flatmap_eval<'ctx>(
             input_v
         ))),
     }?;
+    // `xs.flatMap(f)` casts each result as it is produced: a result that is no collection
+    // fails there, before the lambda is applied to the next item (`methods.scala:1007`)
     let values = normalized_input_vals
         .iter()
-        .map(|item| lambda_call(item.clone()))
+        .map(|item| match lambda_call(item.clone())? {
+            v @ Value::Coll(_) => Ok(v),
+            v => Err(EvalError::UnexpectedValue(format!(
+                "flatMap: the lambda returned {v:?}, which is no collection"
+            ))),
+        })
         .collect::<Result<Vec<Value>, EvalError>>()?;
     let coll = flatten((**item_tpe).clone(), values).map_err(EvalError::TryExtractFrom)?;
     // flatMap cost scales with the OUTPUT (flattened) length, not the input
@@ -440,8 +447,7 @@ pub(crate) static ENDS_WITH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     Ok(Value::from(super::coll_shape::ends_with(&coll, suffix)?))
 };
 
-pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(30)?;
+pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let Value::Coll(coll) = obj else {
         return Err(EvalError::UnexpectedValue(format!(
             "get: expected Coll, found {obj:?}"
@@ -475,16 +481,14 @@ fn coll_receiver<'ctx>(obj: Value<'ctx>, method: &str) -> Result<CollValue<'ctx>
 
 /// `Coll.size` (id 1): sigmastate calls `Coll.size` reflectively at `SizeOf`'s fixed cost
 /// (`invokeFixed`, v6.0.7 `methods.scala:821`)
-pub(crate) static SIZE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
-    ctx.add_jit_cost(14)?;
+pub(crate) static SIZE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let coll = coll_receiver(obj, "size")?;
     Ok(Value::Int(coll.len() as i32))
 };
 
 /// `Coll.apply` (id 10): sigmastate calls `Coll.apply` reflectively at `ByIndex`'s fixed cost
 /// (`methods.scala:940`); out of range it throws
-pub(crate) static APPLY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    ctx.add_jit_cost(30)?;
+pub(crate) static APPLY_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
     let coll = coll_receiver(obj, "apply")?;
     let index = args
         .first()
@@ -1503,5 +1507,29 @@ mod flat_map_element_type_tests {
             eval_out_wo_ctx::<Vec<i32>>(&flat_map_indices(int_colls_holding(no_longs))),
             Vec::<i32>::new()
         );
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod flat_map_charge_order {
+    use crate::eval::test_util::{eval_body, eval_body_err};
+    use crate::eval::EvalError;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+
+    // sigmastate's `xs.flatMap(f)` casts each result as it is produced, so a lambda that
+    // returns no collection fails at the FIRST item: the others are never applied
+    // (v6.0.6 `methods.scala:1000-1011`). Measured on the sigma-state 6.0.7 jars.
+    #[test]
+    fn flat_map_fails_at_the_first_result_that_is_no_collection() {
+        // F1 `Coll(0, 1, 2).flatMap(If(false, x => Coll(7), x => x))`: one application
+        let (e, c) = eval_body_err("dc0c0f100300020401950100d901010410010ed90101047201");
+        assert!(matches!(e, EvalError::UnexpectedValue(_)), "{e:?}");
+        assert_eq!(c, 39);
+        // the control `Coll(0, 1, 2).flatMap(x => Coll(7))`
+        let (res, c) = eval_body("dc0c0f100300020401d901010410010e", ErgoTreeVersion::V3);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(c, 114);
     }
 }

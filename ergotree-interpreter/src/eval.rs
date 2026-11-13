@@ -67,6 +67,7 @@ pub(crate) mod if_op;
 pub(crate) mod logical_not;
 pub(crate) mod long_to_byte_array;
 pub(crate) mod method_call;
+pub(crate) mod method_cost;
 pub(crate) mod multiply_group;
 pub(crate) mod negation;
 pub(crate) mod option_get;
@@ -903,6 +904,15 @@ pub mod test_util {
     pub(crate) fn eval_tree_err(tree_hex: &str) -> (EvalError, u64) {
         let (res, cost) = eval_tree(tree_hex);
         assert!(res.is_err(), "{tree_hex}: {res:?}");
+        (innermost(&res.unwrap_err()).clone(), cost)
+    }
+
+    /// The error of an expression's bytes that must not evaluate at tree version 3, under the
+    /// span wrapper each eval node adds, and the JIT cost counter where the evaluation stopped
+    #[cfg(test)]
+    pub(crate) fn eval_body_err(body_hex: &str) -> (EvalError, u64) {
+        let (res, cost) = eval_body(body_hex, ErgoTreeVersion::V3);
+        assert!(res.is_err(), "{body_hex}: {res:?}");
         (innermost(&res.unwrap_err()).clone(), cost)
     }
 
