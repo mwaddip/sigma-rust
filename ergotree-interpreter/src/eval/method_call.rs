@@ -9,6 +9,7 @@ use super::EvalError;
 use super::Evaluable;
 use super::MethodCallSite;
 use ergotree_ir::types::smethod::SMethod;
+use ergotree_ir::types::stype::SType;
 use ergotree_ir::types::stype_companion::STypeCompanion;
 
 impl Evaluable for MethodCall {
@@ -24,6 +25,7 @@ impl Evaluable for MethodCall {
         let argsv = argsv?;
         check_arity(&self.method, argsv.len())?;
         check_receiver(&self.method, &ov)?;
+        let argsv = widen_arguments(&self.method, argsv);
         let site = MethodCallSite {
             method: &self.method,
             args: &self.args,
@@ -75,6 +77,61 @@ fn receiver_is_of(owner: STypeCompanion, obj: &Value<'_>) -> bool {
     }
 }
 
+/// sigmastate's parser checks no argument against the method either, and its evaluator hands
+/// the argument values to the method by Java reflection (v6.0.6 `values.scala:1361-1393`: the
+/// Java method of a fixed-cost method, `SMethod.scala:92-101`, `:119-126`; the `_eval` method
+/// of any other, `:138-160`; `JavaImpl.scala:137`). Reflection applies a widening primitive
+/// conversion to a boxed argument of a primitive parameter: a `Byte` passes for a `short`, a
+/// `Byte` or a `Short` for an `int`, and those and an `Int` for a `long`. So
+/// `Coll[Int](0,1,2).apply(1.toByte)` is 1 on the JVM, at the cost of `apply(1)`.
+///
+/// A type variable is never widened, also where the call specialised it to `Long`, so the
+/// type that decides is the one the method DECLARES. The `_eval` method is looked up with
+/// the declared types (`genericMethod`'s `stype.tDom`, `values.scala:1390`,
+/// `SMethod.scala:139-151`), where a type variable is `Object` and takes the value as it is.
+/// The Java method of a fixed-cost method is looked up with the call's own types unless it
+/// is given explicitly (`SMethod.scala:92-101`); there a type variable the call specialised
+/// finds no Java method at all (`Option.getOrElse`: `NoSuchMethodException`), so nothing is
+/// invoked.
+///
+/// A method a handler serves is not invoked by reflection and is left alone
+/// ([`served_by_a_handler`]). Nothing else is converted: a narrowing, a `Byte` parameter, the
+/// items of a collection and any other kind stay for the evaluator to refuse. The call's
+/// static type is not touched. Measured by SANTA (`sigma-rust-argument-kind-reply.md`, oracle
+/// sigma-state 6.0.7).
+pub(crate) fn widen_arguments<'ctx>(
+    method: &SMethod,
+    mut args: Vec<Value<'ctx>>,
+) -> Vec<Value<'ctx>> {
+    if served_by_a_handler(method) {
+        return args;
+    }
+    // the method as its owner's table declares it, fetched only for a call that has a
+    // narrower integer where an integer is expected: no well-typed call does
+    let mut declared: Option<Option<SMethod>> = None;
+    for (i, arg) in args.iter_mut().enumerate() {
+        let Some(param) = method.tpe().t_dom.get(i + 1) else {
+            break;
+        };
+        let widened = match (param, &*arg) {
+            (SType::SShort, Value::Byte(b)) => Value::Short(i16::from(*b)),
+            (SType::SInt, Value::Byte(b)) => Value::Int(i32::from(*b)),
+            (SType::SInt, Value::Short(s)) => Value::Int(i32::from(*s)),
+            (SType::SLong, Value::Byte(b)) => Value::Long(i64::from(*b)),
+            (SType::SLong, Value::Short(s)) => Value::Long(i64::from(*s)),
+            (SType::SLong, Value::Int(n)) => Value::Long(i64::from(*n)),
+            _ => continue,
+        };
+        let declared =
+            declared.get_or_insert_with(|| method.obj_type.method_by_id(&method.method_id()));
+        let declared_param = declared.as_ref().and_then(|m| m.tpe().t_dom.get(i + 1));
+        if declared_param == Some(param) {
+            *arg = widened;
+        }
+    }
+    args
+}
+
 /// sigmastate parses a call of any arity, and its evaluator invokes the method with the
 /// arguments it has, after evaluating them all (v6.0.7 `values.scala:1361-1393`): a reflective
 /// invocation (`javaMethod.invoke`, `evalMethod.invoke`) fails on any other count than the
@@ -82,7 +139,7 @@ fn receiver_is_of(owner: STypeCompanion, obj: &Value<'_>) -> bool {
 /// call of any arity too, so the evaluator makes the same checks.
 pub(crate) fn check_arity(method: &SMethod, n_args: usize) -> Result<(), EvalError> {
     let expected = method.tpe().t_dom.len().saturating_sub(1);
-    if n_args != expected && !(n_args > expected && ignores_extra_arguments(method)) {
+    if n_args != expected && !(n_args > expected && served_by_a_handler(method)) {
         return Err(EvalError::Misc(format!(
             "method {} takes {expected} arguments, got {n_args}",
             method.name()
@@ -91,11 +148,13 @@ pub(crate) fn check_arity(method: &SMethod, n_args: usize) -> Result<(), EvalErr
     Ok(())
 }
 
-/// The methods sigmastate implements with a `userDefinedInvoke` handler, which reads the
-/// arguments it needs (`other.head`, or none) and ignores any more: the numeric `toBytes`,
+/// The methods sigmastate implements with a `userDefinedInvoke` handler: the numeric `toBytes`,
 /// `toBits`, `bitwiseInverse`, `bitwiseOr`, `bitwiseAnd`, `bitwiseXor`, `shiftLeft` and
-/// `shiftRight` (v6.0.7 `methods.scala:311-458`, the only `withUserDefinedInvoke` calls)
-fn ignores_extra_arguments(method: &SMethod) -> bool {
+/// `shiftRight` (v6.0.7 `methods.scala:311-458`, the only `withUserDefinedInvoke` calls). A
+/// handler is not invoked by reflection. It reads the arguments it needs (`other.head`, or
+/// none) and ignores any more, and it casts what it reads to the exact class
+/// (`other.head.asInstanceOf[Int]`).
+fn served_by_a_handler(method: &SMethod) -> bool {
     matches!(
         method.obj_type,
         STypeCompanion::SByte
@@ -682,5 +741,420 @@ mod jvm_method_rows {
         assert_accepts("0b0ddc0c0a48040404020406010400", Value::Int(1), 44); // .apply(0)
         assert_accepts("0b0fdc0c024804040402040602040a0412", Value::Int(9), 49);
         // .getOrElse(5, 9)
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod argument_widening_tests {
+    use alloc::boxed::Box;
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use ergotree_ir::chain::context::Context;
+    use ergotree_ir::mir::value::Value;
+    use ergotree_ir::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
+    use ergotree_ir::serialization::SigmaSerializable;
+    use ergotree_ir::types::smethod::SMethod;
+    use ergotree_ir::types::stype::SType;
+    use ergotree_ir::types::stype_companion::STypeCompanion;
+    use ergotree_ir::types::stype_param::STypeVar;
+    use ergotree_ir::types::{scoll, scontext, sglobal};
+    use sigma_test_util::force_any_val;
+
+    use super::widen_arguments;
+    use crate::eval::test_util::{assert_trees, eval_tree, eval_v3_body, eval_v3_body_in};
+
+    /// Each row evaluates to its control's value, at the control's cost plus the row's extra
+    /// (15 for a `lie`: the `If`, its condition and the taken branch), in one context
+    fn assert_as_control(control: &str, control_cost: Option<u64>, rows: &[(&str, u64)]) {
+        let ctx = force_any_val::<Context>();
+        let (_, expected, cost) = eval_v3_body_in(ctx.clone(), control);
+        let expected = expected.unwrap();
+        if let Some(c) = control_cost {
+            assert_eq!(cost, c, "{control}");
+        }
+        for (tree, extra) in rows {
+            let (_, res, c) = eval_v3_body_in(ctx.clone(), tree);
+            assert_eq!(res.as_ref().ok(), Some(&expected), "{tree}: {res:?}");
+            assert_eq!(c, cost + extra, "{tree}");
+        }
+    }
+
+    // SANTA's rows (`sigma-rust-argument-kind-reply.md`, oracle sigma-state 6.0.7): Java
+    // reflection widens a `Byte` or `Short` for an `Int` parameter, and those and an `Int`
+    // for a `Long` one. `c` is the constant `Coll[Int](0,1,2)`; `lie(a, b)` is
+    // `If(false, a, b)`, typed as `a` and valued as `b`.
+    #[test]
+    fn santa_widened_argument_rows() {
+        // W1: c.apply(1) @44; lie(1, 1.toByte), 1.toByte, lie(1, 1.toShort)
+        assert_as_control(
+            "0b0bdc0c0a1003000204010402",
+            Some(44),
+            &[
+                ("0b10dc0c0a10030002040195010004020201", 15),
+                ("0b0bdc0c0a1003000204010201", 0),
+                ("0b10dc0c0a10030002040195010004020302", 15),
+            ],
+        );
+        // W2: c.getOrElse(1, 7) @49
+        assert_as_control(
+            "0b0ddc0c021003000204020402040e",
+            Some(49),
+            &[
+                ("0b12dc0c0210030002040295010004020201040e", 15),
+                ("0b0ddc0c021003000204020302040e", 0),
+            ],
+        );
+        // W3: c.get(1) @44
+        assert_as_control(
+            "0b0bdc0c211003000204010402",
+            Some(44),
+            &[("0b10dc0c2110030002040195010004020201", 15)],
+        );
+        // W4: c.indexOf(1, 0) @55
+        assert_as_control(
+            "0b0ddc0c1a10030002040204020400",
+            Some(55),
+            &[("0b12dc0c1a100300020402040295010004000200", 15)],
+        );
+        // W5: c.patch(0, Coll(7), 1) @56: a Byte `from`, a Short `replaced`
+        assert_as_control(
+            "0b10dc0c13100300020403040010010e0402",
+            Some(56),
+            &[
+                ("0b15dc0c131003000204039501000400020010010e0402", 15),
+                ("0b15dc0c13100300020403040010010e95010004020302", 15),
+            ],
+        );
+        // W6: c.updated(0, 7) @40
+        assert_as_control(
+            "0b0ddc0c141003000204020400040e",
+            Some(40),
+            &[("0b12dc0c1410030002040295010004000300040e", 15)],
+        );
+        // W7: Global.decodeNbits(1L) @64: an Int, a Byte; a Short (the JVM by this round's
+        // harness on the sigma-state 6.0.7 jars, not SANTA's oracle)
+        assert_as_control(
+            "0b07dc6a07dd010502",
+            Some(64),
+            &[
+                ("0b0cdc6a07dd0195010005020402", 15),
+                ("0b07dc6a07dd010201", 0),
+                ("0b07dc6a07dd010302", 0),
+            ],
+        );
+        // W8: Global.powHit(32, msg, nonce, h, 1024) @765: a Byte k, a Short N
+        assert_as_control(
+            "0b1ddc6a08dd0504400e01010e0800000000000000010e0400000001048010",
+            Some(765),
+            &[
+                (
+                    "0b22dc6a08dd05950100044002200e01010e0800000000000000010e0400000001048010",
+                    15,
+                ),
+                (
+                    "0b23dc6a08dd0504400e01010e0800000000000000010e0400000001950100048010038010",
+                    15,
+                ),
+            ],
+        );
+        // W9: SELF.getReg[Long](0) (@69 in SANTA's context)
+        assert_as_control(
+            "0b08dc6313a701040005",
+            None,
+            &[
+                ("0b0ddc6313a7019501000400020005", 15),
+                ("0b08dc6313a701030005", 0),
+            ],
+        );
+        // W10: CONTEXT.getVarFromInput[Int](0.toShort, 1.toByte): a Byte input index
+        assert_as_control(
+            "0b0adc650cfe020300020104",
+            None,
+            &[("0b0fdc650cfe0295010003000200020104", 15)],
+        );
+        // V1, V2: tree version 0
+        assert_trees(&[
+            (
+                "00dc0c0a10030002040195010004020201",
+                Some((Value::Int(1), 59)),
+            ),
+            ("00dc0c021003000204020302040e", Some((Value::Int(1), 49))),
+        ]);
+    }
+
+    // A negative argument is widened with its sign. The JVM by this round's harness on the
+    // sigma-state 6.0.7 jars, not SANTA's oracle.
+    #[test]
+    fn a_negative_argument_keeps_its_sign() {
+        // c.indexOf(1, -1) @55 searches from the start: 1. With lie(-1, (-1).toByte) and with
+        // (-1).toShort; a start of 255 or 65535 would find nothing
+        assert_as_control(
+            "0b0ddc0c1a10030002040204020401",
+            Some(55),
+            &[
+                ("0b12dc0c1a1003000204020402950100040102ff", 15),
+                ("0b0ddc0c1a10030002040204020301", 0),
+            ],
+        );
+        // Global.decodeNbits(-1L) throws (out of the 256-bit range), and so do (-1).toByte and
+        // (-1).toShort; decodeNbits(255L) and (65535L) are 0
+        assert_trees(&[
+            ("0b07dc6a07dd010501", None),
+            ("0b07dc6a07dd0102ff", None),
+            ("0b07dc6a07dd010301", None),
+            (
+                "0b09dc6a07dd0105fe03",
+                Some((Value::BigInt(num_bigint::BigInt::from(0)), 64)),
+            ),
+            (
+                "0b0adc6a07dd0105feff07",
+                Some((Value::BigInt(num_bigint::BigInt::from(0)), 64)),
+            ),
+        ]);
+    }
+
+    // SANTA's receivers: a `Coll[Byte]`, a `Coll[Long]`, a pair collection, a three-item
+    // tuple constant, a `Coll[Box]`, a `ConcreteCollection`
+    #[test]
+    fn santa_widened_argument_receivers() {
+        assert_trees(&[
+            ("0b0bdc0c0a0e03000102010201", Some((Value::Byte(1), 44))),
+            (
+                "0b10dc0c0a11030002040195010004020201",
+                Some((Value::Long(1), 59)),
+            ),
+            (
+                "0b18dc0c0adc0c1d830204040204040183020404060408010201",
+                Some((Value::Pair(Box::new((Value::Int(2), Value::Int(4)))), 114)),
+            ),
+            ("0b0ddc0c0a48040404020406010201", Some((Value::Int(2), 44))),
+            (
+                "0b11dc0c02830304040004020404020201040e",
+                Some((Value::Int(1), 79)),
+            ),
+            (
+                "0b12dc0c020e0300010202950100040203020207",
+                Some((Value::Byte(1), 64)),
+            ),
+        ]);
+        // Coll[Box](SELF).apply(0) and (0.toByte)
+        assert_as_control(
+            "0b0adc0c0a830163a7010400",
+            None,
+            &[("0b0adc0c0a830163a7010200", 0)],
+        );
+    }
+
+    // What the JVM refuses stays refused: a narrowing, a handler's strict cast, a `byte`
+    // parameter, a collection's items, a type variable, another kind
+    #[test]
+    fn santa_unwidened_argument_rows() {
+        assert_trees(&[
+            // W1n: c.apply(lie(1, 1L))
+            ("0b10dc0c0a10030002040195010004020502", None),
+            // X1-X3: 1.shiftLeft(lie(1, 1.toByte)), 1L.shiftRight(1.toShort), BigInt(1).shiftLeft(..)
+            ("0b0ddc040c04020195010004020201", None),
+            ("0b08dc050d0502010302", None),
+            ("0b0edc060c0601010195010004020201", None),
+            // X4: tree.updateOperations(lie(1.toByte, 1.toShort)).enabledOperations
+            ("0b33db6402dc6408640000000000000000000000000000000000000000000000000000000000000000000720000195010002010302", None),
+            // X5: c.updateMany(lie(Coll[Int](0), Coll[Byte](0)), Coll(7))
+            ("0b15dc0c151003000204029501001001000e010010010e", None),
+            // T1: Coll[Long](0,1,2).getOrElse(9, lie(7L, 7.toByte)): the default is a type
+            // variable, which the specialised call types as Long
+            ("0b12dc0c021103000204020412950100050e0207", None),
+            // T1's control: getOrElse(9, 7L)
+            ("0b0ddc0c021103000204020412050e", Some((Value::Long(7), 49))),
+            // K1, K2, K3, K6: a SigmaProp, SELF, a PreHeader, a String for an Int
+            ("0b11dc0c0a1003000204019501000402d10101", None),
+            ("0b0fdc0c0a1003000204019501000402a7", None),
+            ("0b12dc0c0a1003000204019501000402db6503fe", None),
+            ("0b0cdc0c0a100300020401660161", None),
+        ]);
+    }
+
+    // A Byte CONSTANT as the argument of a generic method leaves the call typed as the
+    // method's type variable (the types do not unify), and the widening does not change that
+    #[test]
+    fn a_widened_call_keeps_its_static_type() {
+        // W1d: c.apply(1.toByte)
+        let (expr, res, _) = eval_v3_body("0b0bdc0c0a1003000204010201");
+        assert_eq!(res.unwrap(), Value::Int(1));
+        assert_eq!(expr.tpe(), SType::STypeVar(STypeVar::iv()));
+        // Q1: c.apply(1.toByte) == 1 is refused when read (the JVM: `SameType2`)
+        let bytes = base16::decode("93dc0c0a10030002040102010402").unwrap();
+        assert!(from_bytes(&bytes)
+            .with_tree_version(
+                ergotree_ir::ergo_tree::ErgoTreeVersion::V3,
+                ergotree_ir::mir::expr::Expr::sigma_parse
+            )
+            .is_err());
+        // Q1e: sigmaProp(c.apply(1.toByte) == c.apply(1.toByte)) reads, and throws when evaluated
+        let (res, _) = eval_tree("0b18d193dc0c0a1003000204010201dc0c0a1003000204010201");
+        assert!(res.is_err());
+        // Q2: sigmaProp(Coll(true,true).apply(1.toByte)) is its control, sigmaProp(.apply(1)) @59
+        assert_as_control(
+            "0b0ad1dc0c0a0d0203010402",
+            Some(59),
+            &[("0b0ad1dc0c0a0d0203010201", 0)],
+        );
+    }
+
+    fn widened(method: &SMethod, args: Vec<Value<'static>>) -> Vec<Value<'static>> {
+        widen_arguments(method, args)
+    }
+
+    #[test]
+    fn the_six_widening_pairs_and_no_other() {
+        let short = scontext::GET_VAR_FROM_INPUT_METHOD.clone(); // (Short, Byte)
+        let int = scoll::APPLY_METHOD.clone(); // (Int)
+        let long = sglobal::DECODE_NBITS_METHOD.clone(); // (Long)
+        let ints = || {
+            vec![
+                Value::Byte(1),
+                Value::Short(1),
+                Value::Int(1),
+                Value::Long(1),
+            ]
+        };
+        let run = |m: &SMethod| -> Vec<Value<'static>> {
+            ints()
+                .into_iter()
+                .map(|v| widened(m, vec![v, Value::Byte(1)]).remove(0))
+                .collect()
+        };
+        assert_eq!(
+            run(&short),
+            vec![
+                Value::Short(1),
+                Value::Short(1),
+                Value::Int(1),
+                Value::Long(1)
+            ]
+        );
+        assert_eq!(
+            run(&int),
+            vec![Value::Int(1), Value::Int(1), Value::Int(1), Value::Long(1)]
+        );
+        assert_eq!(
+            run(&long),
+            vec![
+                Value::Long(1),
+                Value::Long(1),
+                Value::Long(1),
+                Value::Long(1)
+            ]
+        );
+        // the sign is kept, by each of the six pairs
+        let neg = |m: &SMethod, v: Value<'static>| widened(m, vec![v, Value::Byte(1)]).remove(0);
+        assert_eq!(neg(&short, Value::Byte(-1)), Value::Short(-1));
+        assert_eq!(neg(&int, Value::Byte(-1)), Value::Int(-1));
+        assert_eq!(neg(&int, Value::Short(-1)), Value::Int(-1));
+        assert_eq!(neg(&long, Value::Byte(-1)), Value::Long(-1));
+        assert_eq!(neg(&long, Value::Short(-1)), Value::Long(-1));
+        assert_eq!(neg(&long, Value::Int(-1)), Value::Long(-1));
+        // nothing but an integer is touched
+        for v in [
+            Value::Boolean(true),
+            Value::Unit,
+            Value::BigInt(num_bigint::BigInt::from(1)),
+        ] {
+            assert_eq!(widened(&int, vec![v.clone()]), vec![v]);
+        }
+        // getVarFromInput's second parameter is a Byte: nothing widens into it
+        assert_eq!(
+            widened(&short, vec![Value::Short(0), Value::Short(1)])[1],
+            Value::Short(1)
+        );
+    }
+
+    #[test]
+    fn a_type_variable_is_not_widened_when_the_call_specialised_it() {
+        // Coll[Long].getOrElse(Int, Long): the default is `IV` in the method's own table
+        let method = scoll::GET_OR_ELSE_METHOD
+            .clone()
+            .with_concrete_types(&core::iter::once((STypeVar::iv(), SType::SLong)).collect());
+        assert_eq!(method.tpe().t_dom[2], SType::SLong);
+        assert_eq!(
+            widened(&method, vec![Value::Byte(9), Value::Byte(7)]),
+            vec![Value::Int(9), Value::Byte(7)]
+        );
+    }
+
+    /// Every (owner, method, argument index, declared type) where a `Byte` argument comes
+    /// back as another kind: the parameters the rule reaches
+    fn reached() -> Vec<(&'static str, &'static str, usize, String)> {
+        use STypeCompanion::*;
+        let mut rows = vec![];
+        let owners = [
+            SByte,
+            SShort,
+            SInt,
+            SLong,
+            SBigInt,
+            SUnsignedBigInt,
+            Context,
+            Box,
+            Coll,
+            GroupElem,
+            SigmaProp,
+            Global,
+            Header,
+            PreHeader,
+            Option,
+            AvlTree,
+        ];
+        // a new owner does not compile here until it is in the list above
+        match SByte {
+            SByte | SShort | SInt | SLong | SBigInt | SUnsignedBigInt | Context | Box | Coll
+            | GroupElem | SigmaProp | Global | Header | PreHeader | Option | AvlTree => {}
+        }
+        for owner in owners {
+            for method in owner.methods() {
+                let n = method.tpe().t_dom.len() - 1;
+                for i in 0..n {
+                    let mut args = vec![Value::Unit; n];
+                    args[i] = Value::Byte(1);
+                    if widened(&method, args)[i] != Value::Byte(1) {
+                        let tpe = alloc::format!("{:?}", method.tpe().t_dom[i + 1]);
+                        rows.push((owner.type_name(), method.name(), i, tpe));
+                    }
+                }
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    // The JVM's list: the parameters declared `Short`, `Int` or `Long` of the methods it
+    // invokes by reflection. `slice` and `getRegV5` are in it and cannot be invoked at all.
+    #[test]
+    fn the_rule_reaches_exactly_these_parameters() {
+        let expected: Vec<(&str, &str, usize, &str)> = vec![
+            ("Box", "getReg", 0, "SInt"),
+            ("Box", "getRegV5", 0, "SInt"),
+            ("Coll", "apply", 0, "SInt"),
+            ("Coll", "get", 0, "SInt"),
+            ("Coll", "getOrElse", 0, "SInt"),
+            ("Coll", "indexOf", 1, "SInt"),
+            ("Coll", "patch", 0, "SInt"),
+            ("Coll", "patch", 2, "SInt"),
+            ("Coll", "slice", 0, "SInt"),
+            ("Coll", "slice", 1, "SInt"),
+            ("Coll", "updated", 0, "SInt"),
+            ("Context", "getVarFromInput", 0, "SShort"),
+            ("Global", "decodeNBits", 0, "SLong"),
+            ("Global", "powHit", 0, "SInt"),
+            ("Global", "powHit", 4, "SInt"),
+        ];
+        let got = reached();
+        let got: Vec<(&str, &str, usize, &str)> = got
+            .iter()
+            .map(|(o, m, i, t)| (*o, *m, *i, t.as_str()))
+            .collect();
+        assert_eq!(got, expected);
     }
 }
