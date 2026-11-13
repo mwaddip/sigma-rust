@@ -1676,8 +1676,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ergo_avltree_rust no-panic fix (ergoplatform/ergo_avltree_rust#14); \
-                un-ignore on its release + version bump"]
     fn eval_avl_contains_garbage_proof_bytes() {
         let (obj, proof) = bad_proof_bytes_fixture(AvlTreeFlags::new(false, false, false));
         let key: Constant = vec![1u8].into();
@@ -1692,8 +1690,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ergo_avltree_rust no-panic fix (ergoplatform/ergo_avltree_rust#14); \
-                un-ignore on its release + version bump"]
     fn eval_avl_get_garbage_proof_bytes() {
         let (obj, proof) = bad_proof_bytes_fixture(AvlTreeFlags::new(false, false, false));
         let key: Constant = vec![1u8].into();
@@ -1708,8 +1704,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ergo_avltree_rust no-panic fix (ergoplatform/ergo_avltree_rust#14); \
-                un-ignore on its release + version bump"]
     fn eval_avl_contains_negative_key_length() {
         let (obj, proof) = negative_keylength_fixture(AvlTreeFlags::new(false, false, false));
         let key: Constant = vec![1u8].into();
@@ -2172,7 +2166,7 @@ mod tests {
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
 mod charge_order {
-    use crate::eval::test_util::{eval_body, eval_body_err};
+    use crate::eval::test_util::{eval_body, eval_body_err, innermost};
     use crate::eval::EvalError;
     use ergotree_ir::ergo_tree::ErgoTreeVersion;
     use ergotree_ir::mir::value::Value;
@@ -2413,6 +2407,53 @@ mod charge_order {
             let (res, c) = eval_body(body, ErgoTreeVersion::V3);
             let v = res.unwrap();
             assert_eq!(matches!(v, Value::Opt(None)), is_none, "{body}: {v:?}");
+            assert_eq!(c, cost, "{body}");
+        }
+    }
+
+    // A degenerate proof. sigmastate's verifier construction never throws: a proof that cannot
+    // be read gives a verifier with no tree, the operation fails, and each method maps that
+    // failure as it does for a proof of another tree. The one-byte proof rows are each method
+    // on an all-zero digest; the last two are `contains` and `get` with a `Coll[Int]` key and
+    // an EMPTY proof, where the key is cast after the verifier's and the lookup's cost.
+    // `ergo_avltree_rust` 0.1.1 panics on such a proof; the workspace takes the crate from the
+    // fork that returns an error. Measured on the sigma-state 6.0.7 jars.
+    #[test]
+    fn a_degenerate_proof_answers_or_errors_as_the_jvm() {
+        #[rustfmt::skip]
+        let rows: [(&str, Result<&str, &str>, u64); 9] = [
+            // AvlTree.contains#9|control|-
+            ("dc640964000000000000000000000000000000000000000000000000000000000000000000072000020e01010e0102", Ok("false"), 189),
+            // AvlTree.get#10|control|-
+            ("dc640a64000000000000000000000000000000000000000000000000000000000000000000072000020e01010e0102", Err("AvlTree"), 189),
+            // AvlTree.getMany#11|control|-
+            ("dc640b64000000000000000000000000000000000000000000000000000000000000000000072000021a0101010e0102", Err("AvlTree"), 189),
+            // AvlTree.insert#12|control|-
+            ("dc640c64000000000000000000000000000000000000000000000000000000000000000000072000020c3c0e0e000e0102", Ok("None"), 164),
+            // AvlTree.update#13|control|-
+            ("dc640d64000000000000000000000000000000000000000000000000000000000000000000072000020c3c0e0e000e0102", Ok("None"), 164),
+            // AvlTree.remove#14|control|-
+            ("dc640e64000000000000000000000000000000000000000000000000000000000000000000072000021a0101010e0102", Ok("None"), 294),
+            // AvlTree.insertOrUpdate#16|control|-
+            ("dc641064000000000000000000000000000000000000000000000000000000000000000000072000020c3c0e0e000e0102", Ok("None"), 179),
+            // AvlTree.contains|arg|EmptyCollInt|direct
+            ("dc6409640000000000000000000000000000000000000000000000000000000000000000000720000210000e00", Err("TryExtractFrom"), 189),
+            // AvlTree.get|arg|EmptyCollInt|direct
+            ("dc640a640000000000000000000000000000000000000000000000000000000000000000000720000210000e00", Err("TryExtractFrom"), 189),
+        ];
+        for (body, expected, cost) in rows {
+            let (res, c) = eval_body(body, ErgoTreeVersion::V3);
+            let as_expected = match (expected, &res) {
+                (Ok("false"), Ok(Value::Boolean(false))) | (Ok("None"), Ok(Value::Opt(None))) => {
+                    true
+                }
+                (Err("AvlTree"), Err(e)) => matches!(innermost(e), EvalError::AvlTree(_)),
+                (Err("TryExtractFrom"), Err(e)) => {
+                    matches!(innermost(e), EvalError::TryExtractFrom(_))
+                }
+                _ => false,
+            };
+            assert!(as_expected, "{body}: expected {expected:?}, got {res:?}");
             assert_eq!(c, cost, "{body}");
         }
     }

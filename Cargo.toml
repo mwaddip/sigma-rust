@@ -111,3 +111,10 @@ criterion = { version = "0.5.1", features = ["default", "cargo_bench_support"] }
 # Tell `rustc` to optimize for small code size.
 opt-level = "z"
 lto = true
+
+# `ergo_avltree_rust` 0.1.1 panics in its verifier on a malformed proof, where sigmastate's
+# verifier answers that the proof is wrong. The fix is in the crate's fork below (its commit
+# 5818046, proposed upstream) and not yet in a published version. A patch applies only where
+# this workspace is the one being built: a dependent workspace patches the crate itself.
+[patch.crates-io]
+ergo_avltree_rust = { git = "https://github.com/mwaddip/ergo_avltree_rust.git", rev = "b95579006eb5629d154293c449210053afbf49a4" }
