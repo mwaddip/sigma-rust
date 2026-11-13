@@ -809,6 +809,11 @@ mod evaluated_value_tests {
             ("8600", "8600"),
             ("86020402a3", "86020402a3"),
             ("830104a3", "830104a3"),
+            // not one of SANTA's X rows: `((1), 1)`, a pair expression holding a one-item
+            // tuple expression. The sigma-state 6.0.7 jars read it (`ValueSerializer`
+            // called directly), and SANTA measured it written back unchanged in a register
+            // (its reply `sigma-rust-small-tuples-reply.md`, 6b)
+            ("8602860104020402", "8602860104020402"),
         ] {
             let ext = parse(value).unwrap();
             assert_eq!(
@@ -862,6 +867,21 @@ mod evaluated_value_tests {
             serde_json::to_value(&ext).unwrap(),
             serde_json::to_value(ext.json_at(ErgoTreeVersion::V0)).unwrap()
         );
+    }
+
+    #[test]
+    fn a_one_item_tuple_constant_reads_and_is_not_written() {
+        // `60010402`, a `(Int)` constant. sigmastate's value reader reads it (the 6.0.7 jars:
+        // `Coll(1)`), and the extension reader is that reader, a cast and `CheckV6Type` (by
+        // reading, `ContextExtension.scala:61-62`). What sigmastate cannot do is WRITE the
+        // constant's type (SANTA measured `w.putValue` refusing it in a register, 6a)
+        let ext = parse("60010402").unwrap();
+        assert!(matches!(
+            ext.sigma_serialize_bytes(),
+            Err(crate::serialization::SigmaSerializationError::NotSupported(
+                _
+            ))
+        ));
     }
 
     #[test]
