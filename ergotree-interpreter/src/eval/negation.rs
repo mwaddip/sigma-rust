@@ -9,6 +9,30 @@ use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
 
+/// The entry of sigmastate's `ArithOp.impls` for a type, as `Negation` uses it (v6.0.6
+/// `trees.scala:885-890`)
+enum NegationImpl {
+    Byte,
+    Short,
+    Int,
+    Long,
+    BigInt,
+    UnsignedBigInt,
+}
+
+/// The table's entry for a type, or `None` for a type that has none
+fn negation_impl(tpe: &SType) -> Option<NegationImpl> {
+    match tpe {
+        SType::SByte => Some(NegationImpl::Byte),
+        SType::SShort => Some(NegationImpl::Short),
+        SType::SInt => Some(NegationImpl::Int),
+        SType::SLong => Some(NegationImpl::Long),
+        SType::SBigInt => Some(NegationImpl::BigInt),
+        SType::SUnsignedBigInt => Some(NegationImpl::UnsignedBigInt),
+        _ => None,
+    }
+}
+
 impl Evaluable for Negation {
     fn eval<'ctx>(
         &self,
@@ -26,35 +50,26 @@ impl Evaluable for Negation {
         // v6.0.6 `trees.scala:885-890`). A value of another numeric type throws at every tree
         // version, a narrower one and a wider one alike (SANTA `Negation.mixed_width`)
         let tpe = self.input.tpe();
-        let has_entry = matches!(
-            tpe,
-            SType::SByte
-                | SType::SShort
-                | SType::SInt
-                | SType::SLong
-                | SType::SBigInt
-                | SType::SUnsignedBigInt
-        );
-        if !has_entry {
+        let Some(implementation) = negation_impl(&tpe) else {
             return Err(EvalError::UnexpectedValue(format!(
                 "Negation: no arithmetic for the input's type {tpe:?}"
             )));
-        }
+        };
         ctx.add_jit_cost(30)?; // Negation = Fixed(30)
-        match tpe {
+        match implementation {
             // Fixed-width signed ints negate with two's-complement wrap
             // (`-MIN == MIN`), matching sigma-state's unchecked numeric
             // `negate` (`ast/trees.scala` Negation.eval) — negating MIN is
             // not an error on the JVM.
-            SType::SByte => Ok(input_v.try_extract_into::<i8>()?.wrapping_neg().into()),
-            SType::SShort => Ok(input_v.try_extract_into::<i16>()?.wrapping_neg().into()),
-            SType::SInt => Ok(input_v.try_extract_into::<i32>()?.wrapping_neg().into()),
-            SType::SLong => Ok(input_v.try_extract_into::<i64>()?.wrapping_neg().into()),
+            NegationImpl::Byte => Ok(input_v.try_extract_into::<i8>()?.wrapping_neg().into()),
+            NegationImpl::Short => Ok(input_v.try_extract_into::<i16>()?.wrapping_neg().into()),
+            NegationImpl::Int => Ok(input_v.try_extract_into::<i32>()?.wrapping_neg().into()),
+            NegationImpl::Long => Ok(input_v.try_extract_into::<i64>()?.wrapping_neg().into()),
             // sigmastate's `BigInt.negate` checks its RESULT against the 256-bit range at every
             // tree version (v6.0.6 `CBigInt.scala:55`): negating `MIN` is refused, and negating
             // 2^255, a value a tree below version 3 can hold, is `MIN` (SANTA's reply
             // `sigma-rust-bigint-range-reply.md`, B8)
-            SType::SBigInt => {
+            NegationImpl::BigInt => {
                 let v = input_v.try_extract_into::<num_bigint::BigInt>()?;
                 let negated = -&v;
                 if fits_256_bits(&negated) {
@@ -65,7 +80,7 @@ impl Evaluable for Negation {
             }
             // `UnsignedBigInt` has its entry, and its `negate` is `???`
             // (`UnsignedBigIntegerOps.scala:48`): it throws once the cost is added
-            _ => Err(EvalError::UnexpectedValue(format!(
+            NegationImpl::UnsignedBigInt => Err(EvalError::UnexpectedValue(format!(
                 "Negation is not implemented for {tpe:?}"
             ))),
         }
