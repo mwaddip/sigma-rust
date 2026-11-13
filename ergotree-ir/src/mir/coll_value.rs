@@ -64,7 +64,7 @@ impl<'ctx> CollValue<'ctx> {
     /// whose sides are built the same way from each component (`fromBoxedPairs`, `:205-215`), any
     /// other item type a generic collection. A pair item type with an item that is not a pair is an
     /// error, as the JVM's `asInstanceOf[(A, B)]` throws. So is an item whose class does not fit
-    /// the array of the item type ([`fits_array`]): sigmastate hands `fromArray` an array of that
+    /// the array of the item type (`fits_array`): sigmastate hands `fromArray` an array of that
     /// class, and the JVM refuses the store that would put another class into it, in `updated`,
     /// `patch`, `updateMany`, `map`, `flatMap` and a pair collection's sides (SANTA
     /// `Coll.item_store_type_check`, `Coll.reference_store_ops`, `Coll.store_runtime_array_class`).

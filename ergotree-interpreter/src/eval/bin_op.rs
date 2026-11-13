@@ -289,6 +289,7 @@ impl Evaluable for BinOp {
             BinOpKind::Logical(_) => {
                 ctx.add_jit_cost(20)?; // BinOr, BinAnd, BinXor = Fixed(20)
             }
+            // never reached: `eval` returned for a `Bit` kind above, before its operands
             BinOpKind::Bit(_) => return Err(not_evaluated("BitOp")),
         }
         // using closure to keep right value from evaluation (for lazy AND, OR, XOR)
@@ -363,6 +364,7 @@ impl Evaluable for BinOp {
                     ))),
                 }
             }
+            // never reached: `eval` returned for a `Bit` kind above, before its operands
             BinOpKind::Bit(_) => Err(not_evaluated("BitOp")),
         }
     }
@@ -1394,7 +1396,6 @@ mod tests {
             prop_assert_eq!(eval_arith_op::<i64>(ArithOp::Max, l, r).unwrap(), l.max(r));
             prop_assert_eq!(eval_arith_op::<i64>(ArithOp::Min, l, r).unwrap(), l.min(r));
 
-
             prop_assert_eq!(eval_relation_op(RelationOp::Gt, l, r), l > r);
             prop_assert_eq!(eval_relation_op(RelationOp::Lt, l, r), l < r);
             prop_assert_eq!(eval_relation_op(RelationOp::Ge, l, r), l >= r);
@@ -1410,7 +1411,6 @@ mod tests {
             prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), (r != 0).then(|| l.wrapping_rem(r)));
             prop_assert_eq!(eval_arith_op::<i32>(ArithOp::Max, l, r).unwrap(), l.max(r));
             prop_assert_eq!(eval_arith_op::<i32>(ArithOp::Min, l, r).unwrap(), l.min(r));
-
 
             prop_assert_eq!(eval_relation_op(RelationOp::Gt, l, r), l > r);
             prop_assert_eq!(eval_relation_op(RelationOp::Lt, l, r), l < r);
@@ -1428,7 +1428,6 @@ mod tests {
             prop_assert_eq!(eval_arith_op::<i16>(ArithOp::Max, l, r).unwrap(), l.max(r));
             prop_assert_eq!(eval_arith_op::<i16>(ArithOp::Min, l, r).unwrap(), l.min(r));
 
-
             prop_assert_eq!(eval_relation_op(RelationOp::Gt, l, r), l > r);
             prop_assert_eq!(eval_relation_op(RelationOp::Lt, l, r), l < r);
             prop_assert_eq!(eval_relation_op(RelationOp::Ge, l, r), l >= r);
@@ -1444,7 +1443,6 @@ mod tests {
             prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), (r != 0).then(|| l.wrapping_rem(r)));
             prop_assert_eq!(eval_arith_op::<i8>(ArithOp::Max, l, r).unwrap(), l.max(r));
             prop_assert_eq!(eval_arith_op::<i8>(ArithOp::Min, l, r).unwrap(), l.min(r));
-
 
             prop_assert_eq!(eval_relation_op(RelationOp::Gt, l, r), l > r);
             prop_assert_eq!(eval_relation_op(RelationOp::Lt, l, r), l < r);
@@ -1466,7 +1464,6 @@ mod tests {
             prop_assert_eq!(eval_arith_op::<BigInt256>(ArithOp::Min, l,
                     r).unwrap(), l.min(r));
 
-
             prop_assert_eq!(eval_relation_op(RelationOp::Gt, l, r), l > r);
             prop_assert_eq!(eval_relation_op(RelationOp::Lt, l, r), l < r);
             prop_assert_eq!(eval_relation_op(RelationOp::Ge, l, r), l >= r);
@@ -1482,7 +1479,6 @@ mod tests {
             prop_assert_eq!(eval_arith_op(ArithOp::Modulo, l, r).ok(), l.checked_rem(&r));
             prop_assert_eq!(eval_arith_op::<UnsignedBigInt>(ArithOp::Max, l, r).unwrap(), l.max(r));
             prop_assert_eq!(eval_arith_op::<UnsignedBigInt>(ArithOp::Min, l, r).unwrap(), l.min(r));
-
 
             prop_assert_eq!(eval_relation_op(RelationOp::Gt, l, r), l > r);
             prop_assert_eq!(eval_relation_op(RelationOp::Lt, l, r), l < r);

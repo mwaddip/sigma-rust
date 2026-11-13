@@ -263,8 +263,9 @@ static SHIFT_LEFT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     })
 };
 
-/// sigmastate's `BigInt.shiftLeft` (v6.0.6): the shift amount is refused from 256
-/// (`BigIntegerOps.scala:109-115`), then the value is shifted as an unbounded integer and
+/// sigmastate's `BigInt.shiftLeft` (v6.0.6): the shift amount is refused below 0 and from 256
+/// (`BigIntegerOps.scala:109-115`; the negative one by the caller's conversion to a `u32`,
+/// before this function, the other here), then the value is shifted as an unbounded integer and
 /// refused if it left the 256-bit range (`CBigInt.scala:67`,
 /// `wrappedValue.shiftLeft(n).toSignedBigIntValueExact`; `Extensions.scala:219-223`). SANTA
 /// `BigInt.shift_and_inverse_range_edges`
@@ -286,10 +287,11 @@ fn bigint_shift_left(
     Ok(Value::BigInt(shifted))
 }
 
-/// sigmastate's `UnsignedBigInt.shiftLeft` (v6.0.6): the shift amount is refused from 256
-/// (`UnsignedBigIntegerOps.scala:131-137`), then the value is shifted as an unbounded integer
-/// (`CUnsignedBigInt.scala:86`, `CUnsignedBigInt(wrappedValue.shiftLeft(n))`) and the
-/// constructor refuses one above 256 bits (`:20-22`). SANTA
+/// sigmastate's `UnsignedBigInt.shiftLeft` (v6.0.6): the shift amount is refused below 0 and
+/// from 256 (`UnsignedBigIntegerOps.scala:131-137`; the negative one by the caller's conversion
+/// to a `u32`, before this function, the other here), then the value is shifted as an
+/// unbounded integer (`CUnsignedBigInt.scala:86`, `CUnsignedBigInt(wrappedValue.shiftLeft(n))`)
+/// and the constructor refuses one above 256 bits (`:20-22`). SANTA
 /// `UnsignedBigInt.shiftLeft_past_256_bits`
 fn unsigned_bigint_shift_left(
     obj: UnsignedBigInt,
