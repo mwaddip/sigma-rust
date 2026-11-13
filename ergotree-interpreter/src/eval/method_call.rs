@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use ergotree_ir::mir::expr::Expr;
 use ergotree_ir::mir::method_call::MethodCall;
 use ergotree_ir::mir::value::Value;
 
@@ -18,20 +19,29 @@ impl Evaluable for MethodCall {
         env: &mut Env<'ctx>,
         ectx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        ectx.add_jit_cost(4)?; // MethodCall = Fixed(4)
-        let ov = self.obj.eval(env, ectx)?;
-        let argsv: Result<Vec<Value>, EvalError> =
-            self.args.iter().map(|arg| arg.eval(env, ectx)).collect();
-        let argsv = argsv?;
-        check_arity(&self.method, argsv.len())?;
-        check_receiver(&self.method, &ov)?;
-        let argsv = widen_arguments(&self.method, argsv);
-        let site = MethodCallSite {
-            method: &self.method,
-            args: &self.args,
-        };
-        smethod_eval_fn(&self.method)?(&site, env, ectx, ov, argsv)
+        call_method(&self.method, &self.obj, &self.args, env, ectx)
     }
+}
+
+/// A method call, with or without arguments: sigmastate's `MethodCall.eval`
+/// (`values.scala:1361-1391`; a `PropertyCall` is the same node with no arguments, `:1351`).
+/// The receiver is evaluated first and the call's own cost is added after it (`:1362-1363`).
+pub(crate) fn call_method<'ctx>(
+    method: &SMethod,
+    obj: &Expr,
+    args: &[Expr],
+    env: &mut Env<'ctx>,
+    ectx: &Context<'ctx>,
+) -> Result<Value<'ctx>, EvalError> {
+    let ov = obj.eval(env, ectx)?;
+    ectx.add_jit_cost(4)?; // MethodCall = Fixed(4)
+    let argsv: Result<Vec<Value>, EvalError> = args.iter().map(|arg| arg.eval(env, ectx)).collect();
+    let argsv = argsv?;
+    check_arity(method, argsv.len())?;
+    check_receiver(method, &ov)?;
+    let argsv = widen_arguments(method, argsv);
+    let site = MethodCallSite { method, args };
+    smethod_eval_fn(method)?(&site, env, ectx, ov, argsv)
 }
 /// sigmastate's parser checks no receiver against the method: the owner is the type code in
 /// the bytes. Its evaluator then gives the receiver's value to the method (v6.0.6
@@ -1181,5 +1191,32 @@ mod argument_widening_tests {
             .map(|(o, m, i, t)| (*o, *m, *i, t.as_str()))
             .collect();
         assert_eq!(got, expected);
+    }
+}
+
+/// Where a call's charges sit against its refusals. Every figure is the sigma-state 6.0.7
+/// evaluator's accumulator at the throw, measured on the jars.
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod charge_order {
+    use crate::eval::test_util::eval_body_err;
+    use crate::eval::EvalError;
+
+    // sigmastate evaluates the receiver and then adds the call's own cost
+    // (`values.scala:1361-1363`): a receiver that throws has not paid for the call
+    #[test]
+    fn the_calls_own_cost_follows_the_receiver() {
+        for body in [
+            "b21000040000",               // the receiver alone: Coll[Int]().apply(0)
+            "db0c01b21000040000",         // .size       (a fixed cost)
+            "dc0c1db210000400000110010e", // .zip(..)    (per item)
+            "db0401b21000040000",         // .toByte     (no cost kind)
+            "dc040cb21000040000010402",   // .shiftLeft  (a handler)
+        ] {
+            let (e, c) = eval_body_err(body);
+            assert!(matches!(e, EvalError::Misc(_)), "{body}: {e:?}");
+            assert_eq!(c, 40, "{body}");
+        }
     }
 }

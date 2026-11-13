@@ -906,6 +906,15 @@ pub mod test_util {
         (innermost(&res.unwrap_err()).clone(), cost)
     }
 
+    /// The error of an expression's bytes that must not evaluate at tree version 3, under the
+    /// span wrapper each eval node adds, and the JIT cost counter where the evaluation stopped
+    #[cfg(test)]
+    pub(crate) fn eval_body_err(body_hex: &str) -> (EvalError, u64) {
+        let (res, cost) = eval_body(body_hex, ErgoTreeVersion::V3);
+        assert!(res.is_err(), "{body_hex}: {res:?}");
+        (innermost(&res.unwrap_err()).clone(), cost)
+    }
+
     /// fails at eval in an evaluator, not for want of one
     #[cfg(test)]
     pub(crate) fn assert_evaluator_refuses(tree_hex: &str) {
