@@ -257,6 +257,46 @@ mod arity_tests {
     }
 }
 
+/// The owners of sigmastate's methods, for the tests of this file that run over all of them
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod test_owners {
+    use ergotree_ir::types::stype_companion::STypeCompanion;
+
+    /// The names are written once and expand to the list AND to a `match` with no wildcard:
+    /// a new owner does not compile until it is named here, a name left out is a pattern not
+    /// covered, and a name written twice is an unreachable pattern
+    macro_rules! owners {
+        ($($owner:ident),* $(,)?) => {{
+            match STypeCompanion::SByte {
+                $(STypeCompanion::$owner)|* => {}
+            }
+            alloc::vec![$(STypeCompanion::$owner),*]
+        }};
+    }
+
+    pub(super) fn all() -> alloc::vec::Vec<STypeCompanion> {
+        owners![
+            SByte,
+            SShort,
+            SInt,
+            SLong,
+            SBigInt,
+            SUnsignedBigInt,
+            Context,
+            Box,
+            Coll,
+            GroupElem,
+            SigmaProp,
+            Global,
+            Header,
+            PreHeader,
+            Option,
+            AvlTree,
+        ]
+    }
+}
+
 /// The call site refuses a receiver that is not of the kind of the method's owner
 /// ([`check_receiver`]): SANTA's rows, the owner table, and the receivers that must still pass
 #[cfg(test)]
@@ -429,26 +469,30 @@ mod receiver_kind_tests {
         offered.sort_unstable();
         offered.dedup();
         assert_eq!(offered.len(), 21);
-        // sigmastate's class of each owner (`SType.scala`, `reprClass`), as the variant holding it
-        let owners = [
-            (STypeCompanion::SByte, "Byte"),
-            (STypeCompanion::SShort, "Short"),
-            (STypeCompanion::SInt, "Int"),
-            (STypeCompanion::SLong, "Long"),
-            (STypeCompanion::SBigInt, "BigInt"),
-            (STypeCompanion::SUnsignedBigInt, "UnsignedBigInt"),
-            (STypeCompanion::Context, "Context"),
-            (STypeCompanion::Box, "CBox"),
-            (STypeCompanion::Coll, "Coll"),
-            (STypeCompanion::GroupElem, "GroupElement"),
-            (STypeCompanion::SigmaProp, "SigmaProp"),
-            (STypeCompanion::Global, "Global"),
-            (STypeCompanion::Header, "Header"),
-            (STypeCompanion::PreHeader, "PreHeader"),
-            (STypeCompanion::Option, "Opt"),
-            (STypeCompanion::AvlTree, "AvlTree"),
-        ];
-        for (owner, takes) in owners {
+        // sigmastate's class of each owner (`SType.scala`, `reprClass`), as the variant holding
+        // it; no wildcard, so a new owner does not compile until it has its row
+        fn takes(owner: STypeCompanion) -> &'static str {
+            match owner {
+                STypeCompanion::SByte => "Byte",
+                STypeCompanion::SShort => "Short",
+                STypeCompanion::SInt => "Int",
+                STypeCompanion::SLong => "Long",
+                STypeCompanion::SBigInt => "BigInt",
+                STypeCompanion::SUnsignedBigInt => "UnsignedBigInt",
+                STypeCompanion::Context => "Context",
+                STypeCompanion::Box => "CBox",
+                STypeCompanion::Coll => "Coll",
+                STypeCompanion::GroupElem => "GroupElement",
+                STypeCompanion::SigmaProp => "SigmaProp",
+                STypeCompanion::Global => "Global",
+                STypeCompanion::Header => "Header",
+                STypeCompanion::PreHeader => "PreHeader",
+                STypeCompanion::Option => "Opt",
+                STypeCompanion::AvlTree => "AvlTree",
+            }
+        }
+        for owner in super::test_owners::all() {
+            let takes = takes(owner);
             for v in &values {
                 assert_eq!(
                     receiver_is_of(owner, v),
@@ -487,10 +531,16 @@ mod receiver_kind_tests {
 
     #[test]
     fn a_pair_is_not_a_collection_receiver() {
-        // by reading: a `Tuple` node of two items evaluates to a `Tuple2`, which is not a
-        // `Coll` (`values.scala:824-837`); a tuple CONSTANT of three items is the `Coll[Any]`
-        // its data holds (`Evaluation.scala:99-101`). `(1, 2).size`, the node, and
-        // `(1, 2, 3).size`, the constant, through `Coll.size`
+        // a `Tuple` node of two items evaluates to a `Tuple2`, which is not a `Coll`
+        // (`values.scala:824-837`); a tuple CONSTANT of three items is the `Coll[Any]` its data
+        // holds (`Evaluation.scala:99-101`). `(1, 2).size`, the node, and `(1, 2, 3).size`, the
+        // constant, through `Coll.size`. Measured on the sigma-state 6.0.7 jars (a profiling
+        // evaluator on the bodies `db0c01860204020404` and `db0c0148040404020406`): the first
+        // throws `IllegalArgumentException`, "object is not an instance of declaring class",
+        // the second is 3 @23.
+        // The first row cannot tell `check_receiver` from `Coll.size`'s own refusal: without
+        // the check the evaluator fails with the same variant. On the JVM the two are one
+        // event, the invoke
         assert_trees(&[
             ("0b09db0c01860204020404", None),
             ("0b0adb0c0148040404020406", Some((Value::Int(3), 23))),
@@ -758,7 +808,6 @@ mod argument_widening_tests {
     use ergotree_ir::serialization::SigmaSerializable;
     use ergotree_ir::types::smethod::SMethod;
     use ergotree_ir::types::stype::SType;
-    use ergotree_ir::types::stype_companion::STypeCompanion;
     use ergotree_ir::types::stype_param::STypeVar;
     use ergotree_ir::types::{scoll, scontext, sglobal};
     use sigma_test_util::force_any_val;
@@ -1087,32 +1136,8 @@ mod argument_widening_tests {
     /// Every (owner, method, argument index, declared type) where a `Byte` argument comes
     /// back as another kind: the parameters the rule reaches
     fn reached() -> Vec<(&'static str, &'static str, usize, String)> {
-        use STypeCompanion::*;
         let mut rows = vec![];
-        let owners = [
-            SByte,
-            SShort,
-            SInt,
-            SLong,
-            SBigInt,
-            SUnsignedBigInt,
-            Context,
-            Box,
-            Coll,
-            GroupElem,
-            SigmaProp,
-            Global,
-            Header,
-            PreHeader,
-            Option,
-            AvlTree,
-        ];
-        // a new owner does not compile here until it is in the list above
-        match SByte {
-            SByte | SShort | SInt | SLong | SBigInt | SUnsignedBigInt | Context | Box | Coll
-            | GroupElem | SigmaProp | Global | Header | PreHeader | Option | AvlTree => {}
-        }
-        for owner in owners {
+        for owner in super::test_owners::all() {
             for method in owner.methods() {
                 let n = method.tpe().t_dom.len() - 1;
                 for i in 0..n {
