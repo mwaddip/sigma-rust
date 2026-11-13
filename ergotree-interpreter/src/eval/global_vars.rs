@@ -10,8 +10,8 @@ use super::Evaluable;
 impl Evaluable for GlobalVars {
     fn eval<'ctx>(&self, _env: &mut Env, ctx: &Context<'ctx>) -> Result<Value<'ctx>, EvalError> {
         match self {
-            // a context node adds its cost and reads the context's accessor
-            // (`eval/scontext.rs`)
+            // a context node adds its cost and reads the context's accessor, which the
+            // `Context` method of the same name reads too (`eval/scontext.rs`)
             GlobalVars::Height => {
                 ctx.add_jit_cost(26)?; // Height = Fixed(26)
                 Ok(scontext::height(ctx))

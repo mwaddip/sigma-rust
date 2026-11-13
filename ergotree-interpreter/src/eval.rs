@@ -608,6 +608,10 @@ fn smethod_eval_fn(method: &SMethod) -> Result<EvalFn, EvalError> {
             scontext::SELF_BOX_INDEX_PROPERTY_METHOD_ID => self::scontext::SELF_BOX_INDEX_EVAL_FN,
             scontext::HEADERS_PROPERTY_METHOD_ID => self::scontext::HEADERS_EVAL_FN,
             scontext::PRE_HEADER_PROPERTY_METHOD_ID => self::scontext::PRE_HEADER_EVAL_FN,
+            scontext::INPUTS_PROPERTY_METHOD_ID => self::scontext::INPUTS_EVAL_FN,
+            scontext::OUTPUTS_PROPERTY_METHOD_ID => self::scontext::OUTPUTS_EVAL_FN,
+            scontext::HEIGHT_PROPERTY_METHOD_ID => self::scontext::HEIGHT_EVAL_FN,
+            scontext::SELF_PROPERTY_METHOD_ID => self::scontext::SELF_EVAL_FN,
             scontext::LAST_BLOCK_UTXO_ROOT_HASH_PROPERTY_METHOD_ID => {
                 self::scontext::LAST_BLOCK_UTXO_ROOT_HASH_EVAL_FN
             }
