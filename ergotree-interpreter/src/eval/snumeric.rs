@@ -803,7 +803,7 @@ mod test {
     fn shl<T: Numeric>(v: T, rhs: u32, methods: &[SMethod]) -> T {
         try_shl(v, rhs, methods).unwrap()
     }
-    fn shr<T: Numeric>(v: T, rhs: u32, methods: &[SMethod]) -> T {
+    fn try_shr<T: Numeric>(v: T, rhs: u32, methods: &[SMethod]) -> Result<T, EvalError> {
         let shr_mc: Expr = MethodCall::new(
             <T as Into<Constant>>::into(v.clone()).into(),
             methods
@@ -815,8 +815,55 @@ mod test {
         )
         .unwrap()
         .into();
-        eval_out_wo_ctx(&shr_mc)
+        try_eval_out_wo_ctx(&shr_mc)
     }
+    fn shr<T: Numeric>(v: T, rhs: u32, methods: &[SMethod]) -> T {
+        try_shr(v, rhs, methods).unwrap()
+    }
+    /// Whether a shift by `shift` was refused for its amount. The helpers pass `rhs as i32`,
+    /// so a draw above `i32::MAX` is a NEGATIVE amount, refused where the evaluator reads it
+    /// (`UnexpectedValue`); any other is refused as out of bounds (`Misc`)
+    fn amount_refused<T>(res: &Result<T, EvalError>, shift: u32) -> bool {
+        match res.as_ref().map_err(crate::eval::test_util::innermost) {
+            Err(EvalError::UnexpectedValue(_)) => shift > i32::MAX as u32,
+            Err(EvalError::Misc(_)) => shift <= i32::MAX as u32,
+            _ => false,
+        }
+    }
+    /// The bound itself, which a draw from the whole range above it almost never meets: an
+    /// amount of the receiver's width is refused, -1 is refused, and the width less one is
+    /// not refused for its amount. Measured on the sigma-state 6.0.7 jars for each type and
+    /// both methods (`IllegalArgumentException` at the width and at -1; a value at the width
+    /// less one, but for `BigInt 1` shifted left by 255, whose RESULT leaves the range)
+    #[test]
+    fn a_shift_by_the_width_is_refused_and_one_below_it_is_not() {
+        fn bounds<T: Numeric>(width: u32, methods: &[SMethod]) {
+            let name = core::any::type_name::<T>();
+            let minus_one = u32::MAX; // the helpers pass `rhs as i32`
+            for amount in [width, minus_one] {
+                let res = try_shl(T::one(), amount, methods);
+                assert!(amount_refused(&res, amount), "{name} << {amount}: {res:?}");
+                let res = try_shr(T::one(), amount, methods);
+                assert!(amount_refused(&res, amount), "{name} >> {amount}: {res:?}");
+            }
+            let passes = |res: Result<T, EvalError>| match res {
+                Ok(_) => true,
+                Err(e) => matches!(
+                    crate::eval::test_util::innermost(&e),
+                    EvalError::ArithmeticException(_)
+                ),
+            };
+            assert!(passes(try_shl(T::one(), width - 1, methods)), "{name} <<");
+            assert!(passes(try_shr(T::one(), width - 1, methods)), "{name} >>");
+        }
+        bounds::<i8>(8, &snumeric::sbyte::METHODS);
+        bounds::<i16>(16, &snumeric::sshort::METHODS);
+        bounds::<i32>(32, &snumeric::sint::METHODS);
+        bounds::<i64>(64, &snumeric::slong::METHODS);
+        bounds::<BigInt256>(256, &snumeric::sbigint::METHODS);
+        bounds::<UnsignedBigInt>(256, &snumeric::sunsignedbigint::METHODS);
+    }
+
     fn two_pow(n: u32) -> num_bigint::BigInt {
         num_bigint::BigInt::from(1) << n
     }
@@ -1471,35 +1518,40 @@ mod test {
                 ),
             }
         }
+        // sigmastate refuses an amount that is negative or not below the receiver's width
+        // (`bits < 0 || bits >= width`: v6.0.6 `ExactIntegral.scala:46-52` and its siblings,
+        // `BigIntegerOps.scala:109-123`, `UnsignedBigIntegerOps.scala:131-149`), for
+        // `shiftLeft` and `shiftRight` alike. Each test below asserts the evaluator's error
+        // and nothing else: a native `a << shift` beside it would panic by itself
         #[test]
-        #[should_panic]
         fn shl_byte_arbitrary_invalid(a in any::<i8>(), shift in 8u32..) {
-            assert_eq!(shl(a, shift, &snumeric::sbyte::METHODS), a << shift);
+            let res = try_shl(a, shift, &snumeric::sbyte::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
-        #[should_panic]
         fn shl_short_arbitrary_invalid(a in any::<i16>(), shift in 16u32..) {
-            assert_eq!(shl(a, shift, &snumeric::sshort::METHODS), a << shift);
+            let res = try_shl(a, shift, &snumeric::sshort::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
-        #[should_panic]
         fn shl_int_arbitrary_invalid(a in any::<i32>(), shift in 32u32..) {
-            assert_eq!(shl(a, shift, &snumeric::sint::METHODS), a << shift);
+            let res = try_shl(a, shift, &snumeric::sint::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
-        #[should_panic]
         fn shl_long_arbitrary_invalid(a in any::<i64>(), shift in 64u32..) {
-            assert_eq!(shl(a, shift, &snumeric::slong::METHODS), a << shift);
+            let res = try_shl(a, shift, &snumeric::slong::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
-        #[should_panic]
         fn shl_bigint_arbitrary_invalid(a in any::<BigInt256>(), shift in 256u32..) {
-            assert_eq!(shl(a, shift, &snumeric::sbigint::METHODS), a << shift);
+            let res = try_shl(a, shift, &snumeric::sbigint::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
-        #[should_panic]
         fn shl_unsigned_bigint_arbitrary_invalid(a in any::<UnsignedBigInt>(), shift in 256u32..) {
-            assert_eq!(shl(a, shift, &snumeric::sunsignedbigint::METHODS), a << shift);
+            let res = try_shl(a, shift, &snumeric::sunsignedbigint::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
         fn shr_byte_arbitrary(a in any::<i8>(), shift in 0u32..8) {
@@ -1526,34 +1578,34 @@ mod test {
             assert_eq!(shr(a, shift, &snumeric::sunsignedbigint::METHODS), a >> shift);
         }
         #[test]
-        #[should_panic]
         fn shr_byte_arbitrary_invalid(a in any::<i8>(), shift in 8u32..) {
-            assert_eq!(shr(a, shift, &snumeric::sbyte::METHODS), a >> shift);
+            let res = try_shr(a, shift, &snumeric::sbyte::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
-        #[should_panic]
         fn shr_short_arbitrary_invalid(a in any::<i16>(), shift in 16u32..) {
-            assert_eq!(shr(a, shift, &snumeric::sshort::METHODS), a >> shift);
+            let res = try_shr(a, shift, &snumeric::sshort::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
-        #[should_panic]
         fn shr_int_arbitrary_invalid(a in any::<i32>(), shift in 32u32..) {
-            assert_eq!(shr(a, shift, &snumeric::sint::METHODS), a >> shift);
+            let res = try_shr(a, shift, &snumeric::sint::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
-        #[should_panic]
         fn shr_long_arbitrary_invalid(a in any::<i64>(), shift in 64u32..) {
-            assert_eq!(shr(a, shift, &snumeric::slong::METHODS), a >> shift);
+            let res = try_shr(a, shift, &snumeric::slong::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
-        #[should_panic]
         fn shr_bigint_arbitrary_invalid(a in any::<BigInt256>(), shift in 256u32..) {
-            assert_eq!(shr(a, shift, &snumeric::sbigint::METHODS), a >> shift);
+            let res = try_shr(a, shift, &snumeric::sbigint::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
         #[test]
-        #[should_panic]
         fn shr_unsigned_bigint_arbitrary_invalid(a in any::<UnsignedBigInt>(), shift in 256u32..) {
-            assert_eq!(shr(a, shift, &snumeric::sunsignedbigint::METHODS), a >> shift);
+            let res = try_shr(a, shift, &snumeric::sunsignedbigint::METHODS);
+            prop_assert!(amount_refused(&res, shift), "{res:?}");
         }
 
         #[test]
