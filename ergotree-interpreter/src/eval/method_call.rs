@@ -28,7 +28,8 @@ impl Evaluable for MethodCall {
 /// (`values.scala:1361-1391`; a `PropertyCall` is the same node with no arguments, `:1351`).
 /// The receiver is evaluated first and the call's own cost is added after it (`:1362-1363`).
 /// Then the arguments, the method's cost if it is a fixed one, the refusals of a call the JVM's
-/// invoke refuses, and the evaluator.
+/// invoke refuses (the argument count, the receiver's class, each argument's class), and the
+/// evaluator.
 pub(crate) fn call_method<'ctx>(
     method: &SMethod,
     obj: &Expr,
@@ -48,6 +49,7 @@ pub(crate) fn call_method<'ctx>(
     check_arity(method, argsv.len())?;
     check_receiver(method, &ov)?;
     let argsv = widen_arguments(method, argsv);
+    check_arguments(method, &argsv)?;
     let site = MethodCallSite { method, args };
     smethod_eval_fn(method)?(&site, env, ectx, ov, argsv)
 }
@@ -113,8 +115,9 @@ fn receiver_is_of(owner: STypeCompanion, obj: &Value<'_>) -> bool {
 /// invoked.
 ///
 /// A method a handler serves is not invoked by reflection and is left alone
-/// ([`served_by_a_handler`]). Nothing else is converted: a narrowing, a `Byte` parameter, the
-/// items of a collection and any other kind stay for the evaluator to refuse. The call's
+/// ([`served_by_a_handler`]). Nothing else is converted. A value that is still not of its
+/// parameter's class (a narrowing, any other kind) is refused by [`check_arguments`], which
+/// runs next; the items of a collection stay for the evaluator to refuse. The call's
 /// static type is not touched. Measured by SANTA (`sigma-rust-argument-kind-reply.md`, oracle
 /// sigma-state 6.0.7).
 pub(crate) fn widen_arguments<'ctx>(
@@ -148,6 +151,90 @@ pub(crate) fn widen_arguments<'ctx>(
         }
     }
     args
+}
+
+/// sigmastate invokes a method by Java reflection, which refuses an argument that is not of
+/// the class of its parameter (v6.0.6 `values.scala:1361-1391`). The parameter's class comes
+/// from the type the method DECLARES in its owner's table, for the Java method of a
+/// fixed-cost method (`SMethod.scala:92-101`) and for the `_eval` method of any other
+/// (`:138-160`): an integer type is its primitive (a narrower integer has been widened by
+/// then, [`widen_arguments`]), `BigInt`, `UnsignedBigInt` and `GroupElement` their class, any
+/// `Coll[..]` is `sigma.Coll` whatever its items, a function is `scala.Function1`, and a type
+/// variable is `java.lang.Object`, which takes any value. So a method that adds its own costs
+/// refuses such an argument before anything of its own is charged, and a fixed-cost method
+/// after its cost.
+///
+/// A method a handler serves is not invoked by reflection and is left alone
+/// ([`served_by_a_handler`]): its evaluator casts what it reads to the exact class. What a
+/// class does not say stays for the evaluator: a collection's item type, a value's range.
+/// Read from the sigma-state 6.0.7 jars for every method (each Java method's parameter
+/// classes) and measured against the JVM on every parameter with eighteen kinds of value.
+pub(crate) fn check_arguments(method: &SMethod, args: &[Value<'_>]) -> Result<(), EvalError> {
+    if served_by_a_handler(method) {
+        return Ok(());
+    }
+    let Some(declared) = method.obj_type.method_by_id(&method.method_id()) else {
+        return Ok(());
+    };
+    for (i, arg) in args.iter().enumerate() {
+        let Some(param) = declared.tpe().t_dom.get(i + 1) else {
+            break;
+        };
+        if !is_of_class(param, arg) {
+            return Err(EvalError::UnexpectedValue(format!(
+                "method {} of {:?}: argument {i} is not of the class of {param:?}",
+                method.name(),
+                method.obj_type
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `v` is a value of the JVM class of the type `tpe`: the class reflection checks an
+/// argument against (`Evaluation.stypeToRType(tpe).classTag.runtimeClass`). The class only: no
+/// item type, no range. The rows of the types a method declares for a parameter today (the
+/// four integers, `BigInt`, `UnsignedBigInt`, `GroupElement`, a collection, a function, a
+/// type variable) are measured; the others are by reading.
+fn is_of_class(tpe: &SType, v: &Value<'_>) -> bool {
+    match tpe {
+        // `java.lang.Object`
+        SType::STypeVar(_) => true,
+        // by reading: `AnyType`, also `Object`
+        SType::SAny => true,
+        SType::SByte => matches!(v, Value::Byte(_)),
+        SType::SShort => matches!(v, Value::Short(_)),
+        SType::SInt => matches!(v, Value::Int(_)),
+        SType::SLong => matches!(v, Value::Long(_)),
+        SType::SBigInt => matches!(v, Value::BigInt(_)),
+        SType::SUnsignedBigInt => matches!(v, Value::UnsignedBigInt(_)),
+        SType::SGroupElement => matches!(v, Value::GroupElement(_)),
+        SType::SColl(_) => matches!(v, Value::Coll(_)),
+        SType::SFunc(_) => matches!(v, Value::Lambda(_)),
+        // by reading, from here on: no method declares a parameter of these types
+        SType::SUnit => matches!(v, Value::Unit),
+        SType::SBoolean => matches!(v, Value::Boolean(_)),
+        SType::SSigmaProp => matches!(v, Value::SigmaProp(_)),
+        SType::SBox => matches!(v, Value::CBox(_)),
+        SType::SAvlTree => matches!(v, Value::AvlTree(_)),
+        SType::SOption(_) => matches!(v, Value::Opt(_)),
+        // a pair is a `Tuple2`; a tuple of any other length is a `Coll[Any]`
+        SType::STuple(t) => {
+            if t.items.len() == 2 {
+                matches!(v, Value::Pair(_))
+            } else {
+                matches!(v, Value::Coll(_))
+            }
+        }
+        SType::SContext => matches!(v, Value::Context),
+        SType::SString => matches!(v, Value::String(_)),
+        SType::SHeader => matches!(v, Value::Header(_)),
+        SType::SPreHeader => matches!(v, Value::PreHeader(_)),
+        SType::SGlobal => matches!(v, Value::Global),
+        // `NoType` has no runtime type (`stypeToRType` throws, `Evaluation.scala:55`), so a
+        // method declaring it could not be looked up at all
+        SType::SNoType => false,
+    }
 }
 
 /// sigmastate parses a call of any arity, and its evaluator invokes the method with the
@@ -341,7 +428,7 @@ mod receiver_kind_tests {
     use num_traits::Num;
     use sigma_test_util::force_any_val;
 
-    use super::receiver_is_of;
+    use super::{is_of_class, receiver_is_of};
     use crate::eval::test_util::{assert_trees, eval_v3_body};
 
     #[test]
@@ -441,10 +528,10 @@ mod receiver_kind_tests {
         }
     }
 
-    #[test]
-    fn the_owner_table_accepts_exactly_its_own_kind() {
+    /// One value of every variant, and more of those that have forms
+    fn one_of_each() -> Vec<Value<'static>> {
         let ints = || CollValue::Ints(vec![1, 2].into());
-        let values: Vec<Value<'static>> = vec![
+        vec![
             Value::Boolean(true),
             Value::Byte(1),
             Value::Short(1),
@@ -481,7 +568,12 @@ mod receiver_kind_tests {
                 body: Arc::new(Expr::Const(1i32.into())),
                 captured: Default::default(),
             }),
-        ];
+        ]
+    }
+
+    #[test]
+    fn the_owner_table_accepts_exactly_its_own_kind() {
+        let values = one_of_each();
         // every variant is offered
         let mut offered: Vec<&str> = values.iter().map(variant).collect();
         offered.sort_unstable();
@@ -517,6 +609,72 @@ mod receiver_kind_tests {
                     variant(v) == takes,
                     "{owner:?} on a {}",
                     variant(v)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_class_table_accepts_exactly_its_own_class() {
+        use ergotree_ir::types::sfunc::SFunc;
+        use ergotree_ir::types::stuple::STuple;
+        use ergotree_ir::types::stype_param::STypeVar;
+        // The JVM class of each type (`Evaluation.stypeToRType`), as the variant holding it;
+        // "any" for `Object` and "none" for a type with no class. Each row is written once
+        // and expands to its sample type AND to an arm of a `match` with no wildcard: a new
+        // type does not compile until it has a row, and no row can be left out of the samples
+        macro_rules! class_rows {
+            ($($sample:expr => $pat:pat $(if $guard:expr)? => $takes:literal),* $(,)?) => {
+                fn takes(tpe: &SType) -> &'static str {
+                    match tpe {
+                        $($pat $(if $guard)? => $takes),*
+                    }
+                }
+                fn samples() -> Vec<SType> {
+                    vec![$($sample),*]
+                }
+            };
+        }
+        class_rows! {
+            SType::STypeVar(STypeVar::t()) => SType::STypeVar(_) => "any",
+            SType::SAny => SType::SAny => "any",
+            SType::SNoType => SType::SNoType => "none",
+            SType::SUnit => SType::SUnit => "Unit",
+            SType::SBoolean => SType::SBoolean => "Boolean",
+            SType::SByte => SType::SByte => "Byte",
+            SType::SShort => SType::SShort => "Short",
+            SType::SInt => SType::SInt => "Int",
+            SType::SLong => SType::SLong => "Long",
+            SType::SBigInt => SType::SBigInt => "BigInt",
+            SType::SGroupElement => SType::SGroupElement => "GroupElement",
+            SType::SSigmaProp => SType::SSigmaProp => "SigmaProp",
+            SType::SUnsignedBigInt => SType::SUnsignedBigInt => "UnsignedBigInt",
+            SType::SBox => SType::SBox => "CBox",
+            SType::SAvlTree => SType::SAvlTree => "AvlTree",
+            SType::SOption(Arc::new(SType::SInt)) => SType::SOption(_) => "Opt",
+            // the item type is no part of the class
+            SType::SColl(Arc::new(SType::SColl(Arc::new(SType::SByte)))) => SType::SColl(_) => "Coll",
+            SType::STuple(STuple::pair(SType::SInt, SType::SInt))
+                => SType::STuple(t) if t.items.len() == 2 => "Pair",
+            SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt))
+                => SType::STuple(_) => "Coll",
+            SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)) => SType::SFunc(_) => "Lambda",
+            SType::SContext => SType::SContext => "Context",
+            SType::SString => SType::SString => "String",
+            SType::SHeader => SType::SHeader => "Header",
+            SType::SPreHeader => SType::SPreHeader => "PreHeader",
+            SType::SGlobal => SType::SGlobal => "Global",
+        }
+        let types = samples();
+        assert_eq!(types.len(), 25);
+        let values = one_of_each();
+        for tpe in &types {
+            let takes = takes(tpe);
+            for v in &values {
+                assert_eq!(
+                    is_of_class(tpe, v),
+                    takes == "any" || variant(v) == takes,
+                    "{tpe:?} {v:?}"
                 );
             }
         }
@@ -1208,8 +1366,10 @@ mod argument_widening_tests {
 #[cfg(feature = "arbitrary")]
 #[allow(clippy::unwrap_used)]
 mod charge_order {
-    use crate::eval::test_util::eval_body_err;
+    use crate::eval::test_util::{eval_body, eval_body_err};
     use crate::eval::EvalError;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
 
     // sigmastate evaluates the receiver and then adds the call's own cost
     // (`values.scala:1361-1363`): a receiver that throws has not paid for the call
@@ -1225,6 +1385,95 @@ mod charge_order {
             let (e, c) = eval_body_err(body);
             assert!(matches!(e, EvalError::Misc(_)), "{body}: {e:?}");
             assert_eq!(c, 40, "{body}");
+        }
+    }
+
+    // sigmastate invokes a method by reflection, which refuses an argument that is not of the
+    // class of the parameter the method declares (`SMethod.scala:92-101`, `:138-160`): before
+    // the body of a method that adds its own costs, after the cost of a fixed-cost method
+    #[test]
+    fn a_wrong_class_is_refused_before_the_method_charges() {
+        const T: &str =
+            "64000000000000000000000000000000000000000000000000000000000000000000072000";
+        let tree = |id: &str, args: &str| alloc::format!("dc64{id}{T}{args}");
+        let rows: alloc::vec::Vec<(alloc::string::String, u64)> = alloc::vec![
+            ("dc0c021003000204020101040e".into(), 19), // G1 getOrElse(true, 7)
+            ("dc0c141003000204020101040e".into(), 19), // G2 updated(true, 7)
+            ("dc0c15100300020402010110010e".into(), 19), // G3 updateMany(true, ..)
+            ("dc0c151003000204021001000101".into(), 19), // G4 updateMany(.., true)
+            ("dc0c1d1003000204010101".into(), 14),     // G5 zip(true)
+            ("dc0c1d10030002040195010010010e62".into(), 29), // G6 zip(If(false, coll, ()))
+            ("dc0c1f1003000204010101".into(), 14),     // G7 startsWith(true)
+            ("dc0c201003000204010101".into(), 14),     // G8 endsWith(true)
+            (tree("0c", "0201010e0102"), 19),          // G9 tree.insert(true, proof)
+            (tree("0c", "020c3c0e0e000101"), 19),      // G10 tree.insert(entries, true)
+            (tree("0d", "020c3c0e0e000101"), 19),      // G11 tree.update(entries, true)
+            (tree("0e", "0201010e0102"), 19),          // G12 tree.remove(true, proof)
+            (tree("10", "020c3c0e0e000101"), 19),      // G13 tree.insertOrUpdate(entries, true)
+            ("dc0c1d100300020401580204".into(), 14),   // K2 zip((1, 2)): a pair is no collection
+            ("dc0c0a1003000204010101".into(), 44),     // D1 apply(true): after its fixed 30
+            // D2 g.exp(()): after its fixed 900
+            (
+                "dc0703070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980162"
+                    .into(),
+                914,
+            ),
+        ];
+        for (body, cost) in &rows {
+            let (e, c) = eval_body_err(body);
+            assert!(matches!(e, EvalError::UnexpectedValue(_)), "{body}: {e:?}");
+            assert_eq!(c, *cost, "{body}");
+        }
+    }
+
+    // an argument of the declared class reaches the method: a non-pair tuple is a collection, a
+    // type variable takes anything, a collection's item type is not a class, and a narrower
+    // integer is widened first. A handler-served method is not invoked by reflection: its
+    // evaluator makes the exact check
+    #[test]
+    fn a_passing_class_reaches_the_body() {
+        for (body, value, cost) in [
+            ("dc0c1d10030002040148040404020406", None, 25), // K1 zip((1, 2, 3))
+            ("dc0c0210030002040204020101", Some(Value::Int(1)), 49), // K3 getOrElse(1, true)
+            ("dc0c1d10030002040111020204", None, 25),       // K4 zip(Coll[Long])
+            ("dc0c0a1003000204010201", Some(Value::Int(1)), 44), // W1 apply(1.toByte)
+        ] {
+            let (res, c) = eval_body(body, ErgoTreeVersion::V3);
+            let v = res.unwrap();
+            if let Some(value) = value {
+                assert_eq!(v, value, "{body}");
+            }
+            assert_eq!(c, cost, "{body}");
+        }
+        // W2 1.shiftLeft(1.toByte)
+        let (e, c) = eval_body_err("dc040c0402010201");
+        assert!(!matches!(e, EvalError::UnexpectedValue(_)), "{e:?}");
+        assert_eq!(c, 19);
+    }
+
+    // The class check is the call's, so it is made also where the method's body would never
+    // look at the argument: a modifying `AvlTree` method on a tree whose flag is OFF answers
+    // `None` without reading anything, and the JVM still refuses a call whose argument is of
+    // another class, before the body runs (each tree below has no flag set)
+    #[test]
+    fn a_wrong_class_is_refused_where_the_body_would_not_read_it() {
+        #[rustfmt::skip]
+        let rows = [
+            // flagoff-insert-true-entries
+            "dc640c6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020001000201010e0102",
+            // flagoff-update-entries-true
+            "dc640d6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02000100020c3c0e0e000101",
+            // flagoff-remove-true-keys
+            "dc640e6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd020001000201010e0102",
+            // flagoff-iou-entries-true
+            "dc64106415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02000100020c3c0e0e000101",
+            // flagoff-zero-insert-true
+            "dc640c640000000000000000000000000000000000000000000000000000000000000000000020000201010e0102",
+        ];
+        for body in rows {
+            let (e, c) = eval_body_err(body);
+            assert!(matches!(e, EvalError::UnexpectedValue(_)), "{body}: {e:?}");
+            assert_eq!(c, 19, "{body}");
         }
     }
 }
