@@ -19,11 +19,15 @@ impl Evaluable for ExtractRegisterAs {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        ctx.add_jit_cost(50)?; // ExtractRegisterAs = Fixed(50)
+        // the box (`evalTo[Box]`: an input of another class fails here), the node's cost, then
+        // the register's runtime type (`transformers.scala:490-494`: `tV` is a lazy val, read
+        // by `getReg`)
         let ir_box = self
             .input
             .eval(env, ctx)?
             .try_extract_into::<Ref<'_, ErgoBox>>()?;
+        ctx.add_jit_cost(50)?; // ExtractRegisterAs = Fixed(50)
+        super::runtime_type::check_runtime_type(&self.elem_tpe, "ExtractRegisterAs")?;
         let id = self.register_id.try_into().map_err(|e| {
             EvalError::RegisterIdOutOfBounds(format!(
                 "register index {} is out of bounds: {:?} ",

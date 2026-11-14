@@ -30,6 +30,9 @@ impl Evaluable for Collection {
                 bools.clone().into()
             }
             Collection::Exprs { elem_tpe, items } => {
+                // the item's runtime type is resolved for the array, after the node's cost and
+                // before any item is evaluated (`values.scala:879`, `:889-890`)
+                super::runtime_type::check_runtime_type(elem_tpe, "ConcreteCollection")?;
                 // `ConcreteCollection.eval` checks each item's value against its type
                 // (`values.scala:891-896`)
                 let items_v: Result<Arc<[Value]>, EvalError> = items
