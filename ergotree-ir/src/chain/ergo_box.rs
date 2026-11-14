@@ -1071,6 +1071,29 @@ mod creation_height_bound_tests {
     }
 
     #[test]
+    fn a_register_collection_of_no_runtime_type_rejects() {
+        // R4 = `Coll[T]()`: the JVM's `RuntimeException` in the data reader, so the box does
+        // not parse (the sigma-state 6.0.7 jars, a box constant with that register)
+        let mut bytes = box_at(0).sigma_serialize_bytes().unwrap();
+        let count_at = bytes.len() - 34;
+        assert_eq!(bytes[count_at], 0);
+        bytes[count_at] = 1;
+        let mut with_triple = bytes.clone();
+        bytes.splice(count_at + 1..count_at + 1, [0x0c, 0x67, 0x01, 0x54, 0x00]);
+        assert!(matches!(
+            ErgoBox::sigma_parse_bytes(&bytes),
+            Err(SigmaParsingError::NoRuntimeType(_))
+        ));
+        // R4 = `Coll[(Int, Int, T)]()` is read: its type is resolved when a script reads a
+        // register of the box
+        with_triple.splice(
+            count_at + 1..count_at + 1,
+            [0x0c, 0x48, 0x04, 0x04, 0x67, 0x01, 0x54, 0x00],
+        );
+        assert!(ErgoBox::sigma_parse_bytes(&with_triple).is_ok());
+    }
+
+    #[test]
     fn box_constant_rejects_embedded_creation_height_above_int_max() {
         // The reachable form at block version >= 2: a Box-typed constant
         // (context-extension variable or register) embedding such a box.

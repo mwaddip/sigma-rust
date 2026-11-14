@@ -1426,6 +1426,78 @@ mod tests {
     }
 
     #[test]
+    fn a_sized_tree_with_a_collection_of_no_runtime_type_is_refused() {
+        // `sigmaProp(c.size == 0)` under a size-flagged header, where the constant `c` is a
+        // collection whose item type has no runtime type. sigmastate throws a
+        // `RuntimeException` after the collection's length, which no size flag catches
+        // (`deserializeErgoTree` on the sigma-state 6.0.7 jars: THROWS for each row)
+        let tree = |header: &str, constant: &str| {
+            let body = alloc::format!("d193b1{constant}0400");
+            let bytes =
+                base16::decode(alloc::format!("{header}{:02x}{body}", body.len() / 2).as_bytes())
+                    .unwrap();
+            ErgoTree::sigma_parse_bytes_no_fallback(&bytes)
+        };
+        for (header, constant) in [
+            ("0b", "0c67015400"),       // Coll[T]()
+            ("08", "0c67015400"),       // the same below tree version 3
+            ("0b", "0c6701540100"),     // Coll[T] of one item
+            ("0b", "0c0c6701540100"),   // Coll[Coll[T]](Coll())
+            ("0b", "0c2467015400"),     // Coll[Option[T]]()
+            ("0b", "0c70020404040000"), // Coll[(Int, Int) => Int]()
+            // with one item these degraded (the item's own rule 1009) or were read
+            ("0b", "0c7002040404000100"), // Coll[(Int, Int) => Int] of one item
+            ("08", "0c246701540100"),     // Coll[Option[T]] of one item, below version 3
+            ("0b", "0c246701540100"),     // and from version 3, where `00` is a `None`
+        ] {
+            assert!(
+                matches!(
+                    tree(header, constant),
+                    Err(SigmaParsingError::NoRuntimeType(_))
+                ),
+                "{header} {constant}"
+            );
+        }
+        // the controls: read, or degraded by the item's own validation rule
+        for (header, constant, parsed) in [
+            ("0b", "1000", true),                   // Coll[Int]()
+            ("0b", "0c48040467015400", true),       // Coll[(Int, Int, T)]()
+            ("0b", "0c5404040467015400", true),     // Coll[(Int, Int, Int, T)]()
+            ("0b", "0c60050404040467015400", true), // Coll[(Int, Int, Int, Int, T)]()
+            ("0b", "0c700104040000", true),         // Coll[Int => Int]()
+            ("0b", "0c70010404000100", false),      // Coll[Int => Int] of one item
+            ("08", "0c280100", false),              // Coll[Option[Int]] of one item, below v3
+        ] {
+            let tree = tree(header, constant).unwrap();
+            assert_eq!(
+                matches!(tree, ErgoTree::Parsed(_)),
+                parsed,
+                "{header} {constant}"
+            );
+        }
+        // the same constant in the tree's constants section (`sigmaProp(placeholder.size == 0)`)
+        let segregated = |hex: &str| {
+            ErgoTree::sigma_parse_bytes_no_fallback(&base16::decode(hex.as_bytes()).unwrap())
+        };
+        for hex in [
+            "1b0d010c67015400d193b173000400",         // Coll[T](), v3
+            "180d010c67015400d193b173000400",         // the same below tree version 3
+            "1b11010c7002040404000100d193b173000400", // Coll[(Int, Int) => Int] of one item
+        ] {
+            assert!(
+                matches!(segregated(hex), Err(SigmaParsingError::NoRuntimeType(_))),
+                "{hex}"
+            );
+        }
+        for hex in [
+            "1b0a011000d193b173000400",             // Coll[Int]()
+            "1b10010c48040467015400d193b173000400", // Coll[(Int, Int, T)]()
+        ] {
+            assert!(matches!(segregated(hex), Ok(ErgoTree::Parsed(_))), "{hex}");
+        }
+    }
+
+    #[test]
     fn sized_tree_degrade_gate_degrades_on_a_validation_exception_only() {
         // The gate policy (`SigmaParsingError::escapes_sized_tree_degrade`): a size-flagged
         // tree degrades on a failed validation rule, the JVM's `ValidationException`, and
@@ -1474,6 +1546,8 @@ mod tests {
             SigmaParsingError::DeserializeCallDepthExceeded(111),
             // a type nested deeper than MaxTypeDepth
             SigmaParsingError::TypeDepthExceeded(9),
+            // `stypeToRType`'s `RuntimeException` for a collection's item type
+            SigmaParsingError::NoRuntimeType("STypeVar(T)".to_string()),
             // no validation rule, though the old allow-list let them degrade
             SigmaParsingError::Misc("a failure".to_string()),
             SigmaParsingError::ValueOutOfBounds("an index".to_string()),

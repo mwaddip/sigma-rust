@@ -5,7 +5,7 @@
 //! ([`SType::has_runtime_type`]). A node or a method that resolves a runtime type therefore
 //! fails for such a type whatever it was about to do with it: a collection of no items, a
 //! register or a variable that is not there, a method that would not read it. The sites
-//! (sigma-state 6.0.7, every caller of `stypeToRType` an evaluation reaches):
+//! (sigma-state 6.0.7), each a caller of `stypeToRType` with a type a script chooses:
 //!
 //! - the `ConcreteCollection` node, for its item type, after its cost;
 //! - the `GetVar` node, for the variable's type, before its cost;
@@ -14,8 +14,17 @@
 //! - a fixed-cost method that is handed a type descriptor ([`descriptor_type`]), at the call,
 //!   before its arguments;
 //! - `Global.deserializeTo`, for the call's type, after its arguments and before its cost;
-//! - every register of a box when one is read (`sbox::get_register_script_value`), and every
-//!   self context variable before a tree is evaluated (`EvaluatedValue::script_type`).
+//! - every register of a box when a script reads one, or the box's tokens or creation info
+//!   (`sbox::convert_registers`);
+//! - every self context variable before a tree is evaluated, and the variable
+//!   `getVarFromInput` reads (`EvaluatedValue::script_type`);
+//! - the data reader, for a collection's item type, at parse (`ergotree-ir`,
+//!   `SigmaParsingError::NoRuntimeType`).
+//!
+//! One more caller takes a script's type and needs nothing here: the lookup of a fixed-cost
+//! method's Java method resolves its parameter types (`SMethod.javaMethod`), and the one
+//! method whose parameter follows the script's types is `Option.getOrElse`, which that lookup
+//! fails for every type (it has no evaluator here either).
 //!
 //! A new node or method that sigmastate gives an `RType` built from a static type takes the
 //! check at the place sigmastate resolves it.

@@ -276,6 +276,14 @@ impl DataSerializer {
                         "{elem_type:?}"
                     )));
                 }
+                // The item's runtime type is resolved next, before any item is read and also
+                // for none: a pair's and any other type's by `stypeToRType`, which throws where
+                // there is none; a tuple of another size is read as `Coll[Any]` and resolves
+                // nothing (6.0.7 `CoreDataSerializer.deserializeColl`)
+                let read_as_any = matches!(&**elem_type, STuple(t) if t.items.len() != 2);
+                if !read_as_any && !elem_type.has_runtime_type() {
+                    return Err(SigmaParsingError::NoRuntimeType(format!("{elem_type:?}")));
+                }
                 let elems = (0..len)
                     .map(|_| DataSerializer::sigma_parse(elem_type, r))
                     .collect::<Result<Arc<[_]>, SigmaParsingError>>()?;
@@ -412,6 +420,95 @@ mod depth_limit_tests {
         assert!(depth_exceeded(parse_at_level(101, &coll_n_int(9, true))));
         // An empty innermost Coll[Int] reads no element.
         assert!(parse_at_level(101, &coll_n_int(9, false)).is_ok());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod runtime_type_tests {
+    //! Collection data whose item type has no runtime type is refused after its length and
+    //! before any item, on the type and not on the count ([`SType::has_runtime_type`]).
+    //! Encodings and verdicts measured on the sigma-state 6.0.7 jars (`ValueSerializer` for a
+    //! constant, `ErgoTreeSerializer` for a tree; the round's `measure/`).
+    use crate::mir::constant::Constant;
+    use crate::serialization::{SigmaParsingError, SigmaSerializable};
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    const T: &str = "670154";
+
+    fn parse(hex: &str) -> Result<Constant, SigmaParsingError> {
+        Constant::sigma_parse_bytes(&base16::decode(hex.as_bytes()).unwrap())
+    }
+
+    fn no_runtime_type(hex: &str) -> bool {
+        matches!(parse(hex), Err(SigmaParsingError::NoRuntimeType(_)))
+    }
+
+    /// Item types with no runtime type that the reader resolves
+    fn items_without() -> Vec<String> {
+        vec![
+            T.into(),                  // T
+            format!("0c{T}"),          // Coll[T]
+            format!("24{T}"),          // Option[T]
+            format!("3c{T}04"),        // (T, Int)
+            format!("40{T}"),          // (Int, T)
+            format!("0c480404{T}"),    // Coll[(Int, Int, T)]
+            "700204040400".into(),     // (Int, Int) => Int
+            "70000400".into(),         // () => Int
+            "7001040401670154".into(), // [T](Int) => Int
+            format!("7001{T}0400"),    // T => Int
+            "0c700204040400".into(),   // Coll[(Int, Int) => Int]
+        ]
+    }
+
+    #[test]
+    fn a_collection_of_items_with_no_runtime_type_is_refused_whatever_its_length() {
+        for item in items_without() {
+            // no items; one item, whose byte is never read; an inner collection of none
+            assert!(no_runtime_type(&format!("0c{item}00")), "{item}");
+            assert!(no_runtime_type(&format!("0c{item}0100")), "{item}");
+            assert!(no_runtime_type(&format!("0c0c{item}0100")), "{item}");
+        }
+    }
+
+    #[test]
+    fn a_collection_of_tuples_of_other_than_two_items_resolves_no_runtime_type() {
+        // `Coll[(Int, Int, T)]()`: such an item is read as `Coll[Any]`, whatever its items are
+        assert!(parse(&format!("0c480404{T}00")).is_ok());
+        // and so are tuples of four and of five items
+        assert!(parse(&format!("0c54040404{T}00")).is_ok());
+        assert!(parse(&format!("0c600504040404{T}00")).is_ok());
+        // one level up the item is a collection, and its type is resolved
+        assert!(no_runtime_type(&format!("0c0c480404{T}0100")));
+        // with an item, the tuple's own items are read: `T` has no data
+        assert!(matches!(
+            parse(&format!("0c480404{T}0102020400")),
+            Err(SigmaParsingError::NonSerializableTypeCode(103))
+        ));
+    }
+
+    #[test]
+    fn data_that_is_no_collection_resolves_no_runtime_type() {
+        // `None: Option[T]`, and `(1, None: Option[T])`
+        assert!(parse(&format!("24{T}00")).is_ok());
+        assert!(parse(&format!("4024{T}0200")).is_ok());
+    }
+
+    #[test]
+    fn a_collection_of_items_with_a_runtime_type_is_read() {
+        // Coll[Int](), Coll[Any](), Coll[Option[Int]](), Coll[(Int, Int, Int)](),
+        // Coll[Box](), Coll[Int => Int]()
+        for item in ["04", "61", "28", "48040404", "63", "7001040400"] {
+            let hex = if item == "04" {
+                "1000".into()
+            } else {
+                format!("0c{item}00")
+            };
+            assert!(parse(&hex).is_ok(), "{item}");
+        }
     }
 }
 
