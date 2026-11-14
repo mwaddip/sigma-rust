@@ -78,7 +78,8 @@ pub struct AvlTreeData {
 }
 
 /// A runtime `AvlTree` (sigmastate's `CAvlTree`). Its digest is a collection value, as
-/// sigmastate's `AvlTreeData.digest` is a `Coll` (`AvlTreeData.scala:51`)
+/// sigmastate's `AvlTreeData.digest` is a `Coll` (`AvlTreeData.scala:51`): whatever collection
+/// `updateDigest` was given, which `CAvlTree.updateDigest` copies unread (`CAvlTree.scala:31-34`)
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct AvlTreeValue<'ctx> {
     /// The digest as the collection it is

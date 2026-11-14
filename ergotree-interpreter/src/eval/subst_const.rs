@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 use ergotree_ir::ergo_tree::ErgoTree;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
+use ergotree_ir::mir::avl_tree_data::AvlTreeData;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::Constant;
 use ergotree_ir::mir::constant::TryExtractInto;
@@ -48,9 +49,10 @@ impl Evaluable for SubstConstants {
 
         // every item of the new values becomes a constant, whatever the collection's form
         // (sigmastate's `toArrayOfConstants`, v6.0.7 `Extensions.scala:53-64`). The lift checks
-        // no `BigInt` range (`Platform.liftToConstant`): a `BigInt` outside 256 bits, which a
-        // tree below version 3 can hold, is refused later, by the constant WRITER
-        // (`CoreDataSerializer.scala:35`), and so only if it is written
+        // no `BigInt` range and reads no tree's digest (`Platform.liftToConstant`): a `BigInt`
+        // outside 256 bits, which a tree below version 3 can hold, and an `AvlTree` whose digest
+        // is not of bytes are refused later, by the constant WRITER
+        // (`CoreDataSerializer.scala:35`, `AvlTreeData.scala:75`), and so only if they are written
         let new_values = if let Value::Coll(coll) = new_values_v {
             let mut new_values = vec![];
             for v in &coll.as_vec() {
@@ -58,8 +60,9 @@ impl Evaluable for SubstConstants {
                 new_values.push(match Constant::try_from(v.clone()) {
                     Ok(c) => NewValue::Constant(c),
                     Err(e) => {
-                        // not a constant even with its `BigInt`s in range: the lift throws
-                        if Constant::try_from(with_bigints_in_range(v)).is_err() {
+                        // not a constant even with what only the writer refuses replaced:
+                        // the lift throws
+                        if Constant::try_from(with_writable_parts(v)).is_err() {
                             return Err(EvalError::Misc(e));
                         }
                         NewValue::Unwritable(e)
@@ -129,8 +132,8 @@ fn to_misc_err<T: core::fmt::Debug>(e: T) -> EvalError {
 enum NewValue {
     /// A constant
     Constant(Constant),
-    /// A constant on the JVM that its writer refuses: it holds a `BigInt` outside 256 bits.
-    /// The text is the refusal
+    /// A constant on the JVM that its writer refuses: it holds a `BigInt` outside 256 bits or
+    /// an `AvlTree` whose digest is not of bytes. The text is the refusal
     Unwritable(String),
 }
 
@@ -181,33 +184,38 @@ fn written_values(
     Ok((kept_positions, kept_constants))
 }
 
-/// The value with every `BigInt` outside the 256-bit range replaced by zero: what is left to
-/// refuse then is what sigmastate's lift itself refuses
-fn with_bigints_in_range(v: Value<'static>) -> Value<'static> {
+/// The value with every part that only sigmastate's WRITER refuses replaced by a stand-in the
+/// lift accepts: a `BigInt` outside the 256-bit range by zero, an `AvlTree` whose digest is not
+/// of bytes by the same tree with an empty digest of bytes. What the conversion to a constant
+/// still refuses then, the writer was not the one to refuse. The stand-in is never written:
+/// such a value is [`NewValue::Unwritable`] either way
+fn with_writable_parts(v: Value<'static>) -> Value<'static> {
     match v {
         Value::BigInt(b) if !fits_256_bits(&b) => Value::BigInt(num_bigint::BigInt::from(0)),
+        Value::AvlTree(t) if AvlTreeData::try_from((*t).clone()).is_err() => {
+            let mut t = *t;
+            t.digest = CollValue::Bytes(Arc::new([]));
+            Value::AvlTree(Box::new(t))
+        }
         Value::Pair(pair) => {
             let (l, r) = *pair;
-            Value::Pair(Box::new((
-                with_bigints_in_range(l),
-                with_bigints_in_range(r),
-            )))
+            Value::Pair(Box::new((with_writable_parts(l), with_writable_parts(r))))
         }
-        Value::Opt(opt) => Value::Opt(opt.map(|v| Box::new(with_bigints_in_range(*v)))),
-        Value::Coll(coll) => Value::Coll(coll_with_bigints_in_range(coll)),
+        Value::Opt(opt) => Value::Opt(opt.map(|v| Box::new(with_writable_parts(*v)))),
+        Value::Coll(coll) => Value::Coll(coll_with_writable_parts(coll)),
         other => other,
     }
 }
 
-fn coll_with_bigints_in_range(coll: CollValue<'static>) -> CollValue<'static> {
+fn coll_with_writable_parts(coll: CollValue<'static>) -> CollValue<'static> {
     match coll {
         CollValue::Generic { elem_tpe, items } => CollValue::Generic {
             elem_tpe,
-            items: items.iter().cloned().map(with_bigints_in_range).collect(),
+            items: items.iter().cloned().map(with_writable_parts).collect(),
         },
         CollValue::Pairs { ls, rs } => CollValue::Pairs {
-            ls: Arc::new(coll_with_bigints_in_range((*ls).clone())),
-            rs: Arc::new(coll_with_bigints_in_range((*rs).clone())),
+            ls: Arc::new(coll_with_writable_parts((*ls).clone())),
+            rs: Arc::new(coll_with_writable_parts((*rs).clone())),
         },
         other => other,
     }
