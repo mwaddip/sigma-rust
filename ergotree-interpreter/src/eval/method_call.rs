@@ -668,11 +668,12 @@ mod receiver_kind_tests {
             SType::SOption(Arc::new(SType::SInt)) => SType::SOption(_) => "Opt",
             // the item type is no part of the class
             SType::SColl(Arc::new(SType::SColl(Arc::new(SType::SByte)))) => SType::SColl(_) => "Coll",
-            SType::STuple(STuple::pair(SType::SInt, SType::SInt))
+            SType::STuple(STuple::pair(SType::SInt, SType::SInt).into())
                 => SType::STuple(t) if t.items.len() == 2 => "Pair",
-            SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt))
+            SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into())
                 => SType::STuple(_) => "Coll",
-            SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)) => SType::SFunc(_) => "Lambda",
+            SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt).into())
+                => SType::SFunc(_) => "Lambda",
             SType::SContext => SType::SContext => "Context",
             SType::SString => SType::SString => "String",
             SType::SHeader => SType::SHeader => "Header",

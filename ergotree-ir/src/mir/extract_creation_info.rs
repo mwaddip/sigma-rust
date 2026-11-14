@@ -21,7 +21,7 @@ pub struct ExtractCreationInfo {
 impl ExtractCreationInfo {
     /// Type
     pub fn tpe(&self) -> SType {
-        SType::STuple(STuple::pair(SType::SInt, SType::SColl(SType::SByte.into())))
+        SType::STuple(STuple::pair(SType::SInt, SType::SColl(SType::SByte.into())).into())
     }
 }
 

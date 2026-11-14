@@ -34,9 +34,12 @@ impl Tuple {
 
     /// Type
     pub fn tpe(&self) -> SType {
-        SType::STuple(STuple {
-            items: self.items.mapped_ref(|it| it.tpe()),
-        })
+        SType::STuple(
+            STuple {
+                items: self.items.mapped_ref(|it| it.tpe()),
+            }
+            .into(),
+        )
     }
 }
 

@@ -103,11 +103,11 @@ mod tests {
             prop_assert_eq!(unify_one(&SColl(SAny.into()), &SColl(t.clone().into())), unified_without_subst());
             prop_assert_eq!(unify_one(
                 &SColl(SAny.into()),
-                &STuple(STuple::pair(t.clone(), t.clone()))), unified_without_subst()
+                &STuple(STuple::pair(t.clone(), t.clone()).into())), unified_without_subst()
             );
             prop_assert_eq!(unify_one(
                 &SColl(SAny.into()),
-                &STuple(STuple::pair(t.clone(), STuple(STuple::pair(t.clone(), t))))), unified_without_subst()
+                &STuple(STuple::pair(t.clone(), STuple(STuple::pair(t.clone(), t).into())).into())), unified_without_subst()
             );
         }
 

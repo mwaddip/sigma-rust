@@ -75,9 +75,12 @@ impl EvaluatedValue {
     pub fn tpe(&self) -> SType {
         match self {
             EvaluatedValue::Constant(c) => c.tpe.clone(),
-            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => SType::STuple(STuple {
-                items: items.mapped_ref(Expr::tpe),
-            }),
+            EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => SType::STuple(
+                STuple {
+                    items: items.mapped_ref(Expr::tpe),
+                }
+                .into(),
+            ),
             EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => c.tpe(),
             EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => SType::SGroupElement,
         }
@@ -241,9 +244,12 @@ fn item_constant(item: &Expr) -> Result<Constant, TryExtractFromError> {
 fn tuple_constant(items: &TupleItems<Expr>) -> Result<Constant, TryExtractFromError> {
     let constants = items.try_mapped_ref(item_constant)?;
     Ok(Constant {
-        tpe: SType::STuple(STuple {
-            items: constants.mapped_ref(|c| c.tpe.clone()),
-        }),
+        tpe: SType::STuple(
+            STuple {
+                items: constants.mapped_ref(|c| c.tpe.clone()),
+            }
+            .into(),
+        ),
         v: Literal::Tup(constants.mapped(|c| c.v)),
     })
 }
@@ -519,7 +525,7 @@ mod script_value_tests {
         // builds the same constant at `Coll[Any]` (`CoreDataSerializer.scala:160-163`). The items
         // are the same `Coll[Any]`s, and equality compares the item types first (SANTA's
         // tuple-values-3 reply, section 1, measured)
-        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into());
         let expression = parse("83014804040448040404020406")
             .to_script_value()
             .unwrap();
@@ -557,7 +563,7 @@ mod script_value_tests {
         let sv = parse("860204020404").to_script_value().unwrap();
         assert_eq!(
             sv.tpe,
-            SType::STuple(STuple::pair(SType::SInt, SType::SInt))
+            SType::STuple(STuple::pair(SType::SInt, SType::SInt).into())
         );
         assert_eq!(
             sv.v,
@@ -575,9 +581,12 @@ mod script_value_tests {
         for (hex, items) in [("86010402", vec![SType::SInt]), ("8600", vec![])] {
             assert_eq!(
                 parse(hex).to_script_value().unwrap().tpe,
-                SType::STuple(STuple {
-                    items: items.try_into().unwrap()
-                }),
+                SType::STuple(
+                    STuple {
+                        items: items.try_into().unwrap()
+                    }
+                    .into()
+                ),
                 "{hex}"
             );
         }
@@ -588,9 +597,12 @@ mod script_value_tests {
         // a wallet reads a 1-item tuple as a constant of its tuple type
         assert_eq!(
             parse("86010402").to_constant().unwrap().tpe,
-            SType::STuple(STuple {
-                items: vec![SType::SInt].try_into().unwrap()
-            })
+            SType::STuple(
+                STuple {
+                    items: vec![SType::SInt].try_into().unwrap()
+                }
+                .into()
+            )
         );
     }
 

@@ -149,7 +149,7 @@ mod tests {
         let reg_value = RegisterValue::sigma_parse_bytes(&tuple_expr_bytes);
         // now let's construct a Constant for (102, 99) byte tuple
         let expected_constant: Constant = Constant {
-            tpe: SType::STuple(STuple::pair(SType::SByte, SType::SByte)),
+            tpe: SType::STuple(STuple::pair(SType::SByte, SType::SByte).into()),
             v: Literal::Tup([Literal::Byte(102), Literal::Byte(99)].into()),
         };
         assert_eq!(

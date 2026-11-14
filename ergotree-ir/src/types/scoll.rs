@@ -140,7 +140,7 @@ lazy_static! {
             ],
             SType::SColl(SType::STuple(STuple::pair(
                 STypeVar::t().into(), STypeVar::iv().into()
-            )).into())
+            ).into()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0

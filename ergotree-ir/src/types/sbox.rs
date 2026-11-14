@@ -159,7 +159,7 @@ lazy_static! {
             t_range: Box::new(SType::STuple(STuple::pair(
                 SType::SInt,
                 SType::SColl(SType::SByte.into())
-            ))),
+            ).into())),
             tpe_params: vec![],
         },
         explicit_type_args: vec![],

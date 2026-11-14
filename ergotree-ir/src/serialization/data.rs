@@ -23,7 +23,6 @@ use crate::serialization::{
     sigma_byte_reader::SigmaByteRead, SigmaParsingError, SigmaSerializable,
 };
 use crate::sigma_protocol::{sigma_boolean::SigmaBoolean, sigma_boolean::SigmaProp};
-use crate::types::stuple;
 use crate::types::stype::SType;
 use crate::unsignedbigint256::UnsignedBigInt;
 use ergo_chain_types::EcPoint;
@@ -43,7 +42,7 @@ fn is_zero_width(tpe: &SType) -> bool {
     match tpe {
         SType::SUnit => true,
         SType::SColl(elem_tpe) => is_zero_width(elem_tpe),
-        SType::STuple(stuple::STuple { items }) => items.iter().all(is_zero_width),
+        SType::STuple(tuple) => tuple.items.iter().all(is_zero_width),
         _ => false,
     }
 }
@@ -294,7 +293,8 @@ impl DataSerializer {
                     items: elems,
                 })
             }
-            STuple(stuple::STuple { items: types }) => {
+            STuple(tuple) => {
+                let types = &tuple.items;
                 // an item's data for each item type, any count (v6.0.7
                 // `CoreDataSerializer.scala:139-144`)
                 Literal::Tup(types.try_mapped_ref(|tpe| DataSerializer::sigma_parse(tpe, r))?)
@@ -586,9 +586,12 @@ mod small_tuple_constant_tests {
         let one = Constant::sigma_parse_bytes(&[0x60, 0x01, 0x04, 0x02]).unwrap();
         assert_eq!(
             one.tpe,
-            SType::STuple(STuple {
-                items: TupleItems::try_from(vec![SType::SInt]).unwrap()
-            })
+            SType::STuple(
+                STuple {
+                    items: TupleItems::try_from(vec![SType::SInt]).unwrap()
+                }
+                .into()
+            )
         );
         assert_eq!(
             one.v,

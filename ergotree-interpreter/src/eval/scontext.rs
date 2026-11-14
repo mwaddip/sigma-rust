@@ -423,12 +423,13 @@ mod get_var_from_input_tests {
             expr.eval(&mut Env::empty(), &ctx).map(|v| v.to_static())
         };
         assert_eq!(read(0, SType::SInt).unwrap(), Value::Opt(None));
-        let pairs = SType::SColl(SType::STuple(STuple::pair(SType::SInt, SType::SInt)).into());
+        let pairs =
+            SType::SColl(SType::STuple(STuple::pair(SType::SInt, SType::SInt).into()).into());
         assert!(read(1, pairs).is_err());
         // its var 2, the constant `(1, 2, 3)`: read at its own type it is the tuple's
         // `Coll[Any]` (SANTA's tuple-values reply: `getVarFromInput[(Int, Int, Int)](0, 1).get.size`
         // is 3), read as a `Coll[Int]` it is `None`, not a throw
-        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into());
         let ints = alloc::vec![Value::Int(1), Value::Int(2), Value::Int(3)];
         assert_eq!(
             read(2, triple).unwrap(),

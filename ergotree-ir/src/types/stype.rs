@@ -60,9 +60,9 @@ pub enum SType {
     /// Collection of elements of the same type
     SColl(Arc<SType>),
     /// Tuple (elements can have different types)
-    STuple(STuple),
+    STuple(Arc<STuple>),
     /// Function (signature)
-    SFunc(SFunc),
+    SFunc(Arc<SFunc>),
     /// Context object ("CONTEXT" in ErgoScript)
     SContext,
     /// UTF-8 String type
@@ -173,8 +173,8 @@ impl SType {
             SType::STypeVar(ref tpe_var) => subst.get(tpe_var).cloned().unwrap_or(self.clone()),
             SType::SOption(tpe) => SType::SOption(tpe.with_subst(subst).into()),
             SType::SColl(tpe) => SType::SColl(tpe.with_subst(subst).into()),
-            SType::STuple(ref stup) => SType::STuple(stup.with_subst(subst)),
-            SType::SFunc(ref sfunc) => SType::SFunc(sfunc.with_subst(subst)),
+            SType::STuple(ref stup) => SType::STuple(stup.with_subst(subst).into()),
+            SType::SFunc(ref sfunc) => SType::SFunc(sfunc.with_subst(subst).into()),
             _ => self.clone(),
         }
     }
@@ -182,7 +182,7 @@ impl SType {
 
 impl From<STuple> for SType {
     fn from(v: STuple) -> Self {
-        SType::STuple(v)
+        SType::STuple(v.into())
     }
 }
 
@@ -194,7 +194,7 @@ impl From<STypeVar> for SType {
 
 impl From<SFunc> for SType {
     fn from(v: SFunc) -> Self {
-        SType::SFunc(v)
+        SType::SFunc(v.into())
     }
 }
 
@@ -354,7 +354,7 @@ impl<T: LiftIntoSType> LiftIntoSType for Option<T> {
 impl LiftIntoSType for Tuple {
     fn stype() -> SType {
         let v: Vec<SType> = [for_tuples!(  #( Tuple::stype() ),* )].to_vec();
-        SType::STuple(v.try_into().unwrap())
+        SType::STuple(Arc::new(v.try_into().unwrap()))
     }
 }
 
@@ -406,8 +406,9 @@ pub(crate) mod tests {
                     16, // each collection max size
                     |elem| {
                         prop_oneof![
-                            prop::collection::vec(elem.clone(), 2..=5)
-                                .prop_map(|elems| SType::STuple(elems.try_into().unwrap())),
+                            prop::collection::vec(elem.clone(), 2..=5).prop_map(|elems| {
+                                SType::STuple(Arc::new(elems.try_into().unwrap()))
+                            }),
                             elem.clone().prop_map(|tpe| SType::SColl(Arc::new(tpe))),
                             elem.prop_map(|tpe| SType::SOption(Arc::new(tpe))),
                         ]

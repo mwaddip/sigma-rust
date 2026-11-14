@@ -868,16 +868,22 @@ mod tests {
         let pair2 = Literal::Tup(mk_pair(2u8, 20u64).into());
         let pair3 = Literal::Tup(mk_pair(3u8, 30u64).into());
         let entries = Constant {
-            tpe: SType::SColl(Arc::new(SType::STuple(STuple::pair(
-                SType::SColl(Arc::new(SType::SByte)),
-                SType::SColl(Arc::new(SType::SByte)),
-            )))),
+            tpe: SType::SColl(Arc::new(SType::STuple(
+                STuple::pair(
+                    SType::SColl(Arc::new(SType::SByte)),
+                    SType::SColl(Arc::new(SType::SByte)),
+                )
+                .into(),
+            ))),
             v: Literal::Coll(CollKind::WrappedColl {
                 items: Arc::new([pair1.clone(), pair2.clone(), pair3.clone()]),
-                elem_tpe: SType::STuple(STuple::pair(
-                    SType::SColl(Arc::new(SType::SByte)),
-                    SType::SColl(Arc::new(SType::SByte)),
-                )),
+                elem_tpe: SType::STuple(
+                    STuple::pair(
+                        SType::SColl(Arc::new(SType::SByte)),
+                        SType::SColl(Arc::new(SType::SByte)),
+                    )
+                    .into(),
+                ),
             }),
         };
         let expr: Expr = MethodCall::new(
@@ -906,10 +912,13 @@ mod tests {
         let duplicate_entries = Constant {
             v: Literal::Coll(CollKind::WrappedColl {
                 items: Arc::new([pair1, pair2, pair3.clone(), pair3]),
-                elem_tpe: SType::STuple(STuple::pair(
-                    SType::SColl(Arc::new(SType::SByte)),
-                    SType::SColl(Arc::new(SType::SByte)),
-                )),
+                elem_tpe: SType::STuple(
+                    STuple::pair(
+                        SType::SColl(Arc::new(SType::SByte)),
+                        SType::SColl(Arc::new(SType::SByte)),
+                    )
+                    .into(),
+                ),
             }),
             ..entries
         };
@@ -964,16 +973,22 @@ mod tests {
         );
         let pair1 = Literal::Tup(mk_pair(1u8, 10u64).into());
         let entries = Constant {
-            tpe: SType::SColl(Arc::new(SType::STuple(STuple::pair(
-                SType::SColl(Arc::new(SType::SByte)),
-                SType::SColl(Arc::new(SType::SByte)),
-            )))),
+            tpe: SType::SColl(Arc::new(SType::STuple(
+                STuple::pair(
+                    SType::SColl(Arc::new(SType::SByte)),
+                    SType::SColl(Arc::new(SType::SByte)),
+                )
+                .into(),
+            ))),
             v: Literal::Coll(CollKind::WrappedColl {
                 items: Arc::new([pair1.clone(), pair1.clone()]),
-                elem_tpe: SType::STuple(STuple::pair(
-                    SType::SColl(Arc::new(SType::SByte)),
-                    SType::SColl(Arc::new(SType::SByte)),
-                )),
+                elem_tpe: SType::STuple(
+                    STuple::pair(
+                        SType::SColl(Arc::new(SType::SByte)),
+                        SType::SColl(Arc::new(SType::SByte)),
+                    )
+                    .into(),
+                ),
             }),
         };
         let expr: Expr = MethodCall::new(
@@ -1056,16 +1071,22 @@ mod tests {
         );
         let pair1 = Literal::Tup(mk_pair(1u8, 10u64).into());
         let entries = Constant {
-            tpe: SType::SColl(Arc::new(SType::STuple(STuple::pair(
-                SType::SColl(Arc::new(SType::SByte)),
-                SType::SColl(Arc::new(SType::SByte)),
-            )))),
+            tpe: SType::SColl(Arc::new(SType::STuple(
+                STuple::pair(
+                    SType::SColl(Arc::new(SType::SByte)),
+                    SType::SColl(Arc::new(SType::SByte)),
+                )
+                .into(),
+            ))),
             v: Literal::Coll(CollKind::WrappedColl {
                 items: Arc::new([pair1]),
-                elem_tpe: SType::STuple(STuple::pair(
-                    SType::SColl(Arc::new(SType::SByte)),
-                    SType::SColl(Arc::new(SType::SByte)),
-                )),
+                elem_tpe: SType::STuple(
+                    STuple::pair(
+                        SType::SColl(Arc::new(SType::SByte)),
+                        SType::SColl(Arc::new(SType::SByte)),
+                    )
+                    .into(),
+                ),
             }),
         };
         let expr: Expr = MethodCall::new(
@@ -1459,16 +1480,22 @@ mod tests {
         let pair1 = Literal::Tup(mk_pair(2u8, 40u64).into());
         let pair2 = Literal::Tup(mk_pair(3u8, 50u64).into());
         let entries = Constant {
-            tpe: SType::SColl(Arc::new(SType::STuple(STuple::pair(
-                SType::SColl(Arc::new(SType::SByte)),
-                SType::SColl(Arc::new(SType::SByte)),
-            )))),
+            tpe: SType::SColl(Arc::new(SType::STuple(
+                STuple::pair(
+                    SType::SColl(Arc::new(SType::SByte)),
+                    SType::SColl(Arc::new(SType::SByte)),
+                )
+                .into(),
+            ))),
             v: Literal::Coll(CollKind::WrappedColl {
                 items: Arc::new([pair1, pair2]),
-                elem_tpe: SType::STuple(STuple::pair(
-                    SType::SColl(Arc::new(SType::SByte)),
-                    SType::SColl(Arc::new(SType::SByte)),
-                )),
+                elem_tpe: SType::STuple(
+                    STuple::pair(
+                        SType::SColl(Arc::new(SType::SByte)),
+                        SType::SColl(Arc::new(SType::SByte)),
+                    )
+                    .into(),
+                ),
             }),
         };
         let expr: Expr = MethodCall::new(
@@ -1555,16 +1582,22 @@ mod tests {
 
     fn pairs_coll(items: Arc<[Literal]>) -> Constant {
         Constant {
-            tpe: SType::SColl(Arc::new(SType::STuple(STuple::pair(
-                SType::SColl(Arc::new(SType::SByte)),
-                SType::SColl(Arc::new(SType::SByte)),
-            )))),
+            tpe: SType::SColl(Arc::new(SType::STuple(
+                STuple::pair(
+                    SType::SColl(Arc::new(SType::SByte)),
+                    SType::SColl(Arc::new(SType::SByte)),
+                )
+                .into(),
+            ))),
             v: Literal::Coll(CollKind::WrappedColl {
                 items,
-                elem_tpe: SType::STuple(STuple::pair(
-                    SType::SColl(Arc::new(SType::SByte)),
-                    SType::SColl(Arc::new(SType::SByte)),
-                )),
+                elem_tpe: SType::STuple(
+                    STuple::pair(
+                        SType::SColl(Arc::new(SType::SByte)),
+                        SType::SColl(Arc::new(SType::SByte)),
+                    )
+                    .into(),
+                ),
             }),
         }
     }
@@ -2111,16 +2144,22 @@ mod tests {
         let proof_bytes: Vec<u8> = prover.generate_proof().into_iter().collect();
         let plen = proof_bytes.len() as u64;
         let entries = Constant {
-            tpe: SType::SColl(Arc::new(SType::STuple(STuple::pair(
-                SType::SColl(Arc::new(SType::SByte)),
-                SType::SColl(Arc::new(SType::SByte)),
-            )))),
+            tpe: SType::SColl(Arc::new(SType::STuple(
+                STuple::pair(
+                    SType::SColl(Arc::new(SType::SByte)),
+                    SType::SColl(Arc::new(SType::SByte)),
+                )
+                .into(),
+            ))),
             v: Literal::Coll(CollKind::WrappedColl {
                 items: Arc::new([Literal::Tup(mk_pair(1u8, 10u64).into())]),
-                elem_tpe: SType::STuple(STuple::pair(
-                    SType::SColl(Arc::new(SType::SByte)),
-                    SType::SColl(Arc::new(SType::SByte)),
-                )),
+                elem_tpe: SType::STuple(
+                    STuple::pair(
+                        SType::SColl(Arc::new(SType::SByte)),
+                        SType::SColl(Arc::new(SType::SByte)),
+                    )
+                    .into(),
+                ),
             }),
         };
         let insert_expr = |flags: AvlTreeFlags, proof: Vec<u8>| -> Expr {

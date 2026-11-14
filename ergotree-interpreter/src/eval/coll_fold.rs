@@ -96,7 +96,7 @@ mod tests {
                 val_id: 1.into(),
                 tpe: SType::STuple(STuple {
                     items: [SType::SLong, SType::SBox].into(),
-                }),
+                }.into()),
             }
             .into();
             let fold_op_body: Expr = BinOp {
@@ -120,7 +120,7 @@ mod tests {
                         idx: 1.into(),
                         tpe: SType::STuple(STuple {
                         items: [SType::SLong, SType::SBox].into(),
-                        }),
+                        }.into()),
                     }],
                     fold_op_body,
                 )

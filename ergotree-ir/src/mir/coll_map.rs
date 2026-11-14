@@ -40,7 +40,7 @@ impl Map {
                 Ok(Map {
                     input: input.into(),
                     mapper: mapper.into(),
-                    mapper_sfunc: sfunc,
+                    mapper_sfunc: (*sfunc).clone(),
                 })
             }
             _ => Err(InvalidArgumentError(format!(
@@ -80,7 +80,7 @@ impl SigmaSerializable for Map {
             SType::SFunc(mapper_sfunc) => Ok(Map {
                 input: input.into(),
                 mapper: mapper.into(),
-                mapper_sfunc,
+                mapper_sfunc: (*mapper_sfunc).clone(),
             }),
             tpe => Err(SigmaParsingError::FunctionExpected(format!(
                 "a Map mapper of type {tpe:?}"
@@ -111,11 +111,14 @@ mod arbitrary {
                     depth: 1,
                 }),
                 any_with::<Expr>(ArbExprParams {
-                    tpe: SType::SFunc(SFunc {
-                        t_dom: vec![SType::SBoolean],
-                        t_range: SType::SBoolean.into(),
-                        tpe_params: vec![],
-                    }),
+                    tpe: SType::SFunc(
+                        SFunc {
+                            t_dom: vec![SType::SBoolean],
+                            t_range: SType::SBoolean.into(),
+                            tpe_params: vec![],
+                        }
+                        .into(),
+                    ),
                     depth: 0,
                 }),
             )

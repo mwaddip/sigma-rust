@@ -242,35 +242,33 @@ impl SType {
                 Some(TypeCode::NESTED_COLL) => SColl(SColl(stype()?.into()).into()),
                 Some(TypeCode::OPTION) => SOption(stype()?.into()),
                 Some(TypeCode::OPTION_COLL) => SOption(SColl(stype()?.into()).into()),
-                Some(TypeCode::TUPLE_PAIR1) => STuple(stuple::STuple::pair(
-                    stype()?,
-                    SType::parse_at_depth(r, nested)?,
-                )),
-                Some(TypeCode::TUPLE_PAIR2) if embeddable.is_none() => {
-                    STuple(stuple::STuple::triple(
+                Some(TypeCode::TUPLE_PAIR1) => {
+                    STuple(stuple::STuple::pair(stype()?, SType::parse_at_depth(r, nested)?).into())
+                }
+                Some(TypeCode::TUPLE_PAIR2) if embeddable.is_none() => STuple(
+                    stuple::STuple::triple(
                         stype()?,
                         SType::parse_at_depth(r, nested)?,
                         SType::parse_at_depth(r, nested)?,
-                    ))
-                }
+                    )
+                    .into(),
+                ),
                 Some(TypeCode::TUPLE_PAIR2) => {
                     let stype = stype()?;
-                    STuple(stuple::STuple::pair(
-                        SType::parse_at_depth(r, nested)?,
-                        stype,
-                    ))
+                    STuple(stuple::STuple::pair(SType::parse_at_depth(r, nested)?, stype).into())
                 }
-                Some(TypeCode::TUPLE_PAIR_SYMMETRIC) if embeddable.is_none() => {
-                    STuple(stuple::STuple::quadruple(
+                Some(TypeCode::TUPLE_PAIR_SYMMETRIC) if embeddable.is_none() => STuple(
+                    stuple::STuple::quadruple(
                         stype()?,
                         SType::parse_at_depth(r, nested)?,
                         SType::parse_at_depth(r, nested)?,
                         SType::parse_at_depth(r, nested)?,
-                    ))
-                }
+                    )
+                    .into(),
+                ),
                 Some(TypeCode::TUPLE_PAIR_SYMMETRIC) => {
                     let stype = stype()?;
-                    STuple(stuple::STuple::pair(stype.clone(), stype))
+                    STuple(stuple::STuple::pair(stype.clone(), stype).into())
                 }
                 #[allow(clippy::unreachable)] // All possible container types are checked
                 _ => unreachable!(),
@@ -279,11 +277,14 @@ impl SType {
             Ok(match TypeCode::parse(c)? {
                 TypeCode::TUPLE => {
                     let len = r.get_u8()?;
-                    STuple(stuple::STuple {
-                        items: stuple::TupleItems::read_with(len, || {
-                            SType::parse_at_depth(r, nested)
-                        })?,
-                    })
+                    STuple(
+                        stuple::STuple {
+                            items: stuple::TupleItems::read_with(len, || {
+                                SType::parse_at_depth(r, nested)
+                            })?,
+                        }
+                        .into(),
+                    )
                 }
                 TypeCode::SANY => SAny,
                 TypeCode::SUNIT => SUnit,
@@ -316,11 +317,14 @@ impl SType {
                             )));
                         }
                     }
-                    SType::SFunc(crate::types::sfunc::SFunc {
-                        t_dom,
-                        t_range: t_range.into(),
-                        tpe_params,
-                    })
+                    SType::SFunc(
+                        crate::types::sfunc::SFunc {
+                            t_dom,
+                            t_range: t_range.into(),
+                            tpe_params,
+                        }
+                        .into(),
+                    )
                 }
                 // Before V3 the function type code is one more code above `SGlobal`, which
                 // sigmastate's `CheckTypeCode` (rule 1008, 1018 once v6 is active) rejects
@@ -455,7 +459,7 @@ impl SigmaSerializable for SType {
                     "NoType has no serialized form".into(),
                 )),
             },
-            SType::STuple(stuple::STuple { items }) => match items.as_slice() {
+            SType::STuple(tuple) => match tuple.items.as_slice() {
                 #[allow(clippy::unwrap_used)]
                 // TypeCode::from_primitive_type can't fail since it's only called on primitive types here
                 [t1, t2] => match (t1, t2) {
@@ -518,7 +522,7 @@ impl SigmaSerializable for SType {
                 // with less than 2 items")` (v6.0.7 `TypeSerializer.scala:94-95`)
                 [] | [_] => Err(SigmaSerializationError::NotSupported(format!(
                     "a tuple type of {} items has no serialized form",
-                    items.len()
+                    tuple.items.len()
                 ))),
                 [t1, t2, t3] => {
                     TypeCode::TUPLE_PAIR2.sigma_serialize(w)?;
@@ -535,10 +539,10 @@ impl SigmaSerializable for SType {
                 }
                 _ => {
                     TypeCode::TUPLE.sigma_serialize(w)?;
-                    w.put_u8(items.len() as u8)?;
+                    w.put_u8(tuple.items.len() as u8)?;
                     // item count is one byte (PutByteCost) -- Scala `serializeTuple`'s `putUByte`
                     w.add_put_byte_cost();
-                    items.iter().try_for_each(|i| i.sigma_serialize(w))
+                    tuple.items.iter().try_for_each(|i| i.sigma_serialize(w))
                 }
             },
 
@@ -633,11 +637,14 @@ mod tests {
         assert_eq!(
             r.with_tree_version(ErgoTreeVersion::V3, SType::sigma_parse)
                 .unwrap(),
-            SType::SFunc(SFunc {
-                t_dom: vec![SType::SInt],
-                t_range: SType::SInt.into(),
-                tpe_params: vec![],
-            })
+            SType::SFunc(
+                SFunc {
+                    t_dom: vec![SType::SInt],
+                    t_range: SType::SInt.into(),
+                    tpe_params: vec![],
+                }
+                .into()
+            )
         );
     }
 
@@ -650,13 +657,13 @@ mod tests {
             tpe_params: vec![],
         };
         assert!(sigma_serialize_roundtrip_versioned(
-            &SType::SFunc(sfunc.clone()),
+            &SType::SFunc(sfunc.clone().into()),
             ErgoTreeVersion::V3
         )
         .is_err());
         // t_dom length is now in bounds
         sfunc.t_dom.pop();
-        roundtrip_new_feature(&SType::SFunc(sfunc.clone()), ErgoTreeVersion::V3);
+        roundtrip_new_feature(&SType::SFunc(sfunc.clone().into()), ErgoTreeVersion::V3);
         // invalid tpe_params size
         sfunc.tpe_params = vec![
             STypeParam {
@@ -664,9 +671,11 @@ mod tests {
             };
             256
         ];
-        assert!(
-            sigma_serialize_roundtrip_versioned(&SType::SFunc(sfunc), ErgoTreeVersion::V3).is_err()
-        );
+        assert!(sigma_serialize_roundtrip_versioned(
+            &SType::SFunc(sfunc.into()),
+            ErgoTreeVersion::V3
+        )
+        .is_err());
     }
 
     /// Each combined fast-path type code (Coll/nested-Coll/tuple-pair of primitives) is a single
@@ -684,7 +693,7 @@ mod tests {
             w.serialize_cost()
         }
         let coll = |t: SType| SType::SColl(t.into());
-        let pair = |a: SType, b: SType| SType::STuple(stuple::STuple::pair(a, b));
+        let pair = |a: SType, b: SType| SType::STuple(stuple::STuple::pair(a, b).into());
         assert_eq!(type_put_cost(&coll(SType::SByte)), 1); // COLL+prim
         assert_eq!(type_put_cost(&coll(coll(SType::SByte))), 1); // NESTED_COLL+prim
         assert_eq!(type_put_cost(&pair(SType::SInt, SType::SInt)), 1); // TUPLE_PAIR_SYMMETRIC
@@ -708,14 +717,20 @@ mod tests {
             w.serialize_cost()
         }
         // quadruple rides the symmetric-pair code: PAIR_SYMMETRIC(1) + 4 prim codes -- no count byte
-        let quad = SType::STuple(stuple::STuple {
-            items: vec![SType::SByte; 4].try_into().unwrap(),
-        });
+        let quad = SType::STuple(
+            stuple::STuple {
+                items: vec![SType::SByte; 4].try_into().unwrap(),
+            }
+            .into(),
+        );
         assert_eq!(type_put_cost(&quad, ErgoTreeVersion::V0), 5);
         // arity > 4 crosses into the generic encoding: TUPLE(1) + count putUByte(1) + 5 prim codes
-        let quint = SType::STuple(stuple::STuple {
-            items: vec![SType::SByte; 5].try_into().unwrap(),
-        });
+        let quint = SType::STuple(
+            stuple::STuple {
+                items: vec![SType::SByte; 5].try_into().unwrap(),
+            }
+            .into(),
+        );
         assert_eq!(type_put_cost(&quint, ErgoTreeVersion::V0), 7);
         // STypeVar: STYPE_VAR code(1) + name-length putUByte(1) + name putBytes chunk(3+1)
         assert_eq!(
@@ -724,13 +739,16 @@ mod tests {
         );
         // SFunc (V3+): SFUNC(1) + tDom-length(1) + SByte(1) + SBoolean(1) + tpeParams-length(1)
         // + tpe param "T" as STypeVar(6)
-        let sfunc = SType::SFunc(SFunc {
-            t_dom: vec![SType::SByte],
-            t_range: SType::SBoolean.into(),
-            tpe_params: vec![STypeParam {
-                ident: STypeVar::t(),
-            }],
-        });
+        let sfunc = SType::SFunc(
+            SFunc {
+                t_dom: vec![SType::SByte],
+                t_range: SType::SBoolean.into(),
+                tpe_params: vec![STypeParam {
+                    ident: STypeVar::t(),
+                }],
+            }
+            .into(),
+        );
         assert_eq!(type_put_cost(&sfunc, ErgoTreeVersion::V3), 11);
     }
 
@@ -751,7 +769,7 @@ mod tests {
                 t_range: range.into(),
                 tpe_params
             };
-            roundtrip_new_feature(&SType::SFunc(sfunc), ErgoTreeVersion::V3);
+            roundtrip_new_feature(&SType::SFunc(sfunc.into()), ErgoTreeVersion::V3);
         }
     }
 }
@@ -838,9 +856,12 @@ mod small_tuple_tests {
     use alloc::vec::Vec;
 
     fn tuple(items: Vec<SType>) -> SType {
-        SType::STuple(STuple {
-            items: TupleItems::try_from(items).unwrap(),
-        })
+        SType::STuple(
+            STuple {
+                items: TupleItems::try_from(items).unwrap(),
+            }
+            .into(),
+        )
     }
 
     #[test]
@@ -871,7 +892,7 @@ mod small_tuple_tests {
     #[test]
     fn a_nested_small_tuple_type_is_not_written() {
         // `((Int), Int)`, read through the pair code `4c` (SANTA's `4c600104`)
-        let t = SType::STuple(STuple::pair(tuple(vec![SType::SInt]), SType::SInt));
+        let t = SType::STuple(STuple::pair(tuple(vec![SType::SInt]), SType::SInt).into());
         assert_eq!(
             SType::sigma_parse_bytes(&[0x4c, 0x60, 0x01, 0x04]).unwrap(),
             t

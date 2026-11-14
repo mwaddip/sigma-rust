@@ -113,7 +113,8 @@ impl SType {
                         })
                         .collect::<PyResult<Vec<_>>>()?,
                 )
-                .map_err(to_value_error)?,
+                .map_err(to_value_error)?
+                .into(),
             ),
             SType::SString() => stype::SType::SString,
             SType::SHeader() => stype::SType::SHeader,
@@ -316,7 +317,7 @@ fn constant_to_py(py: Python, c: Constant) -> PyResult<Py<PyAny>> {
                 Literal::Tup(v) => PyTuple::new(
                     py,
                     v.into_iter()
-                        .zip(item_tpes.clone().items.into_iter())
+                        .zip(item_tpes.items.iter().cloned())
                         .map(|(v, tpe)| Constant(constant::Constant { tpe, v })),
                 )?,
                 _ => unreachable!(),

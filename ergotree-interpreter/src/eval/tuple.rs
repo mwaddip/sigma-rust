@@ -446,11 +446,9 @@ mod tests {
         // type" (SType.scala:200-202). sigma-rust models flat N-ary tuples, so the
         // value is representable; it must be rejected at eval to match the JVM.
         let triple = Constant {
-            tpe: SType::STuple(STuple::triple(
-                SType::SBoolean,
-                SType::SBoolean,
-                SType::SBoolean,
-            )),
+            tpe: SType::STuple(
+                STuple::triple(SType::SBoolean, SType::SBoolean, SType::SBoolean).into(),
+            ),
             v: Literal::Tup(
                 TupleItems::try_from(vec![
                     Literal::Boolean(true),

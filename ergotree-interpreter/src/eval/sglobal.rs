@@ -766,9 +766,12 @@ mod tests {
         fn byte_tuple_const(n: i8) -> Constant {
             let items: Vec<Literal> = (1..=n).map(Literal::from).collect();
             Constant {
-                tpe: SType::STuple(STuple {
-                    items: vec![SType::SByte; n as usize].try_into().unwrap(),
-                }),
+                tpe: SType::STuple(
+                    STuple {
+                        items: vec![SType::SByte; n as usize].try_into().unwrap(),
+                    }
+                    .into(),
+                ),
                 v: Literal::Tup(items.try_into().unwrap()),
             }
         }

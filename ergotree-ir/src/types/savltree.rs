@@ -266,7 +266,7 @@ lazy_static! {
                                        SType::SColl(Arc::new(SType::SByte)),
                                        SType::SColl(Arc::new(SType::SByte))
                                    )
-                               )
+                               .into())
                            )
                          ),
                          SType::SColl(Arc::new(SType::SByte)),
@@ -340,7 +340,7 @@ lazy_static! {
                                         SType::SColl(Arc::new(SType::SByte)),
                                         SType::SColl(Arc::new(SType::SByte))
                                     )
-                                )
+                                .into())
                             )
                          ),
                          SType::SColl(Arc::new(SType::SByte)),
@@ -386,7 +386,7 @@ lazy_static! {
                                        SType::SColl(Arc::new(SType::SByte)),
                                        SType::SColl(Arc::new(SType::SByte))
                                    )
-                               )
+                               .into())
                            )
                          ),
                          SType::SColl(Arc::new(SType::SByte)),

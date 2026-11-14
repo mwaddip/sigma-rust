@@ -1556,7 +1556,7 @@ mod value_check_tests {
     use sigma_test_util::force_any_val;
 
     fn pair_type() -> SType {
-        SType::STuple(STuple::pair(SType::SInt, SType::SInt))
+        SType::STuple(STuple::pair(SType::SInt, SType::SInt).into())
     }
 
     /// var 0 = `hex`: the tuple expression `Tuple(1, 2)`, or its constant twin `58 02 04`
@@ -1718,7 +1718,7 @@ mod value_check_tests {
     fn a_fold_checks_its_zero() {
         // `Coll[Int]().fold(getVar[(Int, Int)](0).get, { (a: ((Int, Int), Int)) => a._1 })._1`,
         // from source (`transformers.scala:224-228`)
-        let acc_item = SType::STuple(STuple::pair(pair_type(), SType::SInt));
+        let acc_item = SType::STuple(STuple::pair(pair_type(), SType::SInt).into());
         let acc: Expr = ValUse {
             val_id: 1.into(),
             tpe: acc_item.clone(),
@@ -1846,7 +1846,7 @@ mod value_check_tests {
             ),
             (pair_type(), Value::pair(Value::Int(1), Value::Int(2))),
             (
-                SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)),
+                SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt).into()),
                 a_lambda.clone(),
             ),
             (SType::SContext, Value::Context),
@@ -1891,14 +1891,14 @@ mod value_check_tests {
             }
         }
         // a tuple other than a pair and a function of other than one argument throw
-        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into());
         // a tuple of three as it is held: a collection of `Any`
         let three = Value::Coll(CollValue::generic(
             SType::SAny,
             vec![Value::Int(1), Value::Int(2), Value::Int(3)],
         ));
         assert!(check_value_of_type(&triple, &three, v3).is_err());
-        let binary = SType::SFunc(SFunc::new(vec![SType::SInt, SType::SInt], SType::SInt));
+        let binary = SType::SFunc(SFunc::new(vec![SType::SInt, SType::SInt], SType::SInt).into());
         assert!(check_value_of_type(&binary, &a_lambda, v3).is_err());
         // a pair needs a `Tuple2`, a unary function a `Function1`
         assert!(check_value_of_type(&pair_type(), &three, v3).is_err());
@@ -1916,7 +1916,7 @@ mod value_check_tests {
             body: alloc::sync::Arc::new(int(1)),
             captured: Default::default(),
         });
-        let unary = SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt));
+        let unary = SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt).into());
         assert!(check_value_of_type(&unary, &two_args, v3).is_err());
     }
 
@@ -1937,7 +1937,7 @@ mod value_check_tests {
         // `{ (x: Coll[Int]) => true }((1, 2, 3))`: neither parser checks the argument's type
         let items: Vec<Literal> = vec![1i32.into(), 2i32.into(), 3i32.into()];
         let triple: Expr = Constant {
-            tpe: SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt)),
+            tpe: SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into()),
             v: Literal::Tup(items.try_into().unwrap()),
         }
         .into();
@@ -2067,7 +2067,7 @@ mod value_check_tests {
     #[test]
     fn a_fold_zero_rejects_another_kind() {
         // `Coll[Int]().fold(X, { (p: (Int, Int)) => p._1 }) == 2` (`transformers.scala:227`)
-        let int_pair = SType::STuple(STuple::pair(SType::SInt, SType::SInt));
+        let int_pair = SType::STuple(STuple::pair(SType::SInt, SType::SInt).into());
         let p: Expr = ValUse {
             val_id: 1.into(),
             tpe: int_pair.clone(),
