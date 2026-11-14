@@ -14,8 +14,8 @@
 //! - a fixed-cost method that is handed a type descriptor ([`descriptor_type`]), at the call,
 //!   before its arguments;
 //! - `Global.deserializeTo`, for the call's type, after its arguments and before its cost;
-//! - every register of a box that is not a constant when one is read, and every self context
-//!   variable before a tree is evaluated (`EvaluatedValue::script_type`).
+//! - every register of a box when one is read (`sbox::get_register_script_value`), and every
+//!   self context variable before a tree is evaluated (`EvaluatedValue::script_type`).
 //!
 //! A new node or method that sigmastate gives an `RType` built from a static type takes the
 //! check at the place sigmastate resolves it.
@@ -356,6 +356,80 @@ mod tests {
         let some_1 = Value::Opt(Some(alloc::boxed::Box::new(Value::Int(1))));
         for v in [0, 3] {
             assert_eq!(eval_body(&r4, version(v)), (Ok(some_1.clone()), 55), "v{v}");
+        }
+    }
+
+    #[test]
+    fn a_register_whose_type_has_no_runtime_type_fails_every_register_read_of_its_box() {
+        // `CBox.registers` converts every register of the box on the first read. An empty
+        // collection of tuples of other than two items is data the JVM reads whatever the
+        // items are, so a CONSTANT register can have such a type: R4 = `Coll[(Int, Int, T)]()`
+        let b = box_with(&format!("010c480404{T}00"));
+        for v in [0, 3] {
+            // R5[Int], which is not there; R4 at its own type
+            for body in [format!("c6{b}0504"), format!("c6{b}040c480404{T}")] {
+                let (err, cost) = stopped(&body, v);
+                assert!(matches!(err, EvalError::Misc(_)), "{err:?}");
+                assert_eq!(cost, 55, "v{v}");
+            }
+            // a read that is not of a register does not convert them
+            assert_eq!(
+                eval_body(&format!("c1{b}"), version(v)),
+                (Ok(Value::Long(1000000)), 13)
+            );
+        }
+        // `getReg[Int](5)`: the method's cost is added before the registers are read
+        assert_eq!(stopped(&format!("dc6313{b}01040a04"), 3).1, 64);
+    }
+
+    #[test]
+    fn every_read_that_goes_through_the_registers_converts_them() {
+        // sigmastate's `CBox.tokens` and `CBox.creationInfo` are `getReg(2)` and `getReg(3)`,
+        // and `getReg` reads `registers.length` for every index that is not negative
+        // (`CBox.scala:33`, `:46-58`): each converts every register of the box. The jars, each
+        // row, with an R4 that does not convert: the constant `Coll[(Int, Int, T)]()` and the
+        // collection expression `Coll[T]()`
+        let reads: [(&str, &[u8], u64); 5] = [
+            ("db6308{b}", &[0, 3], 24),        // box.tokens
+            ("c7{b}", &[0, 3], 21),            // the creation info node
+            ("db6306{b}", &[0, 3], 25),        // box.creationInfo
+            ("dc6313{b}01041404", &[3], 64),   // box.getReg[Int](10)
+            ("dc6313{b}0104900304", &[3], 64), // box.getReg[Int](200)
+        ];
+        for r4 in [format!("010c480404{T}00"), format!("018300{T}")] {
+            let b = box_with(&r4);
+            for (body, versions, stops_at) in reads {
+                for v in versions {
+                    let (err, cost) = stopped(&body.replace("{b}", &b), *v);
+                    assert!(
+                        matches!(err, EvalError::Misc(_) | EvalError::TryExtractFrom(_)),
+                        "{body} with R4 = {r4}: {err:?}"
+                    );
+                    assert_eq!(cost, stops_at, "{body} with R4 = {r4} at v{v}");
+                }
+            }
+            // a negative index answers before the registers are read
+            let (res, cost) = eval_body(&format!("dc6313{b}01040104"), ErgoTreeVersion::V3);
+            assert_eq!((res, cost), (Ok(Value::Opt(None)), 64), "R4 = {r4}");
+        }
+        // with registers that convert, each read gives its value at the same counter
+        let b = box_with("010402");
+        for (body, versions, cost) in reads {
+            for v in versions {
+                let (res, c) = eval_body(&body.replace("{b}", &b), version(*v));
+                assert!(res.is_ok(), "{body} at v{v}: {res:?}");
+                assert_eq!(c, cost, "{body} at v{v}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_creation_info_node_adds_its_cost_after_its_box() {
+        // `ExtractCreationInfo.eval`: the box, the node's cost, the read. A box expression that
+        // throws stops at its own 40, and an input that is no box at its own 5 (the jars)
+        for v in [0, 3] {
+            assert_eq!(stopped(&format!("c7{THROWING_BOX}"), v).1, 40, "v{v}");
+            assert_eq!(stopped("c70402", v).1, 5, "v{v}");
         }
     }
 

@@ -609,6 +609,10 @@ mod script_value_tests {
         }
         // C2's twin, a function of one argument, converts
         assert!(parse("83007001040400").to_script_value().is_ok());
+        // a CONSTANT can have a type with no runtime type too: `Coll[(Int, Int, T)]()`, data the
+        // JVM reads whatever the tuple's items are (the 6.0.7 jars: a box with that register
+        // fails every register read; by reading for a context variable)
+        assert!(parse("0c48040467015400").to_script_value().is_err());
     }
 }
 

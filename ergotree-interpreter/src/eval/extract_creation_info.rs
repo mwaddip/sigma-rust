@@ -28,15 +28,19 @@ impl Evaluable for ExtractCreationInfo {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        ctx.add_jit_cost(16)?; // ExtractCreationInfo = Fixed(16)
+        // the box (`evalTo[Box]`: an input of another class fails here), the node's cost,
+        // then `creationInfo`, which is `getReg(3)` and so converts the box's registers
+        // (`transformers.scala:519-523`, `CBox.scala:46-54`)
         let input_v = self.input.eval(env, ctx)?;
-        match input_v {
-            Value::CBox(b) => Ok(creation_info_value(&b)),
-            _ => Err(EvalError::UnexpectedValue(format!(
+        let Value::CBox(b) = input_v else {
+            return Err(EvalError::UnexpectedValue(format!(
                 "Expected ExtractCreationInfo input to be Value::CBox, got {0:?}",
                 input_v
-            ))),
-        }
+            )));
+        };
+        ctx.add_jit_cost(16)?; // ExtractCreationInfo = Fixed(16)
+        super::sbox::convert_registers(&b)?;
+        Ok(creation_info_value(&b))
     }
 }
 
