@@ -12,10 +12,10 @@ use hashbrown::HashMap;
 
 use super::sfunc::SFunc;
 use super::stype::SType;
+use super::stype::TypeSubstError;
 use super::stype_companion::STypeCompanion;
 use super::stype_param::STypeVar;
 use super::type_unify::unify_many;
-use super::type_unify::TypeUnificationError;
 use crate::serialization::SigmaParsingError::UnknownMethodId;
 
 /// Method id unique among the methods of the same object
@@ -91,26 +91,37 @@ impl SMethod {
         self.method_raw.method_id
     }
 
-    /// Return new SMethod with type variables substituted
-    pub fn with_concrete_types(self, subst: &HashMap<STypeVar, SType>) -> Self {
-        let new_tpe = self.method_raw.tpe.clone().with_subst(subst);
-        Self {
+    /// Return new SMethod with type variables substituted: sigmastate's `withConcreteTypes`
+    /// (v6.0.7 `SMethod.scala:177-178`), which fails where its substitution does
+    /// (`SType::with_subst`)
+    pub fn with_concrete_types(
+        self,
+        subst: &HashMap<STypeVar, SType>,
+    ) -> Result<Self, TypeSubstError> {
+        let new_tpe = self.method_raw.tpe.with_subst(subst)?;
+        Ok(Self {
             method_raw: self.method_raw.with_tpe(new_tpe),
             ..self
-        }
+        })
     }
 
     /// Specializes this instance by creating a new [`SMethod`] instance where signature
-    /// is specialized with respect to the given object and args types.
+    /// is specialized with respect to the given object and args types: sigmastate's
+    /// `specializeFor` (v6.0.7 `SMethod.scala:193-199`). The method comes back as it is when
+    /// the types do not unify or unify with no substitution; a substitution is applied with
+    /// [`Self::with_concrete_types`], which can fail.
     pub fn specialize_for(
         self,
         obj_tpe: SType,
         args: Vec<SType>,
-    ) -> Result<SMethod, TypeUnificationError> {
+    ) -> Result<SMethod, TypeSubstError> {
         let mut items2 = vec![obj_tpe];
         let mut args = args;
         items2.append(args.as_mut());
-        unify_many(self.tpe().t_dom.clone(), items2).map(|subst| self.with_concrete_types(&subst))
+        match unify_many(self.tpe().t_dom.clone(), items2) {
+            Ok(subst) if !subst.is_empty() => self.with_concrete_types(&subst),
+            _ => Ok(self),
+        }
     }
 }
 

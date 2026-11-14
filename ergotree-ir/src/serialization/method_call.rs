@@ -46,16 +46,13 @@ impl SigmaSerializable for MethodCall {
         // sigmastate builds the call with no arity or type check of its own.
         // The arguments' types are read first, then the object's (`:84-96`), where a read can
         // throw ([`Expr::try_tpe`])
-        let method = method.with_concrete_types(&explicit_type_args);
+        let method = method.with_concrete_types(&explicit_type_args)?;
         let arg_types = args
             .iter()
             .map(|arg| arg.try_tpe())
             .collect::<Result<_, _>>()?;
         let obj_tpe = obj.try_tpe()?;
-        let method = method
-            .clone()
-            .specialize_for(obj_tpe, arg_types)
-            .unwrap_or(method);
+        let method = method.specialize_for(obj_tpe, arg_types)?;
         Ok(MethodCall {
             obj: obj.into(),
             method,
@@ -266,7 +263,8 @@ mod tests {
             vec![1i64, 2i64].into(),
             scoll::INDEX_OF_METHOD
                 .clone()
-                .with_concrete_types(&[(STypeVar::t(), SType::SLong)].iter().cloned().collect()),
+                .with_concrete_types(&[(STypeVar::t(), SType::SLong)].iter().cloned().collect())
+                .unwrap(),
             vec![2i64.into(), 0i32.into()],
         )
         .unwrap()
@@ -434,6 +432,53 @@ mod tests {
             "0b07d1db0802d10101",
         ] {
             assert_parsed_tree_round_trips(tree_hex);
+        }
+    }
+
+    /// A call of a method that takes an explicit type argument, with `type_arg` as that
+    /// type's bytes. `getReg` reads register 4 of a box constant with no registers, the
+    /// byte arguments are one byte, `{(x: Int) => 1}` is the lambda.
+    fn call(method: &str, type_arg: &str) -> alloc::string::String {
+        let start = match method {
+            "getReg" => "dc631363c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000000000000000000000000000000000000000000000000000000000000000000000010408",
+            "getVarFromInput" => "dc650cfe0203000201",
+            "none" => "db6a0add",
+            "some(1)" => "dc6a09dd010402",
+            "some(lambda)" => "dc6a09dd01d90101040402",
+            "some(Coll(lambda))" => "dc6a09dd0183017001040400d90101040402",
+            "some(Coll[Int]())" => "dc6a09dd011000",
+            "fromBigEndianBytes" => "dc6a05dd010e0101",
+            "deserializeTo" => "dc6a04dd010e0100",
+            _ => "",
+        };
+        assert!(!start.is_empty(), "{method}");
+        alloc::format!("{start}{type_arg}")
+    }
+
+    fn parse_v3(body_hex: &str) -> Result<Expr, crate::serialization::SigmaParsingError> {
+        use crate::serialization::SigmaSerializable;
+        from_bytes(&hex(body_hex)).with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
+    }
+
+    #[test]
+    fn a_call_that_specialising_cannot_build_does_not_parse() {
+        // sigma-state 6.0.7, read from the jars: `specializeFor` binds a variable of the type
+        // argument from `some`'s argument (`U` is `Int` here), and its substitution throws
+        // kiama's `RuntimeException` on a function type inside the range whose type parameter
+        // is that variable
+        for (method, type_arg) in [
+            ("some(lambda)", "70016701550401670155"), // [U](U)=>Int
+            ("some(lambda)", "700167015567015602670155670156"), // [U,V](U)=>V
+            ("some(Coll(lambda))", "0c70016701550401670155"), // Coll[[U](U)=>Int]
+            ("some(Coll(lambda))", "0c70016701550402670155670156"), // Coll[[U,V](U)=>Int]
+        ] {
+            assert!(
+                matches!(
+                    parse_v3(&call(method, type_arg)),
+                    Err(crate::serialization::SigmaParsingError::TypeSubstFailed(_))
+                ),
+                "{method}[{type_arg}]"
+            );
         }
     }
 }

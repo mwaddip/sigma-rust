@@ -94,15 +94,12 @@ impl SigmaSerializable for PropertyCall {
         // the method as it is when the types do not unify (`SMethod.scala:193-199`).
         // sigmastate builds the call with no check of its own
         let (method, explicit_type_args) = if method.method_raw.explicit_type_args.is_empty() {
-            let method = method
-                .clone()
-                .specialize_for(obj.try_tpe()?, Vec::new())
-                .unwrap_or(method);
+            let method = method.specialize_for(obj.try_tpe()?, Vec::new())?;
             (method, HashMap::new())
         } else {
             let explicit_type_args = parse_explicit_type_args(&method, r)?;
             (
-                method.with_concrete_types(&explicit_type_args),
+                method.with_concrete_types(&explicit_type_args)?,
                 explicit_type_args,
             )
         };

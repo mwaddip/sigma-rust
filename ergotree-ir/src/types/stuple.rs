@@ -1,13 +1,11 @@
 use core::convert::TryFrom;
 use core::convert::TryInto;
-use hashbrown::HashMap;
 
 use alloc::vec;
 use alloc::vec::Vec;
 use bounded_vec::BoundedVecOutOfBounds;
 
 use super::stype::SType;
-use super::stype_param::STypeVar;
 
 /// A tuple's items, 0 to [`TupleItems::MAX_LEN`] of them. sigmastate reads a tuple type or a
 /// tuple expression of any size up to its count byte (v6.0.7 `TypeSerializer.scala:192-198`,
@@ -214,12 +212,6 @@ impl STuple {
         #[allow(clippy::unwrap_used)]
         STuple {
             items: vec![t1, t2, t3, t4].try_into().unwrap(),
-        }
-    }
-
-    pub(crate) fn with_subst(&self, subst: &HashMap<STypeVar, SType>) -> Self {
-        STuple {
-            items: self.items.clone().mapped(|a| a.with_subst(subst)),
         }
     }
 }

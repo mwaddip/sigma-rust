@@ -65,7 +65,9 @@ impl MethodCall {
         }
         // the arguments are checked against the domain with the explicit types substituted:
         // `Global.some[T]`'s variable is in its domain
-        let method = method.with_concrete_types(&explicit_type_args);
+        let method = method
+            .with_concrete_types(&explicit_type_args)
+            .map_err(|e| InvalidArgumentError(format!("MethodCall: {e:?}")))?;
         let mut expected_types: Vec<SType> = vec![obj.tpe()];
         let arg_types: Vec<SType> = args.clone().into_iter().map(|a| a.tpe()).collect();
         expected_types.extend(arg_types);

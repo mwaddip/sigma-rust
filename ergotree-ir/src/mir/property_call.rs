@@ -74,9 +74,12 @@ impl PropertyCall {
                 "PropertyCall: explicit_type_args does not include substitution for STypeVar {missing_tpe:?}",
             )));
         }
+        let method = method
+            .with_concrete_types(&type_args)
+            .map_err(|e| InvalidArgumentError(format!("PropertyCall: {e:?}")))?;
         Ok(Self {
             obj: obj.into(),
-            method: method.with_concrete_types(&type_args),
+            method,
             explicit_type_args: type_args,
         })
     }

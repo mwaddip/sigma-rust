@@ -315,7 +315,8 @@ mod arity_tests {
             obj: Box::new(Expr::Context),
             method: GET_VAR_FROM_INPUT_METHOD
                 .clone()
-                .with_concrete_types(&type_args),
+                .with_concrete_types(&type_args)
+                .unwrap(),
             explicit_type_args: type_args,
         }
         .into();
@@ -1316,7 +1317,8 @@ mod argument_widening_tests {
         // Coll[Long].getOrElse(Int, Long): the default is `IV` in the method's own table
         let method = scoll::GET_OR_ELSE_METHOD
             .clone()
-            .with_concrete_types(&core::iter::once((STypeVar::iv(), SType::SLong)).collect());
+            .with_concrete_types(&core::iter::once((STypeVar::iv(), SType::SLong)).collect())
+            .unwrap();
         assert_eq!(method.tpe().t_dom[2], SType::SLong);
         assert_eq!(
             widened(&method, vec![Value::Byte(9), Value::Byte(7)]),

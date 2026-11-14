@@ -249,6 +249,13 @@ pub enum SigmaParsingError {
     /// no validation rule, so a size-flagged tree is refused too
     #[error("collection data with an item type that has no runtime type: {0}")]
     NoRuntimeType(String),
+    /// A method call sigmastate cannot specialise: the substitution of what its arguments'
+    /// types unify to (`specializeFor`) replaced the variable of a function type's type
+    /// parameter with a type
+    /// ([`SType::with_subst`](crate::types::stype::SType)). kiama's `dup` throws a
+    /// `RuntimeException`: no validation rule, so a size-flagged tree is refused too
+    #[error("a method call's type substitution failed: {0}")]
+    TypeSubstFailed(String),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -341,6 +348,12 @@ impl SigmaParsingError {
     /// for every variant. Whether the rule is soft-forkable does not enter into it.
     pub fn escapes_sized_tree_degrade(&self) -> bool {
         self.jvm_failure() != JvmFailure::Validation
+    }
+}
+
+impl From<crate::types::stype::TypeSubstError> for SigmaParsingError {
+    fn from(e: crate::types::stype::TypeSubstError) -> Self {
+        SigmaParsingError::TypeSubstFailed(e.0)
     }
 }
 
@@ -546,6 +559,8 @@ impl SigmaParsingError {
             ZeroWidthCollection(_) => Validation,
             // `stypeToRType`'s `sys.error` in `deserializeColl`, a `RuntimeException`
             NoRuntimeType(_) => Other,
+            // kiama's `sys.error` in `dup`, a `RuntimeException`
+            TypeSubstFailed(_) => Other,
             // rule 1012 `CheckHeaderSizeBit` for a missing size bit. `IoError` is the end of
             // input at the header byte, a `BufferUnderflowException`; it is never the position
             // limit, as a tree's window starts at its header byte
@@ -674,6 +689,7 @@ mod tests {
             SigmaParsingError::InvalidTypeParameter(s()),
             SigmaParsingError::TupleFieldOutOfBounds(s()),
             SigmaParsingError::ErgoTreeHeaderError(ErgoTreeHeaderError::IoError(s())),
+            SigmaParsingError::TypeSubstFailed(s()),
         ] {
             assert_eq!(e.jvm_failure(), JvmFailure::Other, "{e:?}");
         }

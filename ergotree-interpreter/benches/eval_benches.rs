@@ -167,14 +167,17 @@ fn bench_flatmap(c: &mut Criterion) {
         let obj: Expr = Constant::from(vec![vec![0u8; 100]; size]).into();
         let mc: Expr = MethodCall::new(
             obj,
-            FLATMAP_METHOD.clone().with_concrete_types(
-                &[
-                    (STypeVar::iv(), SType::SColl(SType::SByte.into())),
-                    (STypeVar::ov(), SType::SByte),
-                ]
-                .into_iter()
-                .collect(),
-            ),
+            FLATMAP_METHOD
+                .clone()
+                .with_concrete_types(
+                    &[
+                        (STypeVar::iv(), SType::SColl(SType::SByte.into())),
+                        (STypeVar::ov(), SType::SByte),
+                    ]
+                    .into_iter()
+                    .collect(),
+                )
+                .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
                     idx: 1.into(),

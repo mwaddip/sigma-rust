@@ -633,7 +633,8 @@ mod test {
             Expr::Global,
             sglobal::FROM_BIGENDIAN_BYTES_METHOD
                 .clone()
-                .with_concrete_types(&type_args),
+                .with_concrete_types(&type_args)
+                .unwrap(),
             vec![to_be_bytes_expr],
             type_args,
         )

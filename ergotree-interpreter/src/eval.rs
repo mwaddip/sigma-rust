@@ -2138,15 +2138,18 @@ mod value_check_tests {
         let map = |arg_tpe: SType| -> Expr {
             MethodCall {
                 obj: Box::new(opt.clone()),
-                method: soption::MAP_METHOD.clone().with_concrete_types(
-                    &[
-                        (STypeVar::iv(), arg_tpe.clone()),
-                        (STypeVar::ov(), arg_tpe.clone()),
-                    ]
-                    .iter()
-                    .cloned()
-                    .collect(),
-                ),
+                method: soption::MAP_METHOD
+                    .clone()
+                    .with_concrete_types(
+                        &[
+                            (STypeVar::iv(), arg_tpe.clone()),
+                            (STypeVar::ov(), arg_tpe.clone()),
+                        ]
+                        .iter()
+                        .cloned()
+                        .collect(),
+                    )
+                    .unwrap(),
                 args: vec![lambda(
                     arg_tpe.clone(),
                     ValUse {

@@ -208,10 +208,14 @@ lazy_static! {
 }
 
 fn specialize_method(method: &SMethodDesc, tpe: SType) -> SMethodDesc {
+    // a numeric method's signature holds no function type, so its substitution cannot fail
+    #[allow(clippy::unwrap_used)]
+    let tpe = method
+        .tpe
+        .with_subst(&[(STypeVar::t(), tpe)].into_iter().collect())
+        .unwrap();
     SMethodDesc {
-        tpe: method
-            .tpe
-            .with_subst(&[(STypeVar::t(), tpe)].into_iter().collect()),
+        tpe,
         ..method.clone()
     }
 }

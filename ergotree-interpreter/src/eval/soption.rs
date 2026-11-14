@@ -156,15 +156,18 @@ mod tests {
 
         let expr: Expr = MethodCall::new(
             opt_const.into(),
-            soption::MAP_METHOD.clone().with_concrete_types(
-                &[
-                    (STypeVar::iv(), SType::SLong),
-                    (STypeVar::ov(), SType::SBoolean),
-                ]
-                .iter()
-                .cloned()
-                .collect(),
-            ),
+            soption::MAP_METHOD
+                .clone()
+                .with_concrete_types(
+                    &[
+                        (STypeVar::iv(), SType::SLong),
+                        (STypeVar::ov(), SType::SBoolean),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                )
+                .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
                     idx: 1.into(),
@@ -204,15 +207,18 @@ mod tests {
 
         let expr: Expr = MethodCall::new(
             opt_const.into(),
-            soption::MAP_METHOD.clone().with_concrete_types(
-                &[
-                    (STypeVar::iv(), SType::SLong),
-                    (STypeVar::ov(), SType::SBoolean),
-                ]
-                .iter()
-                .cloned()
-                .collect(),
-            ),
+            soption::MAP_METHOD
+                .clone()
+                .with_concrete_types(
+                    &[
+                        (STypeVar::iv(), SType::SLong),
+                        (STypeVar::ov(), SType::SBoolean),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                )
+                .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
                     idx: 1.into(),
@@ -250,7 +256,8 @@ mod tests {
             opt_const.into(),
             soption::FILTER_METHOD
                 .clone()
-                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect()),
+                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
+                .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
                     idx: 1.into(),
@@ -288,7 +295,8 @@ mod tests {
             opt_const.into(),
             soption::FILTER_METHOD
                 .clone()
-                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect()),
+                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
+                .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
                     idx: 1.into(),
@@ -327,7 +335,8 @@ mod tests {
             opt_const.into(),
             soption::FILTER_METHOD
                 .clone()
-                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect()),
+                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
+                .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
                     idx: 1.into(),
@@ -366,7 +375,8 @@ mod tests {
             opt_const.into(),
             soption::FILTER_METHOD
                 .clone()
-                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect()),
+                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
+                .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
                     idx: 1.into(),
@@ -410,18 +420,22 @@ mod tests {
             let _: Value = try_eval_out(&expr, &ctx).unwrap();
             ctx.jit_cost_value() - before
         };
-        let map = soption::MAP_METHOD.clone().with_concrete_types(
-            &[
-                (STypeVar::iv(), SType::SLong),
-                (STypeVar::ov(), SType::SBoolean),
-            ]
-            .iter()
-            .cloned()
-            .collect(),
-        );
+        let map = soption::MAP_METHOD
+            .clone()
+            .with_concrete_types(
+                &[
+                    (STypeVar::iv(), SType::SLong),
+                    (STypeVar::ov(), SType::SBoolean),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+            )
+            .unwrap();
         let filter = soption::FILTER_METHOD
             .clone()
-            .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect());
+            .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
+            .unwrap();
         for method in [map, filter] {
             assert_eq!(run(method.clone(), Some(1)) - run(method, None), 10);
         }
