@@ -52,7 +52,7 @@ pub(crate) fn self_box<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
 /// `Context.LastBlockUtxoRootHash`. The root is a standalone context input, as in the JVM
 /// (`CContext` returns `lastBlockUtxoRootHash` directly, never deriving it from `headers(0)`)
 pub(crate) fn last_block_utxo_root_hash<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
-    Value::AvlTree(Box::from(ctx.last_block_utxo_root.clone()))
+    Value::from(ctx.last_block_utxo_root.clone())
 }
 
 /// `Context.minerPubKey`: the pre-header's miner key, as its bytes

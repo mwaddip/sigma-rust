@@ -42,12 +42,12 @@ pub(crate) static STATE_ROOT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     // the reference impl wraps the digest with all operations enabled and
     // keyLength = 32 (`CHeader.stateRoot` → `AvlTreeData.avlTreeFromDigest`),
     // rather than returning the raw digest bytes.
-    Ok(Value::AvlTree(Box::new(AvlTreeData {
+    Ok(Value::from(AvlTreeData {
         digest: header.state_root.0.to_vec(),
         tree_flags: AvlTreeFlags::new(true, true, true),
         key_length: 32,
         value_length_opt: None,
-    })))
+    }))
 };
 
 pub(crate) static TRANSACTION_ROOT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {

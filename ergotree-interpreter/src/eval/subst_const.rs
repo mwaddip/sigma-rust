@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 use ergotree_ir::ergo_tree::ErgoTree;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
+use ergotree_ir::mir::avl_tree_data::AvlTreeData;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::Constant;
 use ergotree_ir::mir::constant::TryExtractInto;
@@ -48,18 +49,30 @@ impl Evaluable for SubstConstants {
 
         // every item of the new values becomes a constant, whatever the collection's form
         // (sigmastate's `toArrayOfConstants`, v6.0.7 `Extensions.scala:53-64`). The lift checks
-        // no `BigInt` range (`Platform.liftToConstant`): a `BigInt` outside 256 bits, which a
-        // tree below version 3 can hold, is refused later, by the constant WRITER
-        // (`CoreDataSerializer.scala:35`), and so only if it is written
+        // no `BigInt` range and reads no tree's digest (`Platform.liftToConstant`): a `BigInt`
+        // outside 256 bits, which a tree below version 3 can hold, and an `AvlTree` whose digest
+        // is not of bytes are refused later, by the constant WRITER
+        // (`CoreDataSerializer.scala:35`, `AvlTreeData.scala:75`), and so only if they are written
         let new_values = if let Value::Coll(coll) = new_values_v {
             let mut new_values = vec![];
             for v in &coll.as_vec() {
                 let v = v.to_static();
+                // sigmastate's lift is a table of classes with no arm for a pair, an option
+                // or `Unit` (`Platform.liftToConstant`, v6.0.6 `Platform.scala:16-63`): such
+                // a new value throws here, whatever its position (`Extensions.scala:60`).
+                // Inside a collection they are lifted with it (the `Coll` arm)
+                if matches!(v, Value::Pair(_) | Value::Opt(_) | Value::Unit) {
+                    return Err(EvalError::Misc(format!(
+                        "SubstConstants: a new value of this kind is not lifted to a constant: \
+                         {v:?}"
+                    )));
+                }
                 new_values.push(match Constant::try_from(v.clone()) {
                     Ok(c) => NewValue::Constant(c),
                     Err(e) => {
-                        // not a constant even with its `BigInt`s in range: the lift throws
-                        if Constant::try_from(with_bigints_in_range(v)).is_err() {
+                        // not a constant even with what only the writer refuses replaced:
+                        // the lift throws
+                        if Constant::try_from(with_writable_parts(v)).is_err() {
                             return Err(EvalError::Misc(e));
                         }
                         NewValue::Unwritable(e)
@@ -129,8 +142,8 @@ fn to_misc_err<T: core::fmt::Debug>(e: T) -> EvalError {
 enum NewValue {
     /// A constant
     Constant(Constant),
-    /// A constant on the JVM that its writer refuses: it holds a `BigInt` outside 256 bits.
-    /// The text is the refusal
+    /// A constant on the JVM that its writer refuses: it holds a `BigInt` outside 256 bits or
+    /// an `AvlTree` whose digest is not of bytes. The text is the refusal
     Unwritable(String),
 }
 
@@ -181,35 +194,153 @@ fn written_values(
     Ok((kept_positions, kept_constants))
 }
 
-/// The value with every `BigInt` outside the 256-bit range replaced by zero: what is left to
-/// refuse then is what sigmastate's lift itself refuses
-fn with_bigints_in_range(v: Value<'static>) -> Value<'static> {
+/// The value with every part that only sigmastate's WRITER refuses replaced by a stand-in the
+/// lift accepts: a `BigInt` outside the 256-bit range by zero, an `AvlTree` whose digest is not
+/// of bytes by the same tree with an empty digest of bytes. What the conversion to a constant
+/// still refuses then, the writer was not the one to refuse. The stand-in is never written:
+/// such a value is [`NewValue::Unwritable`] either way
+fn with_writable_parts(v: Value<'static>) -> Value<'static> {
     match v {
         Value::BigInt(b) if !fits_256_bits(&b) => Value::BigInt(num_bigint::BigInt::from(0)),
+        Value::AvlTree(t) if AvlTreeData::try_from((*t).clone()).is_err() => {
+            let mut t = *t;
+            t.digest = CollValue::Bytes(Arc::new([]));
+            Value::AvlTree(Box::new(t))
+        }
         Value::Pair(pair) => {
             let (l, r) = *pair;
-            Value::Pair(Box::new((
-                with_bigints_in_range(l),
-                with_bigints_in_range(r),
-            )))
+            Value::Pair(Box::new((with_writable_parts(l), with_writable_parts(r))))
         }
-        Value::Opt(opt) => Value::Opt(opt.map(|v| Box::new(with_bigints_in_range(*v)))),
-        Value::Coll(coll) => Value::Coll(coll_with_bigints_in_range(coll)),
+        Value::Opt(opt) => Value::Opt(opt.map(|v| Box::new(with_writable_parts(*v)))),
+        Value::Coll(coll) => Value::Coll(coll_with_writable_parts(coll)),
         other => other,
     }
 }
 
-fn coll_with_bigints_in_range(coll: CollValue<'static>) -> CollValue<'static> {
+fn coll_with_writable_parts(coll: CollValue<'static>) -> CollValue<'static> {
     match coll {
         CollValue::Generic { elem_tpe, items } => CollValue::Generic {
             elem_tpe,
-            items: items.iter().cloned().map(with_bigints_in_range).collect(),
+            items: items.iter().cloned().map(with_writable_parts).collect(),
         },
         CollValue::Pairs { ls, rs } => CollValue::Pairs {
-            ls: Arc::new(coll_with_bigints_in_range((*ls).clone())),
-            rs: Arc::new(coll_with_bigints_in_range((*rs).clone())),
+            ls: Arc::new(coll_with_writable_parts((*ls).clone())),
+            rs: Arc::new(coll_with_writable_parts((*rs).clone())),
         },
         other => other,
+    }
+}
+
+/// What `substConstants` lifts. sigmastate turns each new value into a constant with
+/// `liftToConstant`, a table of classes (v6.0.6 `Platform.scala:16-63`), and throws for a value
+/// the table has no arm for (`Extensions.scala:53-64`). Each row gives one new value for
+/// position 7 of a script whose only constant is at position 0, so nothing is written.
+/// Measured on the sigma-state 6.0.7 jars, cost included, also at a throw
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod lift_rows {
+    use crate::eval::test_util::{eval_body, innermost};
+    use crate::eval::EvalError;
+    use alloc::format;
+    use alloc::string::String;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
+
+    const V0: ErgoTreeVersion = ErgoTreeVersion::V0;
+    const V3: ErgoTreeVersion = ErgoTreeVersion::V3;
+
+    /// A tree constant: 1-byte keys, every operation allowed
+    const TREE: &str = "6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100";
+    /// The group's generator
+    const G: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// A tree with constant segregation whose one constant is [`TREE`] and whose root is the
+    /// placeholder
+    fn script() -> String {
+        format!("1001{TREE}7300")
+    }
+    /// `substConstants(script, Coll(7), Coll[item_type](item))`
+    fn subst(item_type: &str, item: &str) -> String {
+        let script = script();
+        format!(
+            "740e{:02x}{script}10010e8301{item_type}{item}",
+            script.len() / 2
+        )
+    }
+    /// `TREE.updateDigest(Coll[Int](1, 2))`: a tree only the writer refuses
+    fn tree_with_ints() -> String {
+        format!("dc640f{TREE}0110020204")
+    }
+
+    // a pair, an option and `Unit` have no arm: the lift throws before anything is
+    // substituted, also when the value holds a tree the writer alone would refuse
+    #[test]
+    fn a_value_the_jvms_table_has_no_arm_for_is_refused() {
+        let t = tree_with_ints();
+        let both: &[ErgoTreeVersion] = &[V0, V3];
+        // an option constant does not parse below tree version 3, and `Global.some` is a
+        // method of version 3
+        let v3: &[ErgoTreeVersion] = &[V3];
+        let rows: [(&str, String, &[ErgoTreeVersion], u64); 8] = [
+            ("62", "62".into(), both, 35),                   // ()
+            ("58", "580204".into(), both, 35),               // the constant (1, 2)
+            ("58", "860204020404".into(), both, 55),         // (1, 2) built by a node
+            ("3c6404", format!("8602{t}0402"), both, 104),   // (that tree, 1)
+            ("28", "280102".into(), v3, 35),                 // the constant Some(1)
+            ("28", "dc6a09dd01040204".into(), v3, 49),       // Global.some(1)
+            ("2464", format!("dc6a09dd01{TREE}64"), v3, 49), // Global.some(the tree)
+            ("2464", format!("dc6a09dd01{t}64"), v3, 98),    // Global.some(that tree)
+        ];
+        for (item_type, item, versions, cost) in rows {
+            for version in versions {
+                let body = subst(item_type, &item);
+                let (res, c) = eval_body(&body, *version);
+                assert!(res.is_err(), "{body}: {res:?}");
+                let e = res.unwrap_err();
+                assert!(matches!(innermost(&e), EvalError::Misc(_)), "{body}: {e:?}");
+                assert_eq!(c, cost, "{body}");
+            }
+        }
+    }
+
+    // every other kind is lifted and, at a position that holds no constant, leaves the script
+    // as it was; a pair or an option INSIDE a collection is lifted with the collection
+    #[test]
+    fn a_value_the_jvms_table_has_an_arm_for_is_lifted() {
+        let unchanged = Value::from(base16::decode(script().as_bytes()).unwrap());
+        let t = tree_with_ints();
+        let rows: [(&str, String, u64); 11] = [
+            ("01", "0101".into(), 235),      // true
+            ("02", "0201".into(), 235),      // 1.toByte
+            ("03", "0302".into(), 235),      // 1.toShort
+            ("04", "0402".into(), 235),      // 1
+            ("05", "0502".into(), 235),      // 1L
+            ("06", "060101".into(), 235),    // 1.toBigInt
+            ("07", format!("07{G}"), 235),   // a group element
+            ("08", format!("08cd{G}"), 235), // a sigma proposition
+            ("64", TREE.into(), 235),        // a tree
+            ("10", "100102".into(), 235),    // Coll[Int](1)
+            ("64", t.clone(), 284),          // the tree only the writer refuses
+        ];
+        for (item_type, item, cost) in rows {
+            for version in [V0, V3] {
+                let (res, c) = eval_body(&subst(item_type, &item), version);
+                assert_eq!(res.ok().as_ref(), Some(&unchanged), "{item}");
+                assert_eq!(c, cost, "{item}");
+            }
+        }
+        // Coll(Coll((that tree, 1))) at both versions, Coll(Coll(Some(that tree))) at version 3
+        let pairs = format!("83014c648602{t}0402");
+        for version in [V0, V3] {
+            let (res, c) = eval_body(&subst("0c4c64", &pairs), version);
+            assert_eq!(res.ok().as_ref(), Some(&unchanged), "{pairs}");
+            assert_eq!(c, 324, "{pairs}");
+        }
+        let options = format!("83012464dc6a09dd01{t}64");
+        let (res, c) = eval_body(&subst("0c2464", &options), V3);
+        assert_eq!(res.ok().as_ref(), Some(&unchanged), "{options}");
+        assert_eq!(c, 318, "{options}");
     }
 }
 
@@ -268,8 +399,9 @@ mod tests {
     use super::*;
     proptest! {
 
+        // a collection, which sigmastate's lift has an arm for; a pair it refuses (`lift_rows`)
         #[test]
-        fn eval_single_substitution(original in any::<((i32, i32), Vec<i64>)>(), new in any::<((i32, i32), Vec<i64>)>()) {
+        fn eval_single_substitution(original in any::<Vec<i64>>(), new in any::<Vec<i64>>()) {
             test_single_substitution(original, new);
         }
 

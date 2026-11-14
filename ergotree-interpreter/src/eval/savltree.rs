@@ -14,6 +14,7 @@ use ergo_avltree_rust::operation::KeyValue;
 use ergo_avltree_rust::operation::Operation;
 use ergotree_ir::mir::avl_tree_data::AvlTreeData;
 use ergotree_ir::mir::avl_tree_data::AvlTreeFlags;
+use ergotree_ir::mir::avl_tree_data::AvlTreeValue;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
@@ -74,20 +75,15 @@ fn bytes_of(v: Value<'_>) -> Result<Bytes, EvalError> {
     Ok(Bytes::from(v.try_extract_into::<Vec<u8>>()?))
 }
 
-/// Build the batch AVL verifier for `avl_tree_data` over `proof`, charging the
-/// proof-size-scaled construction cost: `CreateAvlVerifier_Info` =
-/// PerItemCost(110, 20, 64) per proof byte (Scala `CErgoTreeEvaluator.createVerifier`
-/// — "the cost of tree reconstruction from proof is O(proof.length)").
-///
-/// The proof comes as the argument's VALUE, which the call has checked to be a collection:
-/// sigmastate adds the cost over the collection's length and builds the verifier inside that
-/// block, where the array is cast to bytes (`CErgoTreeEvaluator.scala:71-75`). So a proof of
-/// another item type has paid for the verifier before it is refused.
-fn create_verifier(
+/// What the verifier is built from. sigmastate adds the verifier's cost over the proof's length
+/// (`CreateAvlVerifier_Info`, `CErgoTreeEvaluator.scala:71-75`), then casts the proof's array
+/// and then the digest's to bytes (`CAvlTreeVerifier.scala:57-59`): a tree whose digest is
+/// another collection fails here, after the charge
+fn verifier_inputs(
     ctx: &Context,
-    avl_tree_data: &AvlTreeData,
+    tree: AvlTreeValue<'_>,
     proof: Value,
-) -> Result<BatchAVLVerifier, EvalError> {
+) -> Result<(AvlTreeData, Bytes), EvalError> {
     let proof_len = match &proof {
         Value::Coll(coll) => coll.len(),
         _ => {
@@ -97,7 +93,15 @@ fn create_verifier(
         }
     };
     ctx.add_per_item_jit_cost(110, 20, 64, proof_len as u32)?;
-    let proof = &Bytes::from(proof.try_extract_into::<Vec<u8>>()?);
+    let proof = Bytes::from(proof.try_extract_into::<Vec<u8>>()?);
+    Ok((AvlTreeData::try_from(tree)?, proof))
+}
+
+/// Build the batch AVL verifier for `avl_tree_data` over `proof`
+fn create_verifier(
+    avl_tree_data: &AvlTreeData,
+    proof: &Bytes,
+) -> Result<BatchAVLVerifier, EvalError> {
     let starting_digest = Bytes::from(avl_tree_data.digest.clone());
     BatchAVLVerifier::new(
         &starting_digest,
@@ -117,76 +121,75 @@ fn create_verifier(
 }
 
 pub(crate) static DIGEST_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Coll(CollValue::Bytes(
-        avl_tree_data.digest.iter().map(|&b| b as i8).collect(),
-    )))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Coll(tree.digest))
 };
 
 pub(crate) static ENABLED_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Byte(avl_tree_data.tree_flags.serialize() as i8))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Byte(tree.tree_flags.serialize() as i8))
 };
 
 pub(crate) static KEY_LENGTH_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Int(avl_tree_data.key_length as i32))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Int(tree.key_length as i32))
 };
 
 pub(crate) static VALUE_LENGTH_OPT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
     Ok(Value::Opt(
-        avl_tree_data
-            .value_length_opt
+        tree.value_length_opt
             .map(|v| Value::Int(*v as i32))
             .map(Box::new),
     ))
 };
 
 pub(crate) static IS_INSERT_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Boolean(avl_tree_data.tree_flags.insert_allowed()))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Boolean(tree.tree_flags.insert_allowed()))
 };
 
 pub(crate) static IS_UPDATE_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Boolean(avl_tree_data.tree_flags.update_allowed()))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Boolean(tree.tree_flags.update_allowed()))
 };
 
 pub(crate) static IS_REMOVE_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Boolean(avl_tree_data.tree_flags.remove_allowed()))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Boolean(tree.tree_flags.remove_allowed()))
 };
 
 pub(crate) static UPDATE_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let mut tree = obj.try_extract_into::<AvlTreeValue>()?;
     let new_operations = {
         let v = args.first().cloned().ok_or_else(|| {
             EvalError::AvlTree("eval is missing first arg (new_operations)".to_string())
         })?;
         v.try_extract_into::<i8>()? as u8
     };
-    avl_tree_data.tree_flags = AvlTreeFlags::parse(new_operations);
-    Ok(Value::AvlTree(Box::new(avl_tree_data)))
+    tree.tree_flags = AvlTreeFlags::parse(new_operations);
+    Ok(Value::AvlTree(Box::new(tree)))
 };
 
 pub(crate) static UPDATE_DIGEST_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    // `CAvlTree.updateDigest` stores the new digest with no length check; mirror
-    // that — accept any-length `Coll[Byte]`. A non-33 digest exists only in
-    // memory (it cannot round-trip through serialization), same as the reference.
-    let new_digest = {
-        let v = args.first().cloned().ok_or_else(|| {
-            EvalError::AvlTree("eval is missing first arg (new_digest)".to_string())
-        })?;
-        v.try_extract_into::<Vec<u8>>()?
+    let mut tree = obj.try_extract_into::<AvlTreeValue>()?;
+    // `CAvlTree.updateDigest` copies its argument into the tree data unread
+    // (`CAvlTree.scala:31-34`), and the call asks only for a collection
+    // (`ReflectionData.scala:258-259`): any collection is kept as it is
+    let new_digest = match args.first().cloned() {
+        Some(Value::Coll(coll)) => coll,
+        other => {
+            return Err(EvalError::UnexpectedValue(format!(
+                "updateDigest: expected a collection, found {other:?}"
+            )))
+        }
     };
-    avl_tree_data.digest = new_digest;
-    Ok(Value::AvlTree(Box::new(avl_tree_data)))
+    tree.digest = new_digest;
+    Ok(Value::AvlTree(Box::new(tree)))
 };
 
 pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
     let key = args
         .first()
         .cloned()
@@ -196,7 +199,8 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: a proof that
         // does not match the tree digest yields a verifier with no reconstructed
@@ -233,7 +237,7 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 };
 
 pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     let keys =
         coll_items(args.first().cloned().ok_or_else(|| {
@@ -244,7 +248,8 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: lookups
         // fail on the no-tree verifier, so the first key raises the same
@@ -303,11 +308,11 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 };
 
 pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     // Flag-check cost: `isInsertAllowed_Info` = FixedCost(15) (Scala `insert_eval`).
     ctx.add_jit_cost(15)?;
-    if !avl_tree_data.tree_flags.insert_allowed() {
+    if !tree.tree_flags.insert_allowed() {
         return Ok(Value::Opt(None));
     }
 
@@ -321,7 +326,8 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (mut avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: every
         // insert fails on the no-tree verifier, which pre-v3 raises at the
@@ -379,18 +385,18 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Value::Opt(Some(Box::new(Value::AvlTree(avl_tree_data.into()))))
+        Value::Opt(Some(Box::new(Value::from(avl_tree_data))))
     } else {
         Value::Opt(None)
     })
 };
 
 pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     // Flag-check cost: `isRemoveAllowed_Info` = FixedCost(15) (Scala `remove_eval`).
     ctx.add_jit_cost(15)?;
-    if !avl_tree_data.tree_flags.remove_allowed() {
+    if !tree.tree_flags.remove_allowed() {
         return Ok(Value::Opt(None));
     }
 
@@ -405,7 +411,8 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (mut avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: every
         // remove fails on the no-tree verifier (op results are ignored —
@@ -446,16 +453,14 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Ok(Value::Opt(Some(Box::new(Value::AvlTree(
-            avl_tree_data.into(),
-        )))))
+        Ok(Value::Opt(Some(Box::new(Value::from(avl_tree_data)))))
     } else {
         Ok(Value::Opt(None))
     }
 };
 
 pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
     let key = args
         .first()
         .cloned()
@@ -466,7 +471,8 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: the lookup
         // fails on the no-tree verifier and `contains_eval` maps the failure to
@@ -496,11 +502,11 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 };
 
 pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     // Flag-check cost: `isUpdateAllowed_Info` = FixedCost(15) (Scala `update_eval`).
     ctx.add_jit_cost(15)?;
-    if !avl_tree_data.tree_flags.update_allowed() {
+    if !tree.tree_flags.update_allowed() {
         return Ok(Value::Opt(None));
     }
 
@@ -514,7 +520,8 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (mut avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: every
         // update fails on the no-tree verifier (`update_eval`'s forall
@@ -556,20 +563,20 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Value::Opt(Some(Value::AvlTree(avl_tree_data.into()).into()))
+        Value::Opt(Some(Value::from(avl_tree_data).into()))
     } else {
         Value::Opt(None)
     })
 };
 
 pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     // Flag-check costs: `isUpdateAllowed_Info` + `isInsertAllowed_Info` =
     // FixedCost(15) each (Scala `insertOrUpdate_eval` charges both).
     ctx.add_jit_cost(15)?;
     ctx.add_jit_cost(15)?;
-    if !avl_tree_data.tree_flags.insert_allowed() || !avl_tree_data.tree_flags.update_allowed() {
+    if !tree.tree_flags.insert_allowed() || !tree.tree_flags.update_allowed() {
         return Ok(Value::Opt(None));
     }
 
@@ -583,7 +590,8 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (mut avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: with a proof
         // that does not match the tree digest it yields a verifier with no
@@ -626,7 +634,7 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Value::Opt(Some(Box::new(Value::AvlTree(avl_tree_data.into()))))
+        Value::Opt(Some(Box::new(Value::from(avl_tree_data))))
     } else {
         Value::Opt(None)
     })
@@ -883,7 +891,10 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest.0.to_vec());
+                assert_eq!(
+                    Value::Coll(avl.digest.clone()),
+                    Value::from(final_digest.0.to_vec())
+                );
             } else {
                 unreachable!();
             }
@@ -976,7 +987,10 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest.0.to_vec());
+                assert_eq!(
+                    Value::Coll(avl.digest.clone()),
+                    Value::from(final_digest.0.to_vec())
+                );
             } else {
                 unreachable!();
             }
@@ -1259,7 +1273,7 @@ mod tests {
             .into();
             let res = eval_out_wo_ctx::<Value>(&expr);
             if let Value::AvlTree(a) = res {
-                assert_eq!(a.digest, new_digest.0.to_vec());
+                assert_eq!(Value::Coll(a.digest.clone()), Value::from(new_digest.0.to_vec()));
             } else {
                 unreachable!();
             }
@@ -1392,7 +1406,10 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest.0.to_vec());
+                assert_eq!(
+                    Value::Coll(avl.digest.clone()),
+                    Value::from(final_digest.0.to_vec())
+                );
             } else {
                 unreachable!();
             }
@@ -1465,7 +1482,10 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest.0.to_vec());
+                assert_eq!(
+                    Value::Coll(avl.digest.clone()),
+                    Value::from(final_digest.0.to_vec())
+                );
             } else {
                 unreachable!();
             }
@@ -2455,6 +2475,585 @@ mod charge_order {
             };
             assert!(as_expected, "{body}: expected {expected:?}, got {res:?}");
             assert_eq!(c, cost, "{body}");
+        }
+    }
+}
+
+/// A runtime tree keeps the collection `updateDigest` was given (`CAvlTree.scala:31-34` copies
+/// the argument unread), and fails only where sigmastate casts the digest's array to bytes:
+/// the verifier's construction (`CAvlTreeVerifier.scala:59`) and the data writer
+/// (`AvlTreeData.scala:75`). Every row is measured on the sigma-state 6.0.7 jars, cost
+/// included, also at a throw; a row never wraps a call that fails in a node of its own
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod digest_collection {
+    use crate::eval::test_util::{eval_body, eval_body_err, innermost};
+    use crate::eval::EvalError;
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
+
+    const V0: ErgoTreeVersion = ErgoTreeVersion::V0;
+    const V3: ErgoTreeVersion = ErgoTreeVersion::V3;
+
+    /// The digest of a tree that holds {1: 10, 2: 20} under 1-byte keys; the proofs below are
+    /// valid for it (the tests' prover)
+    const DIGEST: &str = "15cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02";
+    const P_L1: &str = "0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402";
+    const P_L12: &str = "0e420385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a02ff00000008000000000000001400010402";
+    const P_I: &str = "0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400";
+    const P_U: &str = "0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a02010200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402";
+    const P_R: &str = "0e3a02000100000000020200000008000000000000000a03fc29fc93353c639f7cf275ea69851dfa41d720ed53bcc9c10bda17166966d5ed00010402";
+    const P_IU: &str = "0e550385ab460a6564d1e5ded17716cd5866650d7fbb9cada7fecabd5fe21e2f80e43a039d4d9434aa05d4dc888d939d6771fe05418df5bd91101dbe63384514c1869e140202ff00000008000000000000001400010400";
+    /// `Coll[Byte](1)`, `Coll[Coll[Byte]]([1], [2])`, `Coll[Coll[Byte]]([1])`
+    const KEY: &str = "0e0101";
+    const KEYS12: &str = "1a0201010102";
+    const KEYS1: &str = "1a010101";
+
+    const INTS: &str = "10020204"; // Coll[Int](1, 2)
+    const TUPLE3BYTE: &str = "48020202010203"; // (1.toByte, 2.toByte, 3.toByte): a Coll[Any]
+    const PAIRS: &str = "0c58010204"; // Coll((1, 2)): the two sides
+    const PAIRS_NODE: &str = "830158860204020404"; // the same built by a node
+
+    /// The tree constant, with every operation allowed or none
+    fn tree() -> String {
+        format!("64{DIGEST}070100")
+    }
+    fn tree_flags_off() -> String {
+        format!("64{DIGEST}000100")
+    }
+    /// The tree's own digest as a `Coll[Byte]` constant
+    fn own() -> String {
+        format!("0e21{DIGEST}")
+    }
+    /// `Coll[Byte]` of `n` ones
+    fn bytes(n: usize) -> String {
+        let len = if n < 128 {
+            format!("{n:02x}")
+        } else {
+            format!("{:02x}{:02x}", (n & 0x7f) | 0x80, n >> 7)
+        };
+        format!("0e{len}{}", "01".repeat(n))
+    }
+    /// Every collection the rows give `updateDigest`, with its length
+    fn collections() -> Vec<(String, i32)> {
+        let mut all: Vec<(String, i32)> = [0usize, 1, 2, 32, 33, 34, 100, 200]
+            .iter()
+            .map(|n| (bytes(*n), *n as i32))
+            .collect();
+        all.push((own(), 33));
+        for (c, len) in [
+            (INTS, 2),
+            ("11020204", 2),       // Coll[Long](1, 2)
+            ("0f020204", 2),       // Coll[Short](1, 2)
+            ("0d0101", 1),         // Coll[Boolean](true)
+            ("1a010101", 1),       // Coll[Coll[Byte]]([1])
+            ("48040404020406", 3), // (1, 2, 3)
+            (TUPLE3BYTE, 3),
+            (PAIRS, 1),
+        ] {
+            all.push((c.into(), len));
+        }
+        all.push((format!("1021{}", "02".repeat(33)), 33)); // Coll[Int] of 33 ones
+        all.push((format!("6021{}{}", "02".repeat(33), "01".repeat(33)), 33)); // a tuple of 33 bytes
+        all.push((format!("0c6401{DIGEST}070100"), 1)); // Coll[AvlTree](the tree)
+        all
+    }
+    fn upd(tree: &str, digest: &str) -> String {
+        format!("dc640f{tree}01{digest}")
+    }
+    fn prop(id: u8, tree: &str) -> String {
+        format!("db64{id:02x}{tree}")
+    }
+    fn call(id: u8, tree: &str, args: &[&str]) -> String {
+        format!("dc64{id:02x}{tree}{:02x}{}", args.len(), args.concat())
+    }
+    fn size(e: &str) -> String {
+        format!("b1{e}")
+    }
+    fn is_defined(e: &str) -> String {
+        format!("e6{e}")
+    }
+    fn serialize(e: &str) -> String {
+        format!("dc6a03dd01{e}")
+    }
+    fn eq(a: &str, b: &str) -> String {
+        format!("93{a}{b}")
+    }
+    fn coll_of_trees(trees: &[&str]) -> String {
+        format!("83{:02x}64{}", trees.len(), trees.concat())
+    }
+    fn entries(key: u8, value: u8) -> String {
+        format!("0c3c0e0e0101{key:02x}08{value:016x}")
+    }
+    /// The seven data methods on `tree` with the fixture's arguments and `proof` (the valid
+    /// one where `None`): the call, and the call under a node that makes its value plain
+    fn data_calls(tree: &str, proof: Option<&str>) -> Vec<(&'static str, String, String)> {
+        let p = |valid: &'static str| proof.unwrap_or(valid);
+        let (e330, e111) = (entries(3, 30), entries(1, 11));
+        let contains = call(9, tree, &[KEY, p(P_L1)]);
+        let get = call(10, tree, &[KEY, p(P_L1)]);
+        let get_many = call(11, tree, &[KEYS12, p(P_L12)]);
+        let insert = call(12, tree, &[&e330, p(P_I)]);
+        let update = call(13, tree, &[&e111, p(P_U)]);
+        let remove = call(14, tree, &[KEYS1, p(P_R)]);
+        let insert_or_update = call(16, tree, &[&e330, p(P_IU)]);
+        alloc::vec![
+            ("contains", contains.clone(), contains),
+            ("get", get.clone(), is_defined(&get)),
+            ("getMany", get_many.clone(), size(&get_many)),
+            ("insert", insert.clone(), is_defined(&insert)),
+            ("update", update.clone(), is_defined(&update)),
+            ("remove", remove.clone(), is_defined(&remove)),
+            (
+                "insertOrUpdate",
+                insert_or_update.clone(),
+                is_defined(&insert_or_update)
+            ),
+        ]
+    }
+    fn value_and_cost(body: &str, version: ErgoTreeVersion) -> (Value<'static>, u64) {
+        let (res, cost) = eval_body(body, version);
+        assert!(res.is_ok(), "{body}: {res:?}");
+        (res.unwrap(), cost)
+    }
+    /// The error under the span wrappers, and the cost counter where the evaluation stopped
+    fn error_and_cost(body: &str, version: ErgoTreeVersion) -> (EvalError, u64) {
+        let (res, cost) = eval_body(body, version);
+        assert!(res.is_err(), "{body}: {res:?}");
+        (innermost(&res.unwrap_err()).clone(), cost)
+    }
+
+    // `updateDigest` keeps any collection, and `digest` hands it back as it is
+    #[test]
+    fn update_digest_keeps_the_collection_it_is_given() {
+        for (c, len) in collections() {
+            let t = upd(&tree(), &c);
+            for version in [V0, V3] {
+                assert_eq!(
+                    value_and_cost(&size(&prop(1, &t)), version),
+                    (Value::Int(len), 87),
+                    "{c}"
+                );
+                assert_eq!(
+                    value_and_cost(&prop(3, &t), version),
+                    (Value::Int(1), 73),
+                    "{c}"
+                );
+                let (given, _) = value_and_cost(&c, version);
+                assert_eq!(value_and_cost(&prop(1, &t), version), (given, 73), "{c}");
+            }
+        }
+    }
+
+    // the call's class check is where it was: an argument that is no collection
+    #[test]
+    fn an_argument_that_is_no_collection_is_refused_at_the_call() {
+        // an Int, the pair (1, 2), a tree, a Boolean
+        for arg in ["0402", "580204", &tree(), "0101"] {
+            for version in [V0, V3] {
+                let (e, cost) = error_and_cost(&prop(3, &upd(&tree(), arg)), version);
+                assert!(matches!(e, EvalError::UnexpectedValue(_)), "{arg}: {e:?}");
+                assert_eq!(cost, 54, "{arg}");
+            }
+        }
+    }
+
+    // nothing but the verifier and the writer reads the digest
+    #[test]
+    fn the_other_readers_do_not_look_at_the_digest() {
+        for (c, len) in [(INTS, 2), (TUPLE3BYTE, 3), (&*bytes(2), 2)] {
+            let t = upd(&tree(), c);
+            let no_ops = call(8, &t, &["0200"]); // updateOperations(0)
+            for (body, expected) in [
+                (prop(2, &t), (Value::Byte(7), 73)),
+                (is_defined(&prop(4, &t)), (Value::Boolean(false), 83)),
+                (prop(5, &t), (Value::Boolean(true), 73)),
+                (prop(6, &t), (Value::Boolean(true), 73)),
+                (prop(7, &t), (Value::Boolean(true), 73)),
+                (size(&prop(1, &no_ops)), (Value::Int(len), 141)),
+                (prop(5, &no_ops), (Value::Boolean(false), 127)),
+                (prop(6, &no_ops), (Value::Boolean(false), 127)),
+                (prop(7, &no_ops), (Value::Boolean(false), 127)),
+                (size(&prop(1, &upd(&t, &bytes(33)))), (Value::Int(33), 136)),
+                // the tree's own digest again: its proofs verify
+                (
+                    call(9, &upd(&t, &own()), &[KEY, P_L1]),
+                    (Value::Boolean(true), 327),
+                ),
+            ] {
+                assert_eq!(value_and_cost(&body, V3), expected, "{body}");
+            }
+        }
+    }
+
+    // sigmastate adds the verifier's cost over the proof's length, then casts the proof's
+    // array and then the digest's (`CErgoTreeEvaluator.scala:71-75`,
+    // `CAvlTreeVerifier.scala:57-59`); a modifying method has read its flag before
+    #[test]
+    fn a_data_method_casts_the_digest_after_the_verifiers_charge() {
+        let trees = format!("0c6401{DIGEST}070100");
+        // with the fixture's valid proof, with an empty one, with a `Coll[Int](1)`
+        let costs: [(&str, u64, u64); 7] = [
+            ("contains", 218, 198),
+            ("get", 218, 198),
+            ("getMany", 218, 198),
+            ("insert", 233, 213),
+            ("update", 233, 213),
+            ("remove", 213, 213),
+            ("insertOrUpdate", 248, 228),
+        ];
+        for digest in [INTS, TUPLE3BYTE, PAIRS, &trees] {
+            let t = upd(&tree(), digest);
+            for (proof, column) in [(None, 0), (Some("0e00"), 1), (Some("100102"), 1)] {
+                for ((name, body, _), row) in data_calls(&t, proof).into_iter().zip(costs) {
+                    let cost = if column == 0 { row.1 } else { row.2 };
+                    let (e, c) = eval_body_err(&body);
+                    assert!(
+                        matches!(e, EvalError::TryExtractFrom(_)),
+                        "{name} {digest}: {e:?}"
+                    );
+                    assert_eq!(c, cost, "{name} {digest} {proof:?}");
+                    // the same below tree version 3, where `insertOrUpdate` is no method
+                    if name != "insertOrUpdate" && digest == INTS {
+                        let (e, c) = error_and_cost(&body, V0);
+                        assert!(
+                            matches!(e, EvalError::TryExtractFrom(_)),
+                            "{name} v0: {e:?}"
+                        );
+                        assert_eq!(c, cost, "{name} v0 {proof:?}");
+                    }
+                }
+            }
+        }
+        // a flag that is off answers before the verifier is built
+        let off = upd(&tree_flags_off(), INTS);
+        for ((name, _, plain), cost) in data_calls(&off, None)
+            .into_iter()
+            .skip(3)
+            .zip([93, 93, 93, 108])
+        {
+            assert_eq!(
+                value_and_cost(&plain, V3),
+                (Value::Boolean(false), cost),
+                "{name}"
+            );
+        }
+        // the controls: the tree's own digest stored again
+        let own_again = upd(&tree(), &own());
+        let controls = [
+            (Value::Boolean(true), 278),
+            (Value::Boolean(true), 288),
+            (Value::Int(2), 352),
+            (Value::Boolean(true), 343),
+            (Value::Boolean(true), 443),
+            (Value::Boolean(true), 408),
+            (Value::Boolean(true), 458),
+        ];
+        for ((name, _, plain), expected) in data_calls(&own_again, None).into_iter().zip(controls) {
+            assert_eq!(value_and_cost(&plain, V3), expected, "{name}");
+        }
+    }
+
+    // sigmastate's comparer adds the one fixed cost of a tree and calls the case class's `==`
+    // (`DataValueComparer.scala:363-366`), which compares the digests with the collection's own
+    // `equals`, whatever they hold and however deep
+    #[test]
+    fn two_trees_are_equal_when_their_digests_are() {
+        let trees = format!("0c6401{DIGEST}070100");
+        let b3 = "0e03010203";
+        let rows: [(&str, &str, bool); 24] = [
+            (INTS, INTS, true),
+            (INTS, "10020206", false), // Coll[Int](1, 3)
+            (INTS, "11020204", false), // Coll[Long](1, 2)
+            (INTS, "0f020204", false), // Coll[Short](1, 2)
+            (INTS, "0e020102", false), // Coll[Byte](1, 2)
+            ("0e020102", INTS, false),
+            (b3, TUPLE3BYTE, false),
+            (TUPLE3BYTE, b3, false),
+            (TUPLE3BYTE, TUPLE3BYTE, true),
+            ("48040404020406", "1003020406", false), // (1, 2, 3) against Coll[Int](1, 2, 3)
+            ("1003020406", "48040404020406", false),
+            ("48040404020406", "48040404020406", true),
+            ("48040404020406", TUPLE3BYTE, false),
+            (PAIRS, PAIRS, true),
+            (&trees, &trees, true),
+            ("1a010101", "1a010101", true),
+            ("0d0101", "0d0101", true),
+            ("0e020102", "0e020102", true),
+            ("0e020102", &bytes(33), false),
+            ("0e00", "0e00", true),
+            (&format!("1021{}", "02".repeat(33)), &bytes(33), false),
+            (INTS, &own(), false),
+            (&own(), INTS, false),
+            (&own(), &own(), true),
+        ];
+        for (a, b, equal) in rows {
+            let body = eq(&upd(&tree(), a), &upd(&tree(), b));
+            for version in [V0, V3] {
+                assert_eq!(
+                    value_and_cost(&body, version),
+                    (Value::Boolean(equal), 114),
+                    "{a} {b}"
+                );
+            }
+        }
+        let (ints, longs) = (upd(&tree(), INTS), upd(&tree(), "11020204"));
+        for version in [V0, V3] {
+            for (body, expected) in [
+                // against the tree as it was, and against other flags
+                (eq(&tree(), &ints), (Value::Boolean(false), 65)),
+                (eq(&ints, &tree()), (Value::Boolean(false), 65)),
+                (
+                    eq(&tree(), &upd(&tree(), &own())),
+                    (Value::Boolean(true), 65),
+                ),
+                (
+                    eq(&ints, &upd(&tree_flags_off(), INTS)),
+                    (Value::Boolean(false), 114),
+                ),
+                // a collection of pairs as a constant and built by a node
+                (
+                    eq(&upd(&tree(), PAIRS), &upd(&tree(), PAIRS_NODE)),
+                    (Value::Boolean(true), 154),
+                ),
+                (
+                    eq(&upd(&tree(), PAIRS_NODE), &upd(&tree(), PAIRS)),
+                    (Value::Boolean(true), 154),
+                ),
+                // trees inside a collection and a pair
+                (
+                    eq(&coll_of_trees(&[&ints]), &coll_of_trees(&[&ints])),
+                    (Value::Boolean(true), 169),
+                ),
+                (
+                    eq(&coll_of_trees(&[&ints]), &coll_of_trees(&[&longs])),
+                    (Value::Boolean(false), 169),
+                ),
+                (
+                    eq(&format!("8602{ints}0402"), &format!("8602{ints}0402")),
+                    (Value::Boolean(true), 161),
+                ),
+                (
+                    eq(&format!("8602{ints}0402"), &format!("8602{longs}0402")),
+                    (Value::Boolean(false), 158),
+                ),
+                // indexOf goes through the comparer
+                (
+                    format!("dc0c1a{}02{longs}0400", coll_of_trees(&[&ints, &longs])),
+                    (Value::Int(1), 233),
+                ),
+                (
+                    format!("dc0c1a{}02{ints}0400", coll_of_trees(&[&ints, &longs])),
+                    (Value::Int(0), 227),
+                ),
+                (
+                    format!(
+                        "dc0c1a{}02{}0400",
+                        coll_of_trees(&[&upd(&tree(), "0e020102"), &ints]),
+                        tree()
+                    ),
+                    (Value::Int(-1), 184),
+                ),
+            ] {
+                assert_eq!(value_and_cost(&body, version), expected, "{body}");
+            }
+        }
+        // `!=`, and `startsWith` (from tree version 3), which compares items by their own `equals`
+        for (body, expected) in [
+            (format!("94{ints}{ints}"), (Value::Boolean(false), 114)),
+            (format!("94{ints}{longs}"), (Value::Boolean(true), 114)),
+            (
+                format!(
+                    "dc0c1f{}01{}",
+                    coll_of_trees(&[&ints, &longs]),
+                    coll_of_trees(&[&ints])
+                ),
+                (Value::Boolean(true), 217),
+            ),
+            (
+                format!(
+                    "dc0c1f{}01{}",
+                    coll_of_trees(&[&ints, &longs]),
+                    coll_of_trees(&[&longs])
+                ),
+                (Value::Boolean(false), 217),
+            ),
+        ] {
+            assert_eq!(value_and_cost(&body, V3), expected, "{body}");
+        }
+    }
+
+    // the data writer casts the digest's array before it writes anything of the tree
+    // (`AvlTreeData.scala:75`): `Global.serialize` has added the writer's start only
+    #[test]
+    fn the_writer_refuses_a_digest_that_is_not_bytes() {
+        for (c, _) in collections().into_iter().skip(9) {
+            let t = upd(&tree(), &c);
+            let (e, cost) = eval_body_err(&serialize(&t));
+            assert!(matches!(e, EvalError::UnexpectedValue(_)), "{c}: {e:?}");
+            assert_eq!(cost, 73, "{c}");
+            // inside a collection or a pair it is refused too. The cost counter there is not
+            // pinned: sigmastate has charged for what it wrote before the tree
+            for body in [
+                serialize(&coll_of_trees(&[&t])),
+                serialize(&coll_of_trees(&[&tree(), &t])),
+                serialize(&format!("8602{t}0402")),
+                serialize(&format!("86020402{t}")),
+            ] {
+                let (e, _) = eval_body_err(&body);
+                assert!(matches!(e, EvalError::UnexpectedValue(_)), "{body}: {e:?}");
+            }
+        }
+    }
+
+    // `substConstants` writes a new value only at a position that holds a constant
+    // (`ErgoTreeSerializer.scala:345-361`): a tree whose digest is not bytes fails there, and
+    // is carried unread anywhere else
+    #[test]
+    fn subst_constants_refuses_a_tree_only_where_it_writes_it() {
+        // a tree with one segregated constant, the tree, and the placeholder as its root
+        let script = format!("1001{}7300", tree());
+        let script_const = format!("0e{:02x}{script}", script.len() / 2);
+        let subst = |position: &str, t: &str| {
+            format!("74{script_const}1001{position}{}", coll_of_trees(&[t]))
+        };
+        let written = |digest: &str| -> Value<'static> {
+            let bytes = base16::decode(format!("100164{digest}0701007300").as_bytes()).unwrap();
+            Value::from(bytes)
+        };
+        for version in [V0, V3] {
+            // position 0 is written
+            for (c, digest) in [
+                (own(), DIGEST.into()),
+                (bytes(33), "01".repeat(33)),
+                (bytes(2), "01".repeat(2)),
+                (bytes(34), "01".repeat(34)),
+            ] {
+                let body = subst("00", &upd(&tree(), &c));
+                assert_eq!(
+                    value_and_cost(&body, version),
+                    (written(&digest), 284),
+                    "{c}"
+                );
+            }
+            for c in [INTS, TUPLE3BYTE] {
+                let (e, cost) = error_and_cost(&subst("00", &upd(&tree(), c)), version);
+                assert!(matches!(e, EvalError::Misc(_)), "{c}: {e:?}");
+                assert_eq!(cost, 84, "{c}");
+            }
+            // position 7 holds no constant: nothing is written
+            for c in [&*own(), &*bytes(2), INTS, TUPLE3BYTE] {
+                let body = subst("0e", &upd(&tree(), c));
+                assert_eq!(
+                    value_and_cost(&body, version),
+                    (written(DIGEST), 284),
+                    "{c}"
+                );
+            }
+            // a new value that HOLDS such a tree, a `Coll[AvlTree]`: carried unread at
+            // position 7, and at position 0 refused for its type before anything is written
+            for c in [&*own(), INTS, TUPLE3BYTE] {
+                let nested = format!("83010c64{}", coll_of_trees(&[&upd(&tree(), c)]));
+                let at = |position: &str| format!("74{script_const}1001{position}{nested}");
+                assert_eq!(
+                    value_and_cost(&at("0e"), version),
+                    (written(DIGEST), 304),
+                    "{c}"
+                );
+                let (e, cost) = error_and_cost(&at("00"), version);
+                assert!(matches!(e, EvalError::Misc(_)), "{c}: {e:?}");
+                assert_eq!(cost, 104, "{c}");
+            }
+        }
+    }
+
+    // what `digest` hands back is the collection that was stored, under the static type
+    // `Coll[Byte]`: each reader treats it as the collection it is (the collection model)
+    #[test]
+    fn the_digest_handed_back_is_the_collection_that_was_stored() {
+        let pair = Value::pair(Value::Int(1), Value::Int(2));
+        for (c, first, len) in [
+            (INTS, Value::Int(1), 2),
+            (TUPLE3BYTE, Value::Byte(1), 3),
+            (PAIRS, pair, 1),
+        ] {
+            let digest = prop(1, &upd(&tree(), c));
+            for (body, expected) in [
+                (format!("b2{digest}040000"), (first, 108)),
+                (eq(&digest, "0e020102"), (Value::Boolean(false), 79)),
+                (
+                    size(&prop(1, &upd(&tree_flags_off(), &digest))),
+                    (Value::Int(len), 155),
+                ),
+            ] {
+                assert_eq!(value_and_cost(&body, V3), expected, "{body}");
+            }
+            // as a proof, and appended to bytes on either side
+            let (e, cost) = eval_body_err(&call(9, &tree(), &[KEY, &digest]));
+            assert!(matches!(e, EvalError::TryExtractFrom(_)), "{c}: {e:?}");
+            assert_eq!(cost, 217, "{c}");
+            for body in [format!("b3{digest}0e020102"), format!("b30e020102{digest}")] {
+                let (e, cost) = eval_body_err(&body);
+                assert!(matches!(e, EvalError::UnexpectedValue(_)), "{body}: {e:?}");
+                assert_eq!(cost, 100, "{body}");
+            }
+        }
+    }
+
+    // a `Coll[Byte]` that a node builds is a digest of bytes like a constant
+    #[test]
+    fn a_byte_collection_built_by_a_node_is_a_digest_of_bytes() {
+        let digest = base16::decode(DIGEST.as_bytes()).unwrap();
+        let items: String = digest.iter().map(|b| format!("02{b:02x}")).collect();
+        let t = upd(&tree(), &format!("832102{items}"));
+        for (body, version, expected) in [
+            (call(9, &t, &[KEY, P_L1]), V3, (Value::Boolean(true), 458)),
+            (call(9, &t, &[KEY, P_L1]), V0, (Value::Boolean(true), 458)),
+            (eq(&t, &tree()), V3, (Value::Boolean(true), 245)),
+            (eq(&tree(), &t), V0, (Value::Boolean(true), 245)),
+            (
+                is_defined(&call(12, &t, &[&entries(3, 30), P_I])),
+                V3,
+                (Value::Boolean(true), 523),
+            ),
+        ] {
+            assert_eq!(value_and_cost(&body, version), expected, "{body}");
+        }
+    }
+
+    // the writer adds `PutChunkCost` over the digest's own length (`AvlTreeData.scala:75`,
+    // `SigmaByteWriter.scala:142-145`): a digest of n bytes costs n - 33 more than one of 33
+    #[test]
+    fn the_writer_charges_for_the_digests_length() {
+        assert_eq!(value_and_cost(&serialize(&tree()), V3).1, 62);
+        for n in [0usize, 1, 2, 32, 33, 34, 100, 200] {
+            let mut written = alloc::vec![1u8; n];
+            written.extend([7, 1, 0]);
+            assert_eq!(
+                value_and_cost(&serialize(&upd(&tree(), &bytes(n))), V3),
+                (Value::from(written), 78 + n as u64),
+                "{n}"
+            );
+        }
+        // inside a collection (alone, and after a plain tree) and a pair (first, second)
+        for (n, alone, second, in_pair) in [
+            (33usize, 134, 177, 134),
+            (2, 103, 146, 103),
+            (34, 135, 178, 135),
+        ] {
+            let t = upd(&tree(), &bytes(n));
+            for (body, cost) in [
+                (serialize(&coll_of_trees(&[&t])), alone),
+                (serialize(&coll_of_trees(&[&tree(), &t])), second),
+                (serialize(&format!("8602{t}0402")), in_pair),
+                (serialize(&format!("86020402{t}")), in_pair),
+            ] {
+                assert_eq!(value_and_cost(&body, V3).1, cost, "{body}");
+            }
         }
     }
 }
