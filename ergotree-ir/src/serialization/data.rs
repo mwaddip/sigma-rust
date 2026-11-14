@@ -3,7 +3,6 @@ use alloc::format;
 use ergo_chain_types::Header;
 use sigma_ser::ScorexSerializable;
 
-use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -32,6 +31,7 @@ use num_traits::Zero;
 
 use super::sigma_byte_writer::SigmaByteWrite;
 use super::types::TypeCode;
+use crate::serialization::jvm_string::jvm_string;
 use alloc::sync::Arc;
 
 /// Used to serialize and parse `Literal` and `Value`.
@@ -78,8 +78,10 @@ impl DataSerializer {
                 v.sigma_serialize(w)?;
             }
             Literal::String(s) => {
+                // the length is free: sigmastate writes it with `putUInt(length)`
+                // (`CoreDataSerializer.scala:31`), which the cost-counting writer hands to the
+                // inner writer without a cost (`SigmaByteWriter.scala:105-107`)
                 w.put_usize_as_u32_unwrapped(s.len())?;
-                w.add_put_numeric_cost();
                 w.write_all(s.as_bytes())?;
                 w.add_put_chunk_cost(s.len());
             }
@@ -240,7 +242,7 @@ impl DataSerializer {
                 r.check_remaining(len as usize)?;
                 let mut buf = vec![0; len as usize];
                 r.get_bytes_into(&mut buf)?;
-                Literal::String(String::from_utf8_lossy(&buf).into())
+                Literal::String(jvm_string(&buf).into())
             }
             SBigInt => Literal::BigInt(BigInt256::sigma_parse(r)?),
             SUnit => Literal::Unit,

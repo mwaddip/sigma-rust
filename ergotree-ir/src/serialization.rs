@@ -8,6 +8,7 @@ mod constant_placeholder;
 pub mod data;
 mod expr;
 mod global_vars;
+pub(crate) mod jvm_string;
 mod method_call;
 mod property_call;
 mod sigmaboolean;

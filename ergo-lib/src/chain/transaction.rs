@@ -953,6 +953,80 @@ mod tests {
         tx
     }
 
+    /// Each transaction has its twin's bytes to sign, its twin's id (the JVM's, as given) and
+    /// its twin's output, at tree versions 0 and 3. sigmastate keeps the TEXT of a `String` and
+    /// of a type variable's name, decoded by `new String(bytes, UTF_8)`, and writes the text
+    /// back, so malformed bytes are written as the text's own
+    fn assert_written_as_twins(rows: &[(Vec<u8>, Vec<u8>, &str)]) {
+        for version in [ErgoTreeVersion::V0, ErgoTreeVersion::V3] {
+            for (malformed, twin, id) in rows {
+                let read = parse_at(malformed, version).unwrap();
+                let read_twin = parse_at(twin, version).unwrap();
+                assert_eq!(&read.bytes_to_sign().unwrap(), twin, "{id}");
+                assert_eq!(read.id(), TxId(blake2b256_hash(twin)), "{id}");
+                assert_eq!(base16::encode_lower(read.id().as_ref()), *id);
+                assert_eq!(read_twin.id(), read.id(), "{id}");
+                assert_eq!(
+                    read.outputs.first().box_id(),
+                    read_twin.outputs.first().box_id(),
+                    "{id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_malformed_type_variable_name_is_written_as_the_jvm_writes_it() {
+        // sigma-state 6.0.7 (the round's `measure/rows/tx.txt`): an overlong name, `E0 80 80`, is
+        // three U+FFFD on the JVM
+        let hex = |s: &str| base16::decode(s.as_bytes()).unwrap();
+        assert_written_as_twins(&[
+            // in an output's tree, `sigmaProp(Coll[T]().size == 0)`
+            (
+                tx_bytes(&[0], &hex("00d193b183006703e080800400")),
+                tx_bytes(&[0], &hex("00d193b183006709efbfbdefbfbdefbfbd0400")),
+                "aa0ab95837b4c976dccd3fe5686fd5c7eb3e3829be08b7c4096157d660a72b65",
+            ),
+            // the same tree with its size
+            (
+                tx_bytes(&[0], &hex("080cd193b183006703e080800400")),
+                tx_bytes(&[0], &hex("0812d193b183006709efbfbdefbfbdefbfbd0400")),
+                "a03835575e1b248c623bb2fd2a6e151feb3f3bdb16d7e22244d05951bd6811cb",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_malformed_string_is_written_as_the_jvm_writes_it() {
+        // sigma-state 6.0.7 (the round's `measure/rows/tx.txt`): an encoded surrogate,
+        // `ED A0 80`, is one U+FFFD on the JVM
+        let (sur, repl) = (
+            [0x66, 0x03, 0xed, 0xa0, 0x80],
+            [0x66, 0x03, 0xef, 0xbf, 0xbd],
+        );
+        let hex = |s: &str| base16::decode(s.as_bytes()).unwrap();
+        assert_written_as_twins(&[
+            // in an output's R4
+            (
+                tx_with_r4(&sur),
+                tx_with_r4(&repl),
+                "5e2cec6f0eb46b55ca37a1b3f2cbd48c5e480648e0a353dbbfa5a4cdcc3525a1",
+            ),
+            // in a context extension value
+            (
+                tx_bytes(&[&[1, 0][..], &sur].concat(), &[0x00, 0x08, 0xd3]),
+                tx_bytes(&[&[1, 0][..], &repl].concat(), &[0x00, 0x08, 0xd3]),
+                "b1ca98ac374749fe25b46007abb66d4c7b35d05ce88fa46347b57396285f9237",
+            ),
+            // in an output's tree: `sigmaProp(Coll[String](..) == Coll[String](..))`
+            (
+                tx_bytes(&[0], &hex("00d1930c660103eda0800c660103efbfbd")),
+                tx_bytes(&[0], &hex("00d1930c660103efbfbd0c660103efbfbd")),
+                "ee6ae9ea55f417ff2071c433813f1cb9551d55c3fee42fb6ec890f95a739d86c",
+            ),
+        ]);
+    }
+
     #[test]
     fn a_transaction_is_read_and_its_id_written_at_its_reader_s_version() {
         // ergo reads a v6 block's transactions at version context (3, 3), and one from a peer

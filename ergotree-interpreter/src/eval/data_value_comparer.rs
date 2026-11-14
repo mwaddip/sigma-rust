@@ -378,6 +378,117 @@ mod tests {
     use sigma_test_util::force_any_val;
 
     #[test]
+    fn strings_compare_as_the_text_the_jvm_decodes() {
+        // sigma-state 6.0.7 (the round's `measure/rows/eval.txt`), the same at tree versions 0
+        // and 3. S is `ED A0 80`, an encoded surrogate: ONE U+FFFD on the JVM. R is a real
+        // U+FFFD. An operand of `==` that is of type `String` does not evaluate (sigmastate
+        // checks the operand's value against its type, and that check has no `String` case:
+        // the last row), so two strings are compared inside a collection, a pair or an option
+        use crate::eval::test_util::eval_body;
+        use ergotree_ir::ergo_tree::ErgoTreeVersion;
+        let item = |text: &str| {
+            let len = text.len() / 2;
+            if len < 0x80 {
+                alloc::format!("{len:02x}{text}")
+            } else {
+                alloc::format!("{:02x}{:02x}{text}", (len & 0x7f) | 0x80, len >> 7)
+            }
+        };
+        let coll = |text: &str| alloc::format!("0c6601{}", item(text));
+        let pair = |text: &str| alloc::format!("3c6604{}02", item(text));
+        let (s, r) = ("eda080", "efbfbd");
+        let rows = [
+            (alloc::format!("93{}{}", coll(r), coll(r)), true, 41),
+            (alloc::format!("93{}{}", coll("41"), coll("42")), false, 41),
+            (alloc::format!("93{}{}", coll(s), coll(r)), true, 41),
+            (
+                alloc::format!("93{}{}", coll(s), coll(&r.repeat(3))),
+                false,
+                24,
+            ),
+            (alloc::format!("93{}{}", coll(s), coll(s)), true, 41),
+            (
+                alloc::format!("93{}{}", coll(&s.repeat(40)), coll(&s.repeat(40))),
+                true,
+                41,
+            ),
+            (
+                alloc::format!("93{}{}", coll(&r.repeat(40)), coll(&r.repeat(40))),
+                true,
+                41,
+            ),
+            (
+                alloc::format!("93{}{}", coll(&r.repeat(120)), coll(&r.repeat(120))),
+                true,
+                43,
+            ),
+            (
+                alloc::format!("93{}{}", coll("e08080"), coll(&r.repeat(3))),
+                true,
+                41,
+            ),
+            (alloc::format!("93{}{}", coll("e08080"), coll(r)), false, 24),
+            (alloc::format!("94{}{}", coll(s), coll(r)), false, 41),
+            (alloc::format!("93{}{}", pair(s), pair(r)), true, 35),
+            (
+                alloc::format!("93{}{}", pair(s), pair(&r.repeat(3))),
+                false,
+                15,
+            ),
+            (alloc::format!("93{}{}", pair(r), pair(r)), true, 35),
+        ];
+        for version in [ErgoTreeVersion::V0, ErgoTreeVersion::V3] {
+            for (body, value, cost) in &rows {
+                let (res, c) = eval_body(body, version);
+                assert_eq!(res.unwrap(), Value::Boolean(*value), "{body}");
+                assert_eq!(c, *cost, "{body}");
+            }
+            let (res, c) = eval_body("936603efbfbd6603efbfbd", version);
+            assert!(res.is_err(), "{res:?}");
+            assert_eq!(c, 5);
+        }
+    }
+
+    #[test]
+    fn strings_of_other_producers_compare_as_the_text_the_jvm_decodes() {
+        // sigma-state 6.0.7 (the round's `measure/review/rows.txt`), S and R as above, each
+        // compared with R and with three R: an `Option[String]` constant (from tree version
+        // 3), `deserializeTo[Coll[String]]` of bytes the script holds (a version 3 method),
+        // and a `String` constant of a tree that `substConstants` writes again
+        use crate::eval::test_util::eval_body;
+        use ergotree_ir::ergo_tree::ErgoTreeVersion;
+        let (s, r, rrr) = ("03eda080", "03efbfbd", "09efbfbdefbfbdefbfbd");
+        let option = |l: &str, r: &str| alloc::format!("93246601{l}246601{r}");
+        let deserialized = |l: &str, r: &str| {
+            alloc::format!("93dc6a04dd010e{:02x}01{l}0c660c6601{r}", l.len() / 2 + 1)
+        };
+        let substituted = |l: &str, r: &str| {
+            let tree = |text: &str| alloc::format!("0e{:02x}100166{text}7300", text.len() / 2 + 5);
+            alloc::format!("93740e09100166{l}730010001000{}", tree(r))
+        };
+        let v3 = [ErgoTreeVersion::V3];
+        let both = [ErgoTreeVersion::V0, ErgoTreeVersion::V3];
+        let rows = [
+            (option(s, r), true, 32, &v3[..]),
+            (option(s, rrr), false, 15, &v3[..]),
+            (option(r, r), true, 32, &v3[..]),
+            (deserialized(s, r), true, 182, &v3[..]),
+            (deserialized(s, rrr), false, 165, &v3[..]),
+            (deserialized(r, r), true, 182, &v3[..]),
+            (substituted(s, r), true, 238, &both[..]),
+            (substituted(s, rrr), false, 221, &both[..]),
+            (substituted(r, r), true, 238, &both[..]),
+        ];
+        for (body, value, cost, versions) in &rows {
+            for version in *versions {
+                let (res, c) = eval_body(body, *version);
+                assert_eq!(res.unwrap(), Value::Boolean(*value), "{body}");
+                assert_eq!(c, *cost, "{body}");
+            }
+        }
+    }
+
+    #[test]
     fn primitive_eq_charges_prim_cost() {
         let ctx = force_any_val::<Context>();
         let before = ctx.jit_cost_value();

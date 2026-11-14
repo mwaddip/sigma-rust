@@ -1554,6 +1554,27 @@ mod tests {
     }
 
     #[test]
+    fn a_string_is_written_as_the_text_the_jvm_decodes() {
+        // sigma-state 6.0.7 (the round's `measure/rows/rt.txt`): `ED A0 80` is an encoded
+        // surrogate, one U+FFFD on the JVM, where `String::from_utf8_lossy` gives three
+        for (read, written) in [
+            ("6603eda080", "6603efbfbd"),
+            ("6603eda041", "6604efbfbd41"),
+            ("6603e08080", "6609efbfbdefbfbdefbfbd"),
+            ("6604f4908080", "660cefbfbdefbfbdefbfbdefbfbd"),
+            ("6603e282ac", "6603e282ac"),
+        ] {
+            let constant =
+                Constant::sigma_parse_bytes(&base16::decode(read.as_bytes()).unwrap()).unwrap();
+            assert_eq!(
+                base16::encode_lower(&constant.sigma_serialize_bytes().unwrap()),
+                written,
+                "{read}"
+            );
+        }
+    }
+
+    #[test]
     fn string_over_4096_bytes_roundtrips() {
         // the JVM's SString data has no length cap (sigmastate v6.0.6
         // `CoreDataSerializer.scala:104-110`); only a reader window bounds it
