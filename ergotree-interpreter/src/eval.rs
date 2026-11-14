@@ -75,6 +75,7 @@ pub(crate) mod option_get_or_else;
 pub(crate) mod option_is_defined;
 pub(crate) mod or;
 pub(crate) mod property_call;
+pub(crate) mod runtime_type;
 pub(crate) mod savltree;
 pub(crate) mod sbox;
 pub(crate) mod scoll;

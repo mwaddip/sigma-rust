@@ -120,6 +120,43 @@ impl SType {
         )
     }
 
+    /// Whether sigmastate's `stypeToRType` converts this type (v6.0.7 `Evaluation.scala`): every
+    /// type has an arm except a type variable, `NoType`, and a function type with other than one
+    /// argument or with type parameters, at any depth. Where sigmastate resolves the runtime
+    /// type of a type that has none it throws a `RuntimeException`, whatever it was about to do
+    /// with it.
+    pub fn has_runtime_type(&self) -> bool {
+        match self {
+            SType::STypeVar(_) | SType::SNoType => false,
+            SType::SColl(t) | SType::SOption(t) => t.has_runtime_type(),
+            SType::STuple(t) => t.items.iter().all(SType::has_runtime_type),
+            SType::SFunc(f) => {
+                f.t_dom.len() == 1
+                    && f.tpe_params.is_empty()
+                    && f.t_dom.iter().all(SType::has_runtime_type)
+                    && f.t_range.has_runtime_type()
+            }
+            SType::SAny
+            | SType::SUnit
+            | SType::SBoolean
+            | SType::SByte
+            | SType::SShort
+            | SType::SInt
+            | SType::SLong
+            | SType::SBigInt
+            | SType::SUnsignedBigInt
+            | SType::SGroupElement
+            | SType::SSigmaProp
+            | SType::SBox
+            | SType::SAvlTree
+            | SType::SContext
+            | SType::SString
+            | SType::SHeader
+            | SType::SPreHeader
+            | SType::SGlobal => true,
+        }
+    }
+
     pub(crate) fn check_v6_type(&self) -> Result<(), SigmaParsingError> {
         match self {
             SType::SUnsignedBigInt | SType::SOption(_) | SType::SHeader => {
@@ -396,5 +433,80 @@ mod no_type_tests {
     #[test]
     fn no_type_displays_as_no_type() {
         assert_eq!(format!("{}", SType::SNoType), "NoType");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod runtime_type_tests {
+    use super::*;
+    use crate::ergo_tree::ErgoTreeVersion;
+    use crate::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
+    use crate::serialization::SigmaSerializable;
+
+    fn tpe(hex: &str) -> SType {
+        let bytes = base16::decode(hex.as_bytes()).unwrap();
+        from_bytes(&bytes)
+            .with_tree_version(ErgoTreeVersion::V3, SType::sigma_parse)
+            .unwrap()
+    }
+
+    #[test]
+    fn the_types_stype_to_rtype_converts() {
+        // sigmastate 6.0.7 `Evaluation.stypeToRType`: each row measured on the jars as the
+        // item type of an empty `ConcreteCollection`; `NoType`, which has no bytes, by reading
+        // every type that is no type variable and has no parts: the 18 of them
+        for hex in [
+            "01", // Boolean
+            "02", // Byte
+            "03", // Short
+            "04", // Int
+            "05", // Long
+            "06", // BigInt
+            "07", // GroupElement
+            "08", // SigmaProp
+            "09", // UnsignedBigInt
+            "61", // Any
+            "62", // Unit
+            "63", // Box
+            "64", // AvlTree
+            "65", // Context
+            "66", // String
+            "68", // Header
+            "69", // PreHeader
+            "6a", // Global
+        ] {
+            assert!(tpe(hex).has_runtime_type(), "{hex}");
+        }
+        for hex in [
+            "10",               // Coll[Int]
+            "28",               // Option[Int]
+            "48040404",         // (Int, Int, Int)
+            "7001040400",       // Int => Int
+            "0c24407001040400", // Coll[Option[(Int, Int => Int)]]
+        ] {
+            assert!(tpe(hex).has_runtime_type(), "{hex}");
+        }
+        assert!(!SType::SNoType.has_runtime_type());
+        for hex in [
+            "670154",               // T
+            "0c670154",             // Coll[T]
+            "0c0c670154",           // Coll[Coll[T]]
+            "24670154",             // Option[T]
+            "3c67015404",           // (T, Int)
+            "40670154",             // (Int, T)
+            "480404670154",         // (Int, Int, T)
+            "0c480404670154",       // Coll[(Int, Int, T)]
+            "700204040400",         // (Int, Int) => Int
+            "70000400",             // () => Int
+            "7001040401670154",     // [T](Int) => Int
+            "7001040401670155",     // [U](Int) => Int
+            "70016701540400",       // T => Int
+            "70010467015400",       // Int => T
+            "0c700204040400",       // Coll[(Int, Int) => Int]
+            "0c244070016701540400", // Coll[Option[(Int, T => Int)]]
+        ] {
+            assert!(!tpe(hex).has_runtime_type(), "{hex}");
+        }
     }
 }

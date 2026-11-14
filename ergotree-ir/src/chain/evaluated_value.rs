@@ -114,11 +114,11 @@ impl EvaluatedValue {
     /// sigmastate's `stypeToRType(v.tpe)`, which fails for a type with no runtime form
     pub fn script_type(&self) -> Result<SType, TryExtractFromError> {
         let has_runtime_type = match self {
-            EvaluatedValue::Constant(c) => has_runtime_type(&c.tpe),
+            EvaluatedValue::Constant(c) => c.tpe.has_runtime_type(),
             EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => {
-                items.iter().all(|item| has_runtime_type(&item.tpe()))
+                items.iter().all(|item| item.tpe().has_runtime_type())
             }
-            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => has_runtime_type(&c.tpe()),
+            EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => c.tpe().has_runtime_type(),
             EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => true,
         };
         if !has_runtime_type {
@@ -127,23 +127,6 @@ impl EvaluatedValue {
             )));
         }
         Ok(self.tpe())
-    }
-}
-
-/// Whether sigmastate's `stypeToRType` converts `tpe` (v6.0.6 `Evaluation.scala:18-56`): not a
-/// type variable, nor a function of other than one argument or with type parameters
-fn has_runtime_type(tpe: &SType) -> bool {
-    match tpe {
-        SType::STypeVar(_) => false,
-        SType::SFunc(f) => {
-            f.t_dom.len() == 1
-                && f.tpe_params.is_empty()
-                && f.t_dom.iter().all(has_runtime_type)
-                && has_runtime_type(&f.t_range)
-        }
-        SType::SColl(elem) | SType::SOption(elem) => has_runtime_type(elem),
-        SType::STuple(t) => t.items.iter().all(has_runtime_type),
-        _ => true,
     }
 }
 
