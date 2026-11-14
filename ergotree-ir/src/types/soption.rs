@@ -31,6 +31,8 @@ pub const GET_OR_ELSE_METHOD_ID: MethodId = MethodId(4);
 // for `map`'s result (`tT`, `tR`, v6.0.7 `SType.scala:81-82`; `SOptionMethods`,
 // `methods.scala:727-`). The name decides whether a call specialises: see the `Coll` table
 // (`scoll.rs`).
+// A method's own type parameters are sigmastate's too (`with_tpe_params`). `isDefined` and
+// `get` have none there, though their signature names `T` (read from the 6.0.7 jars).
 lazy_static! {
     /// Option method descriptors
     pub(crate) static ref METHOD_DESC: Vec<SMethodDesc> =
@@ -71,7 +73,8 @@ lazy_static! {
         tpe: SFunc::new(vec![option_t(), STypeVar::t().into()], STypeVar::t().into()),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t()]);
     /// Option.isDefined
     pub static ref IS_DEFINED_METHOD: SMethod =
         SMethod::new(STypeCompanion::Option, IS_DEFINED_METHOD_DESC.clone());
@@ -98,7 +101,8 @@ lazy_static! {
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t(), STypeVar::r()]);
     /// Option.map
     pub static ref MAP_METHOD: SMethod = SMethod::new(
          STypeCompanion::Option,
@@ -121,7 +125,8 @@ lazy_static! {
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t()]);
     /// Option.map
     pub static ref FILTER_METHOD: SMethod = SMethod::new(
          STypeCompanion::Option,

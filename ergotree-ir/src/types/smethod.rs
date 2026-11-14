@@ -14,6 +14,7 @@ use super::sfunc::SFunc;
 use super::stype::SType;
 use super::stype::TypeSubstError;
 use super::stype_companion::STypeCompanion;
+use super::stype_param::STypeParam;
 use super::stype_param::STypeVar;
 use super::type_unify::unify_many;
 use crate::serialization::SigmaParsingError::UnknownMethodId;
@@ -189,6 +190,14 @@ impl SMethodDesc {
             min_version: ErgoTreeVersion::V0,
         }
     }
+    /// The method's own type parameters: the third argument of the `SFunc` sigmastate gives a
+    /// method (`paramIVSeq`, `Array(paramT)`, ...), in sigmastate's order. A substitution drops
+    /// the ones it names (`SFunc::with_subst`), as sigmastate's `applySubst` does
+    pub(crate) fn with_tpe_params(mut self, vars: Vec<STypeVar>) -> Self {
+        self.tpe.tpe_params = vars.into_iter().map(|ident| STypeParam { ident }).collect();
+        self
+    }
+
     pub(crate) fn as_method(&self, obj_type: STypeCompanion) -> SMethod {
         SMethod {
             obj_type,

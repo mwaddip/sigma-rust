@@ -177,7 +177,8 @@ lazy_static! {
         },
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t()]);
 }
 
 pub const GET_VAR_FROM_INPUT_METHOD_ID: MethodId = MethodId(12);
@@ -192,7 +193,8 @@ lazy_static! {
         },
         explicit_type_args: vec![STypeVar::t()],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+    .with_tpe_params(vec![STypeVar::t()]);
     pub static ref GET_VAR_FROM_INPUT_METHOD: SMethod = SMethod::new(
         STypeCompanion::Context,
         GET_VAR_FROM_INPUT_METHOD_DESC.clone()
