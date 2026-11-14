@@ -1319,6 +1319,43 @@ mod charge_order {
     // sigmastate's body adds its cost from the collection's LENGTH before it casts the array.
     // Measured on the sigma-state 6.0.7 jars.
 
+    // The data writer writes a `String`'s length with `putUInt(length)`
+    // (`CoreDataSerializer.scala:31`), the one numeric put of the cost-counting writer that
+    // adds nothing: it hands the number to the inner writer (`SigmaByteWriter.scala:105-107`).
+    // Only the text's bytes are paid for. Measured on the sigma-state 6.0.7 jars (the round's
+    // `measure/review/rows.txt`): each row is `Global.serialize(..) == <its bytes>`
+    #[test]
+    fn serialize_adds_nothing_for_the_length_of_a_string() {
+        for (body, value, cost) in [
+            // Coll[String](), ("A"), ("A", "B")
+            ("93dc6a03dd010c66000e0100", true, 50),
+            ("93dc6a03dd010c660101410e03010141", true, 54),
+            ("93dc6a03dd010c6602014101420e050201410142", true, 58),
+            // a `String` constant, well-formed; then an encoded surrogate, which is written as
+            // ONE U+FFFD, against one and against three
+            ("93dc6a03dd016603efbfbd0e0403efbfbd", true, 53),
+            ("93dc6a03dd016603eda0800e0403efbfbd", true, 53),
+            ("93dc6a03dd016603eda0800e0a09efbfbdefbfbdefbfbd", false, 36),
+            // the same in a collection
+            ("93dc6a03dd010c660103eda0800e050103efbfbd", true, 56),
+            (
+                "93dc6a03dd010c660103eda0800e0b0109efbfbdefbfbdefbfbd",
+                false,
+                39,
+            ),
+            // a `String` that `deserializeTo[String]` read
+            (
+                "93dc6a03dd01dc6a04dd010e0403eda080660e0403efbfbd",
+                true,
+                194,
+            ),
+        ] {
+            let (res, c) = eval_body(body, ErgoTreeVersion::V3);
+            assert_eq!(res.unwrap(), Value::Boolean(value), "{body}");
+            assert_eq!(c, cost, "{body}");
+        }
+    }
+
     // `deserializeTo_eval`: `addSeqCost(.., bytes.length)`, then the read (`methods.scala:1948-1955`)
     #[test]
     fn deserialize_to_pays_per_item_before_it_reads_the_bytes() {
