@@ -121,12 +121,15 @@ fn tuple_from_js(arr: &Array) -> Result<Constant, ConvError> {
     }
     #[allow(clippy::unwrap_used)]
     Ok(Constant {
-        tpe: SType::STuple(STuple {
-            items: TupleItems::try_from(
-                v.clone().into_iter().map(|c| c.tpe).collect::<Vec<SType>>(),
-            )
-            .unwrap(),
-        }),
+        tpe: SType::STuple(
+            STuple {
+                items: TupleItems::try_from(
+                    v.clone().into_iter().map(|c| c.tpe).collect::<Vec<SType>>(),
+                )
+                .unwrap(),
+            }
+            .into(),
+        ),
         v: Literal::Tup(
             TupleItems::try_from(v.into_iter().map(|c| c.v).collect::<Vec<Literal>>()).unwrap(),
         ),
@@ -178,7 +181,7 @@ pub(crate) fn constant_to_js(c: Constant) -> Result<JsValue, ConvError> {
             let vec: Vec<JsValue> = match c.v {
                 Literal::Tup(v) => v
                     .into_iter()
-                    .zip(item_tpes.clone().items.into_iter())
+                    .zip(item_tpes.items.iter().cloned())
                     .map(|(v, tpe)| constant_to_js(Constant { tpe, v }))
                     .collect::<Result<Vec<JsValue>, _>>()?,
                 _ => return Err(ConvError::UnexpectedConst(c.clone().into())),

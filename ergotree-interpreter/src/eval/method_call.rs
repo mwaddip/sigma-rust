@@ -14,6 +14,8 @@ use super::MethodCallSite;
 use ergotree_ir::types::smethod::SMethod;
 use ergotree_ir::types::stype::SType;
 use ergotree_ir::types::stype_companion::STypeCompanion;
+use ergotree_ir::types::stype_param::STypeVar;
+use hashbrown::HashMap;
 
 impl Evaluable for MethodCall {
     fn eval<'ctx>(
@@ -21,7 +23,14 @@ impl Evaluable for MethodCall {
         env: &mut Env<'ctx>,
         ectx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        call_method(&self.method, &self.obj, &self.args, env, ectx)
+        call_method(
+            &self.method,
+            &self.obj,
+            &self.args,
+            &self.explicit_type_args,
+            env,
+            ectx,
+        )
     }
 }
 
@@ -35,6 +44,7 @@ pub(crate) fn call_method<'ctx>(
     method: &SMethod,
     obj: &Expr,
     args: &[Expr],
+    explicit_type_args: &HashMap<STypeVar, SType>,
     env: &mut Env<'ctx>,
     ectx: &Context<'ctx>,
 ) -> Result<Value<'ctx>, EvalError> {
@@ -56,7 +66,11 @@ pub(crate) fn call_method<'ctx>(
     check_receiver(method, &ov)?;
     let argsv = widen_arguments(method, argsv);
     check_arguments(method, &argsv)?;
-    let site = MethodCallSite { method, args };
+    let site = MethodCallSite {
+        method,
+        args,
+        explicit_type_args,
+    };
     smethod_eval_fn(method)?(&site, env, ectx, ov, argsv)
 }
 /// sigmastate's parser checks no receiver against the method: the owner is the type code in
@@ -315,7 +329,8 @@ mod arity_tests {
             obj: Box::new(Expr::Context),
             method: GET_VAR_FROM_INPUT_METHOD
                 .clone()
-                .with_concrete_types(&type_args),
+                .with_concrete_types(&type_args)
+                .unwrap(),
             explicit_type_args: type_args,
         }
         .into();
@@ -668,11 +683,12 @@ mod receiver_kind_tests {
             SType::SOption(Arc::new(SType::SInt)) => SType::SOption(_) => "Opt",
             // the item type is no part of the class
             SType::SColl(Arc::new(SType::SColl(Arc::new(SType::SByte)))) => SType::SColl(_) => "Coll",
-            SType::STuple(STuple::pair(SType::SInt, SType::SInt))
+            SType::STuple(STuple::pair(SType::SInt, SType::SInt).into())
                 => SType::STuple(t) if t.items.len() == 2 => "Pair",
-            SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt))
+            SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into())
                 => SType::STuple(_) => "Coll",
-            SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)) => SType::SFunc(_) => "Lambda",
+            SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt).into())
+                => SType::SFunc(_) => "Lambda",
             SType::SContext => SType::SContext => "Context",
             SType::SString => SType::SString => "String",
             SType::SHeader => SType::SHeader => "Header",
@@ -1315,7 +1331,8 @@ mod argument_widening_tests {
         // Coll[Long].getOrElse(Int, Long): the default is `IV` in the method's own table
         let method = scoll::GET_OR_ELSE_METHOD
             .clone()
-            .with_concrete_types(&core::iter::once((STypeVar::iv(), SType::SLong)).collect());
+            .with_concrete_types(&core::iter::once((STypeVar::iv(), SType::SLong)).collect())
+            .unwrap();
         assert_eq!(method.tpe().t_dom[2], SType::SLong);
         assert_eq!(
             widened(&method, vec![Value::Byte(9), Value::Byte(7)]),
@@ -1488,6 +1505,46 @@ mod charge_order {
             let (e, c) = eval_body_err(body);
             assert!(matches!(e, EvalError::UnexpectedValue(_)), "{body}: {e:?}");
             assert_eq!(c, 19, "{body}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod call_type_tests {
+    //! A call's static type is the JVM's (`SMethod::call_tpe`): the rows are sigma-state
+    //! 6.0.7's, read from the jars
+    use crate::eval::test_util::eval_body;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
+
+    #[test]
+    fn a_branch_that_is_not_taken_parses_by_the_calls_type() {
+        // each `else` branch type-checks only with the JVM's type of the call in it, and the
+        // tree evaluates to its `then` branch at 20
+        for (body, value) in [
+            // if (true) 1 else box.getReg[Coll[T]](4).get(0)(0).size: the call is an
+            // Option[Coll[Coll[T]]]
+            (
+                "9501010402b1b2b2e4dc631363c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000000000000000000000000000000000000000000000000000000000000000000000000104080c670154040000040000",
+                Value::Int(1),
+            ),
+            // if (true) true else deserializeTo[Coll[T]](bytes)(0)(0) == deserializeTo[T](bytes)
+            (
+                "950101010193b2b2dc6a04dd010e01000c670154040000040000dc6a04dd010e0100670154",
+                Value::Boolean(true),
+            ),
+            // if (true) true else deserializeTo[[T](Int) => Int](bytes) == {(x: Int) => 1}: the
+            // call is an Int => Int
+            (
+                "950101010193dc6a04dd010e01007001040401670154d90101040402",
+                Value::Boolean(true),
+            ),
+        ] {
+            let (res, cost) = eval_body(body, ErgoTreeVersion::V3);
+            assert_eq!(res.unwrap(), value, "{body}");
+            assert_eq!(cost, 20, "{body}");
         }
     }
 }

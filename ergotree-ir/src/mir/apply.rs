@@ -60,7 +60,7 @@ impl Apply {
     /// replaced in place still reports the right type — which is why the cached field is gone.
     pub fn tpe(&self) -> SType {
         match self.func.tpe() {
-            SType::SFunc(sfunc) => *sfunc.t_range,
+            SType::SFunc(sfunc) => (*sfunc.t_range).clone(),
             SType::SColl(elem_tpe) => (*elem_tpe).clone(),
             _ => SType::SNoType,
         }

@@ -116,9 +116,12 @@ impl Literal {
             Literal::Coll(coll_kind) => SType::SColl(coll_kind.elem_tpe().clone().into()),
             Literal::Opt(Some(literal)) => SType::SOption(literal.tpe()?.into()),
             Literal::Opt(None) => return Err("Can not infer type of Option.None"),
-            Literal::Tup(bounded_vec) => SType::STuple(STuple {
-                items: bounded_vec.try_mapped_ref(Literal::tpe)?,
-            }),
+            Literal::Tup(bounded_vec) => SType::STuple(
+                STuple {
+                    items: bounded_vec.try_mapped_ref(Literal::tpe)?,
+                }
+                .into(),
+            ),
         };
         Ok(tpe)
     }
@@ -549,11 +552,11 @@ mod literal_of_type_tests {
     }
 
     fn int_triple() -> SType {
-        SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt))
+        SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into())
     }
 
     fn int_pair() -> SType {
-        SType::STuple(STuple::pair(SType::SInt, SType::SInt))
+        SType::STuple(STuple::pair(SType::SInt, SType::SInt).into())
     }
 
     fn ints(xs: &[i32]) -> Vec<Value<'static>> {
@@ -1007,7 +1010,7 @@ impl Into<Constant> for Tuple {
         let (types, values): (Vec<SType>, Vec<Literal>) =
             constants.into_iter().map(|c| (c.tpe, c.v)).unzip();
         Constant {
-            tpe: SType::STuple(types.try_into().unwrap()),
+            tpe: SType::STuple(Arc::new(types.try_into().unwrap())),
             v: Literal::Tup(values.try_into().unwrap()),
         }
     }
@@ -1490,6 +1493,7 @@ pub(crate) mod arbitrary {
                                                 .collect::<Vec<SType>>()
                                         )
                                         .unwrap()
+                                        .into()
                                     ),
                                     v: Literal::Tup(
                                         constants

@@ -103,11 +103,11 @@ mod tests {
             prop_assert_eq!(unify_one(&SColl(SAny.into()), &SColl(t.clone().into())), unified_without_subst());
             prop_assert_eq!(unify_one(
                 &SColl(SAny.into()),
-                &STuple(STuple::pair(t.clone(), t.clone()))), unified_without_subst()
+                &STuple(STuple::pair(t.clone(), t.clone()).into())), unified_without_subst()
             );
             prop_assert_eq!(unify_one(
                 &SColl(SAny.into()),
-                &STuple(STuple::pair(t.clone(), STuple(STuple::pair(t.clone(), t))))), unified_without_subst()
+                &STuple(STuple::pair(t.clone(), STuple(STuple::pair(t.clone(), t).into())).into())), unified_without_subst()
             );
         }
 
@@ -125,7 +125,7 @@ mod tests {
     fn check_subst_map(t1: SType, t2: SType, expect: HashMap<STypeVar, SType>) {
         assert_eq!(unify_one(&t1, &t2).unwrap(), expect);
         assert_eq!(
-            unify_one(&t1.with_subst(&expect), &t2),
+            unify_one(&t1.with_subst(&expect).unwrap(), &t2),
             unified_without_subst()
         )
     }

@@ -65,7 +65,13 @@ impl MethodCall {
         }
         // the arguments are checked against the domain with the explicit types substituted:
         // `Global.some[T]`'s variable is in its domain
-        let method = method.with_concrete_types(&explicit_type_args);
+        let method = method
+            .with_concrete_types(&explicit_type_args)
+            .map_err(|e| InvalidArgumentError(format!("MethodCall: {e:?}")))?;
+        // sigmastate computes the call's type when it builds the call (`val tpe`)
+        method
+            .try_call_tpe(&explicit_type_args)
+            .map_err(|e| InvalidArgumentError(format!("MethodCall: {e:?}")))?;
         let mut expected_types: Vec<SType> = vec![obj.tpe()];
         let arg_types: Vec<SType> = args.clone().into_iter().map(|a| a.tpe()).collect();
         expected_types.extend(arg_types);
@@ -94,7 +100,10 @@ impl MethodCall {
         MethodCall::new_inner(method, args, obj, Default::default())
     }
 
-    /// Create new object with explicit type args
+    /// Create new object with explicit type args. `method` is the method as its table has it,
+    /// generic: the type arguments are substituted into it here, as the parser substitutes
+    /// them. A method that already holds them gets them a second time, which shows where a
+    /// type argument names the method's own type variable
     pub fn with_type_args(
         obj: Expr,
         method: SMethod,
@@ -104,9 +113,9 @@ impl MethodCall {
         MethodCall::new_inner(method, args, obj, type_args)
     }
 
-    /// Type
+    /// Type: the call's, [`SMethod::call_tpe`]
     pub fn tpe(&self) -> SType {
-        *self.method.tpe().t_range.clone()
+        self.method.call_tpe(&self.explicit_type_args)
     }
 }
 

@@ -9,7 +9,6 @@ use crate::serialization::SigmaParsingError;
 use crate::serialization::SigmaSerializable;
 use crate::serialization::SigmaSerializeResult;
 use crate::traversable::impl_traversable_expr;
-use crate::types::stuple::STuple;
 use crate::types::stype::SType;
 
 use super::expr::Expr;
@@ -75,8 +74,8 @@ impl SelectField {
     /// Create new object, returns an error if any of the requirements failed
     pub fn new(input: Expr, field_index: TupleFieldIndex) -> Result<Self, InvalidArgumentError> {
         match input.tpe() {
-            SType::STuple(STuple { items }) => {
-                if let Some(field_tpe) = items.get(field_index.zero_based_index()) {
+            SType::STuple(tuple) => {
+                if let Some(field_tpe) = tuple.items.get(field_index.zero_based_index()) {
                     Ok(SelectField {
                         input: Box::new(input),
                         field_index,
@@ -144,8 +143,8 @@ impl SigmaSerializable for SelectField {
 /// sigmastate's `val tpe = input.tpe.items(fieldIndex - 1)` (v6.0.7 `transformers.scala:294`):
 /// the input's type cast to `STuple`, then the field, by a signed index
 fn field_tpe(input: &Expr, field_index: i8) -> Result<SType, SigmaParsingError> {
-    let items = match input.try_tpe()? {
-        SType::STuple(STuple { items }) => items,
+    let tuple = match input.try_tpe()? {
+        SType::STuple(tuple) => tuple,
         tpe => {
             return Err(SigmaParsingError::TupleInputExpected(format!(
                 "SelectField of an input of type {tpe:?}"
@@ -155,11 +154,11 @@ fn field_tpe(input: &Expr, field_index: i8) -> Result<SType, SigmaParsingError> 
     Ok(usize::try_from(field_index)
         .ok()
         .and_then(|i| i.checked_sub(1))
-        .and_then(|i| items.get(i))
+        .and_then(|i| tuple.items.get(i))
         .ok_or_else(|| {
             SigmaParsingError::TupleFieldOutOfBounds(format!(
                 "field {field_index} of a tuple of {} items",
-                items.len()
+                tuple.items.len()
             ))
         })?
         .clone())

@@ -330,7 +330,7 @@ mod tests {
         let type_args = std::iter::once((STypeVar::t(), SType::SLong)).collect();
         let expr: Expr = MethodCall::with_type_args(
             GlobalVars::SelfBox.into(),
-            sbox::GET_REG_METHOD.clone().with_concrete_types(&type_args),
+            sbox::GET_REG_METHOD.clone(),
             vec![Constant::from(0i32).into()],
             type_args,
         )
@@ -358,7 +358,7 @@ mod tests {
         let type_args = std::iter::once((STypeVar::t(), SType::SSigmaProp)).collect();
         let expr: Expr = MethodCall::with_type_args(
             GlobalVars::SelfBox.into(),
-            sbox::GET_REG_METHOD.clone().with_concrete_types(&type_args),
+            sbox::GET_REG_METHOD.clone(),
             vec![Constant::from(0i32).into()],
             type_args,
         )
@@ -572,7 +572,7 @@ mod get_reg_conversion_tests {
         let type_args = core::iter::once((STypeVar::t(), SType::SInt)).collect();
         let expr: Expr = MethodCall::with_type_args(
             GlobalVars::SelfBox.into(),
-            sbox::GET_REG_METHOD.clone().with_concrete_types(&type_args),
+            sbox::GET_REG_METHOD.clone(),
             vec![Constant::from(5i32).into()],
             type_args,
         )

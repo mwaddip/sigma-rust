@@ -392,7 +392,7 @@ impl Expr {
     /// Type expected after the evaluation
     pub fn post_eval_tpe(&self) -> SType {
         match self.tpe() {
-            SType::SFunc(sfunc) => *sfunc.t_range,
+            SType::SFunc(sfunc) => (*sfunc.t_range).clone(),
             tpe => tpe,
         }
     }
@@ -1150,7 +1150,7 @@ pub(crate) mod arbitrary {
         fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
             if args.depth == 0 {
                 match args.tpe {
-                    SType::SFunc(sfunc) => sfunc_expr(sfunc),
+                    SType::SFunc(sfunc) => sfunc_expr((*sfunc).clone()),
                     _ => prop_oneof![
                         any_with::<Constant>(args.tpe.clone().into())
                             .prop_map(Expr::Const)
@@ -1544,7 +1544,7 @@ mod substitution_rule_tests {
         use crate::mir::tuple::Tuple;
         use crate::types::stuple::STuple;
         let pairs: Expr = Collection::Exprs {
-            elem_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt)),
+            elem_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt).into()),
             items: vec![Tuple::new(vec![1i32.into(), 2i32.into()]).unwrap().into()],
         }
         .into();

@@ -478,6 +478,7 @@ mod tests {
             let site = MethodCallSite {
                 method: &method,
                 args: &[],
+                explicit_type_args: &hashbrown::HashMap::new(),
             };
             let _ = eval_fn(
                 &site,

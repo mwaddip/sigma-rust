@@ -13,7 +13,8 @@
 //! - `MapCollection`, `Coll.map` and `Coll.flatMap`, for the result's item type;
 //! - a fixed-cost method that is handed a type descriptor ([`descriptor_type`]), at the call,
 //!   before its arguments;
-//! - `Global.deserializeTo`, for the call's type, after its arguments and before its cost;
+//! - `Global.deserializeTo`, for the call's type (`SMethod::call_tpe`), after its arguments and
+//!   before its cost;
 //! - every register of a box when a script reads one, or the box's tokens or creation info
 //!   (`sbox::convert_registers`);
 //! - every self context variable before a tree is evaluated, and the variable
@@ -318,14 +319,29 @@ mod tests {
     #[test]
     fn deserialize_to_with_a_function_type_that_has_type_parameters() {
         // The jars, each row. sigmastate's `mc.tpe` is the method's range with the type
-        // argument substituted a second time, which drops a function type's own parameter
-        // `T`. One type is left out here because of it, `[T](Int) => Int`: the JVM takes it
-        // for `Int => Int` and stops at 146, this stops at 14 (queue candidate 24)
+        // argument substituted a second time (`SMethod::call_tpe`), which drops the
+        // parameter `T` of a function type at the top of the range, and of a function type
+        // that is its argument or its range
         let call = |tpe: &str| format!("dc6a04dd010e0100{tpe}");
         let u = "670155";
+        let fp = format!("7001040401{T}");
         for (name, tpe, stops_at) in [
             // a function type with a runtime type: the data reader refuses a function
             ("Int => Int", "7001040400".into(), 146),
+            // and so is each of these once its parameter `T` is dropped
+            ("[T](Int) => Int", fp.clone(), 146),
+            ("Int => [T](Int) => Int", format!("700104{fp}00"), 146),
+            ("([T](Int) => Int) => Int", format!("7001{fp}0400"), 146),
+            (
+                "[T](Int) => [T](Int) => Int",
+                format!("700104{fp}01{T}"),
+                146,
+            ),
+            (
+                "Int => Int => [T](Int) => Int",
+                format!("700104700104{fp}0000"),
+                146,
+            ),
             // a parameter that is not the method's stays, and the type has no runtime type
             ("[U](Int) => Int", format!("7001040401{u}"), 14),
             ("[T, U](Int) => Int", format!("7001040402{T}{u}"), 14),

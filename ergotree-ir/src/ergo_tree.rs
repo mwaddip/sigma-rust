@@ -1426,6 +1426,34 @@ mod tests {
     }
 
     #[test]
+    fn a_sized_tree_with_a_call_whose_type_cannot_be_built_is_refused() {
+        // sigma-state 6.0.7's `deserializeErgoTree` on the jars: a call whose type it cannot
+        // build throws kiama's `RuntimeException`, which no validation rule turns into an
+        // unparsed tree; also in a branch that is never taken. Each tree is the sigma
+        // proposition of a Boolean; `true` for the two controls, which parse
+        for (hex, parsed) in [
+            ("0b07d1e6db6a0add04", true), // control|none[Int].isDefined  JVM: PARSED
+            ("0b0ed1e6db6a0add7001040401670154", false), // evaluated|none[[T](Int)=>Int].isDefined  JVM: THROWS(RuntimeException: dup i
+            ("0b13d19501010101e6db6a0add7001040401670154", false), // untaken|if(true)true-else-none[[T](Int)=>Int].isDefined  JVM: THROWS(RuntimeException: dup i
+            ("0b62d19501010101e6dc631363c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000000000000000000000000000000000000000000000000000000000000000000000000104080c7001040401670154", false), // untaken|if(true)true-else-getReg[Coll[[T](Int)=>Int]].isDefined  JVM: THROWS(RuntimeException: dup i
+            ("0b1bd1950101010193b1dc6a04dd010e01000c70010404016701540400", false), // untaken|if(true)true-else-deserializeTo[Coll[[T](Int)=>Int]].size==0  JVM: THROWS(RuntimeException: dup i
+            ("0b17d1e6dc6a09dd01d9010104040270016701540401670154", false), // evaluated|some[[T](T)=>Int](lambda).isDefined  JVM: THROWS(RuntimeException: dup i
+            ("0b12d1e6dc6a09dd01d901010404027001040400", true), // control|some[(Int)=>Int](lambda).isDefined  JVM: PARSED
+        ] {
+            let tree =
+                ErgoTree::sigma_parse_bytes_no_fallback(&base16::decode(hex.as_bytes()).unwrap());
+            if parsed {
+                assert!(matches!(tree, Ok(ErgoTree::Parsed(_))), "{hex}: {tree:?}");
+            } else {
+                assert!(
+                    matches!(tree, Err(SigmaParsingError::TypeSubstFailed(_))),
+                    "{hex}: {tree:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_sized_tree_with_a_collection_of_no_runtime_type_is_refused() {
         // `sigmaProp(c.size == 0)` under a size-flagged header, where the constant `c` is a
         // collection whose item type has no runtime type. sigmastate throws a

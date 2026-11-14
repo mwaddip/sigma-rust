@@ -45,7 +45,7 @@ pub(crate) fn rebuild(expr: &mut Expr) -> Result<(), SigmaParsingError> {
         // `MapCollection`'s `val tpe` casts the mapper's type to `SFunc` (`transformers.scala:38`)
         Expr::Map(m) => {
             m.expr.mapper_sfunc = match m.expr.mapper.try_tpe()? {
-                SType::SFunc(sfunc) => sfunc,
+                SType::SFunc(sfunc) => (*sfunc).clone(),
                 tpe => {
                     return Err(SigmaParsingError::FunctionExpected(format!(
                         "a Map mapper of type {tpe:?}"

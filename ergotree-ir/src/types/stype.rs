@@ -21,8 +21,15 @@ use ergo_chain_types::EcPoint;
 
 use super::sfunc::SFunc;
 use super::stuple::STuple;
+use super::stype_param::STypeParam;
 use super::stype_param::STypeVar;
 use crate::mir::avl_tree_data::AvlTreeData;
+
+/// A substitution of type variables that sigmastate cannot build: its rewrite replaced the
+/// variable of a function type's type parameter with a type that is no type variable
+/// (`SType::with_subst`)
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub struct TypeSubstError(pub String);
 
 /// Every type descriptor is a tree represented by nodes in SType hierarchy.
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -60,9 +67,9 @@ pub enum SType {
     /// Collection of elements of the same type
     SColl(Arc<SType>),
     /// Tuple (elements can have different types)
-    STuple(STuple),
+    STuple(Arc<STuple>),
     /// Function (signature)
-    SFunc(SFunc),
+    SFunc(Arc<SFunc>),
     /// Context object ("CONTEXT" in ErgoScript)
     SContext,
     /// UTF-8 String type
@@ -168,21 +175,94 @@ impl SType {
         }
     }
 
-    pub(crate) fn with_subst(&self, subst: &HashMap<STypeVar, SType>) -> Self {
+    /// sigmastate's `applySubst` (v6.0.7 `sigma/ast/package.scala:72-81`), which treats a
+    /// function type in two ways. One it is handed directly (the type itself, or the argument
+    /// or the range of such a function type) loses the type parameters the substitution
+    /// names, and its arguments and range are substituted the same way ([`SFunc::with_subst`]).
+    /// Any other type is rewritten bottom-up ([`Self::rewrite_bottom_up`]), and that walk
+    /// fails on a function type inside it whose type parameter the substitution names.
+    pub(crate) fn with_subst(
+        &self,
+        subst: &HashMap<STypeVar, SType>,
+    ) -> Result<Self, TypeSubstError> {
         match self {
-            SType::STypeVar(ref tpe_var) => subst.get(tpe_var).cloned().unwrap_or(self.clone()),
-            SType::SOption(tpe) => SType::SOption(tpe.with_subst(subst).into()),
-            SType::SColl(tpe) => SType::SColl(tpe.with_subst(subst).into()),
-            SType::STuple(ref stup) => SType::STuple(stup.with_subst(subst)),
-            SType::SFunc(ref sfunc) => SType::SFunc(sfunc.with_subst(subst)),
-            _ => self.clone(),
+            SType::SFunc(sfunc) => Ok(SType::SFunc(sfunc.with_subst(subst)?.into())),
+            _ => self.rewrite_bottom_up(subst),
         }
+    }
+
+    /// The rewrite `applySubst` runs on a type that is not a function type: kiama's
+    /// `everywherebu` over the rule "a type variable the substitution names becomes its
+    /// type" (`package.scala:77-80`). The walk visits every child of every node, a function
+    /// type's parameters included, and rebuilds a node whose child changed through its
+    /// constructor. A type parameter holds a type variable (`STypeParam(ident: STypeVar)`),
+    /// so a parameter whose variable was replaced by anything but a type variable cannot be
+    /// rebuilt: kiama's `dup` throws a `RuntimeException` ("dup illegal arguments"). A
+    /// replacement is not walked again.
+    fn rewrite_bottom_up(&self, subst: &HashMap<STypeVar, SType>) -> Result<Self, TypeSubstError> {
+        Ok(match self {
+            SType::STypeVar(tpe_var) => subst.get(tpe_var).cloned().unwrap_or(self.clone()),
+            SType::SOption(tpe) => SType::SOption(tpe.rewrite_bottom_up(subst)?.into()),
+            SType::SColl(tpe) => SType::SColl(tpe.rewrite_bottom_up(subst)?.into()),
+            SType::STuple(stup) => SType::STuple(
+                STuple {
+                    items: stup
+                        .items
+                        .try_mapped_ref(|item| item.rewrite_bottom_up(subst))?,
+                }
+                .into(),
+            ),
+            SType::SFunc(sfunc) => SType::SFunc(
+                SFunc {
+                    t_dom: sfunc
+                        .t_dom
+                        .iter()
+                        .map(|arg| arg.rewrite_bottom_up(subst))
+                        .collect::<Result<_, _>>()?,
+                    t_range: sfunc.t_range.rewrite_bottom_up(subst)?.into(),
+                    tpe_params: sfunc
+                        .tpe_params
+                        .iter()
+                        .map(|param| match subst.get(&param.ident) {
+                            None => Ok(param.clone()),
+                            Some(SType::STypeVar(ident)) => Ok(STypeParam {
+                                ident: ident.clone(),
+                            }),
+                            Some(tpe) => Err(TypeSubstError(format!(
+                                "the type parameter {:?} of {sfunc:?} cannot become {tpe:?}",
+                                param.ident
+                            ))),
+                        })
+                        .collect::<Result<_, _>>()?,
+                }
+                .into(),
+            ),
+            SType::SAny
+            | SType::SUnit
+            | SType::SBoolean
+            | SType::SByte
+            | SType::SShort
+            | SType::SInt
+            | SType::SLong
+            | SType::SBigInt
+            | SType::SGroupElement
+            | SType::SSigmaProp
+            | SType::SUnsignedBigInt
+            | SType::SBox
+            | SType::SAvlTree
+            | SType::SContext
+            | SType::SString
+            | SType::SHeader
+            | SType::SPreHeader
+            | SType::SGlobal
+            | SType::SNoType => self.clone(),
+        })
     }
 }
 
 impl From<STuple> for SType {
     fn from(v: STuple) -> Self {
-        SType::STuple(v)
+        SType::STuple(v.into())
     }
 }
 
@@ -194,7 +274,7 @@ impl From<STypeVar> for SType {
 
 impl From<SFunc> for SType {
     fn from(v: SFunc) -> Self {
-        SType::SFunc(v)
+        SType::SFunc(v.into())
     }
 }
 
@@ -354,7 +434,7 @@ impl<T: LiftIntoSType> LiftIntoSType for Option<T> {
 impl LiftIntoSType for Tuple {
     fn stype() -> SType {
         let v: Vec<SType> = [for_tuples!(  #( Tuple::stype() ),* )].to_vec();
-        SType::STuple(v.try_into().unwrap())
+        SType::STuple(Arc::new(v.try_into().unwrap()))
     }
 }
 
@@ -406,8 +486,9 @@ pub(crate) mod tests {
                     16, // each collection max size
                     |elem| {
                         prop_oneof![
-                            prop::collection::vec(elem.clone(), 2..=5)
-                                .prop_map(|elems| SType::STuple(elems.try_into().unwrap())),
+                            prop::collection::vec(elem.clone(), 2..=5).prop_map(|elems| {
+                                SType::STuple(Arc::new(elems.try_into().unwrap()))
+                            }),
                             elem.clone().prop_map(|tpe| SType::SColl(Arc::new(tpe))),
                             elem.prop_map(|tpe| SType::SOption(Arc::new(tpe))),
                         ]
@@ -508,5 +589,144 @@ mod runtime_type_tests {
         ] {
             assert!(!tpe(hex).has_runtime_type(), "{hex}");
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod subst_tests {
+    //! sigmastate's `applySubst` as a function, each row from the sigma-state 6.0.7 jars
+    //! (`sigma.ast.package.applySubst`, called directly). 6000 random rows agree as well.
+    use super::*;
+    use crate::ergo_tree::ErgoTreeVersion;
+    use crate::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
+    use crate::serialization::SigmaSerializable;
+
+    fn tpe(hex: &str) -> SType {
+        let bytes = base16::decode(hex.as_bytes()).unwrap();
+        from_bytes(&bytes)
+            .with_tree_version(ErgoTreeVersion::V3, SType::sigma_parse)
+            .unwrap()
+    }
+
+    /// `"T=04,U=05"`: each variable's name and the bytes of its type
+    fn subst(pairs: &str) -> HashMap<STypeVar, SType> {
+        pairs
+            .split(',')
+            .map(|pair| {
+                let (name, hex) = pair.split_once('=').unwrap();
+                (
+                    STypeVar::new_from_bytes(name.as_bytes().to_vec()).unwrap(),
+                    tpe(hex),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_substitution_gives_the_jvms_type_and_fails_where_it_throws() {
+        // the type, the substitution, the JVM's result (`None`: `applySubst` throws)
+        for (hex, pairs, expected) in [
+            // T
+            ("670154", "T=04", Some("04")),
+            // Coll[T]
+            ("0c670154", "T=04", Some("10")),
+            // Option[(T, U)]
+            ("243c670154670155", "T=04", Some("2440670155")),
+            // (Int, T, Coll[T])
+            ("48046701540c670154", "T=05", Some("48040511")),
+            // Coll[T], T is Coll[T]
+            ("0c670154", "T=0c670154", Some("0c0c670154")),
+            // (T, U), two variables
+            ("3c670154670155", "T=04,U=05", Some("4005")),
+            // T, another variable named
+            ("670154", "U=04", Some("670154")),
+            // T => T
+            ("700167015467015400", "T=04", Some("7001040400")),
+            // [T](T) => T
+            ("700167015467015401670154", "T=04", Some("7001040400")),
+            // [T, U](Int) => Int
+            ("7001040402670154670155", "T=04", Some("7001040401670155")),
+            // [U](T) => Int
+            ("70016701540401670155", "T=04", Some("7001040401670155")),
+            // Int => [T](T) => Int
+            (
+                "7001047001670154040167015400",
+                "T=04",
+                Some("700104700104040000"),
+            ),
+            // ([T](T) => Int) => Int
+            (
+                "7001700167015404016701540400",
+                "T=04",
+                Some("700170010404000400"),
+            ),
+            // [T](Int) => Int, T is U
+            ("7001040401670154", "T=670155", Some("7001040400")),
+            // [T](Int) => Int, another variable named
+            ("7001040401670154", "U=04", Some("7001040401670154")),
+            // Coll[T => Int]
+            ("0c70016701540400", "T=04", Some("0c7001040400")),
+            // Coll[[U](T) => Int]
+            ("0c70016701540401670155", "T=04", Some("0c7001040401670155")),
+            // Coll[[T](Int) => Int]
+            ("0c7001040401670154", "T=04", None),
+            // Option[[T](T) => Int]
+            ("2470016701540401670154", "T=04", None),
+            // ([T](Int) => Int, Int)
+            ("3c700104040167015404", "T=04", None),
+            // (Int, Int, [T](Int) => Int)
+            ("4804047001040401670154", "T=04", None),
+            // Int => Coll[[T](Int) => Int]
+            ("7001040c700104040167015400", "T=04", None),
+            // Coll[Int => [T](Int) => Int]
+            ("0c700104700104040167015400", "T=04", None),
+            // Coll[([T](Int) => Int) => Int]
+            ("0c700170010404016701540400", "T=04", None),
+            // Coll[[T](Int) => Int], T is U
+            ("0c7001040401670154", "T=670155", Some("0c7001040401670155")),
+            // Coll[[T](T) => Int], T is U
+            (
+                "0c70016701540401670154",
+                "T=670155",
+                Some("0c70016701550401670155"),
+            ),
+            // Coll[[T](Int) => Int], T is T
+            ("0c7001040401670154", "T=670154", Some("0c7001040401670154")),
+            // Coll[[T](Int) => Int], another variable named
+            ("0c7001040401670154", "U=04", Some("0c7001040401670154")),
+            // Coll[[T, U](Int) => Int], T is V and U is Int
+            ("0c7001040402670154670155", "T=670156,U=04", None),
+            // (Int, Int, Int, T), T is U and U is Int: a replacement is not walked again
+            ("54040404670154", "T=670155,U=04", Some("54040404670155")),
+        ] {
+            assert_eq!(
+                tpe(hex).with_subst(&subst(pairs)).ok(),
+                expected.map(tpe),
+                "{hex} with {pairs}"
+            );
+        }
+    }
+
+    #[allow(clippy::panic)]
+    fn tuple_of(tpe: &SType) -> &Arc<STuple> {
+        match tpe {
+            SType::STuple(tuple) => tuple,
+            _ => panic!("not a tuple type: {tpe:?}"),
+        }
+    }
+
+    #[test]
+    fn a_replacement_is_shared_not_copied() {
+        // sigmastate's rule gives the substitution's own object at every place it replaces a
+        // variable (`package.scala:77-79`), so a type grown by a substitution costs what its
+        // parts cost. `(T, T)` with `T` as `(Int, Long)`; the jars: `((Int, Long), (Int, Long))`
+        let subst = subst("T=4005");
+        let own = tuple_of(&subst[&STypeVar::t()]);
+        let replaced = tpe("3c670154670154").with_subst(&subst).unwrap();
+        assert_eq!(replaced, tpe("3c40054005"));
+        let items = tuple_of(&replaced).items.as_slice();
+        assert!(Arc::ptr_eq(tuple_of(&items[0]), tuple_of(&items[1])));
+        assert!(Arc::ptr_eq(tuple_of(&items[0]), own));
     }
 }

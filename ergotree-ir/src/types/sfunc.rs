@@ -5,6 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::stype::SType;
+use super::stype::TypeSubstError;
 use super::stype_param::STypeParam;
 use super::stype_param::STypeVar;
 
@@ -43,22 +44,29 @@ impl SFunc {
         }
     }
 
-    pub(crate) fn with_subst(&self, subst: &HashMap<STypeVar, SType>) -> Self {
+    /// `applySubst` on a function type it is handed directly (v6.0.7
+    /// `sigma/ast/package.scala:73-75`): the type parameters the substitution names are
+    /// dropped, and each argument and the range goes through `applySubst` again
+    /// ([`SType::with_subst`])
+    pub(crate) fn with_subst(
+        &self,
+        subst: &HashMap<STypeVar, SType>,
+    ) -> Result<Self, TypeSubstError> {
         let remaining_vars = self
             .tpe_params
             .iter()
             .filter(|v| !subst.contains_key(&v.ident))
             .cloned()
             .collect();
-        SFunc {
+        Ok(SFunc {
             t_dom: self
                 .t_dom
                 .iter()
-                .map(|a| a.clone().with_subst(subst))
-                .collect(),
-            t_range: Box::new(self.t_range.with_subst(subst)),
+                .map(|a| a.with_subst(subst))
+                .collect::<Result<_, _>>()?,
+            t_range: Box::new(self.t_range.with_subst(subst)?),
             tpe_params: remaining_vars,
-        }
+        })
     }
 
     /// Returns function parameter types (t_dom) with added result type (t_range)

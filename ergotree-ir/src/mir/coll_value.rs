@@ -177,7 +177,7 @@ impl<'ctx> CollValue<'ctx> {
             CollValue::Ints(_) => SType::SInt,
             CollValue::Generic { elem_tpe, .. } => elem_tpe.clone(),
             CollValue::Pairs { ls, rs } => {
-                SType::STuple(STuple::pair(ls.elem_tpe(), rs.elem_tpe()))
+                SType::STuple(STuple::pair(ls.elem_tpe(), rs.elem_tpe()).into())
             }
         }
     }
@@ -473,7 +473,7 @@ mod array_class {
                 Value::Coll(CollValue::Ints([1].into())),
             ),
             (
-                SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)),
+                SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt).into()),
                 Value::Lambda(lambda),
             ),
         ]
@@ -499,7 +499,7 @@ mod array_class {
     fn a_class_ignores_the_item_type_inside() {
         let coll_of_longs = Value::Coll(CollValue::generic(SType::SLong, vec![Value::Long(1)]));
         let option_of_long = Value::Opt(Some(Box::new(Value::Long(1))));
-        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into());
         for (tpe, value) in [
             (SType::SColl(SType::SInt.into()), coll_of_longs.clone()),
             (SType::SOption(SType::SInt.into()), option_of_long),
@@ -543,7 +543,7 @@ mod array_class {
     /// A pair collection stores each component into its side's array (`fromBoxedPairs`; SANTA G1)
     #[test]
     fn a_pair_collection_refuses_a_component_of_another_class() {
-        let tpe = SType::STuple(STuple::pair(SType::SInt, SType::SBox));
+        let tpe = SType::STuple(STuple::pair(SType::SInt, SType::SBox).into());
         let a_box = Value::CBox(force_any_val::<ErgoBox>().into());
         let good = CollValue::from_array(tpe.clone(), vec![Value::pair(Value::Int(1), a_box)]);
         assert!(matches!(good, Ok(CollValue::Pairs { .. })), "{good:?}");
@@ -600,7 +600,7 @@ mod tests {
                 generic(SType::SInt, ints(&[2, 4]))
             ),
             generic(
-                SType::STuple(STuple::pair(SType::SInt, SType::SInt)),
+                SType::STuple(STuple::pair(SType::SInt, SType::SInt).into()),
                 vec![pair(1, 2), pair(3, 4)]
             )
         );
@@ -662,7 +662,7 @@ mod tests {
         // by reading: `deserializeColl` builds a collection of non-pair tuples at the item type
         // `Coll[Any]` (v6.0.6 `CoreDataSerializer.scala:160-163`), and each item is the tuple's
         // own `Coll[Any]` (`:134-139`)
-        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt));
+        let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into());
         let item = Literal::Tup(
             vec![Literal::Int(1), Literal::Int(2), Literal::Int(3)]
                 .try_into()
@@ -696,7 +696,7 @@ mod tests {
             )
         };
         let sides = CollValue::from(CollKind::WrappedColl {
-            elem_tpe: SType::STuple(STuple::pair(triple.clone(), SType::SInt)),
+            elem_tpe: SType::STuple(STuple::pair(triple.clone(), SType::SInt).into()),
             items: vec![Literal::Tup([triple_lit(), Literal::Int(4)].into())].into(),
         });
         match &sides {
@@ -717,7 +717,7 @@ mod tests {
         // a collection of pairs is still a `PairOfCols`
         let pair = Literal::Tup([Literal::Int(1), Literal::Int(2)].into());
         let pairs = CollValue::from(CollKind::WrappedColl {
-            elem_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt)),
+            elem_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt).into()),
             items: vec![pair].into(),
         });
         assert!(matches!(pairs, CollValue::Pairs { .. }));
@@ -757,9 +757,9 @@ mod tests {
                 wrapped(SType::SLong, vec![Literal::Long(1)]),
             ),
             (
-                coll(SType::STuple(int_pair.clone())),
+                coll(SType::STuple(int_pair.clone().into())),
                 wrapped(
-                    SType::STuple(int_pair.clone()),
+                    SType::STuple(int_pair.clone().into()),
                     vec![
                         tup(Literal::Int(1), Literal::Int(2)),
                         tup(Literal::Int(3), Literal::Int(4)),
@@ -767,9 +767,11 @@ mod tests {
                 ),
             ),
             (
-                coll(SType::STuple(STuple::pair(SType::SByte, SType::SByte))),
+                coll(SType::STuple(
+                    STuple::pair(SType::SByte, SType::SByte).into(),
+                )),
                 wrapped(
-                    SType::STuple(STuple::pair(SType::SByte, SType::SByte)),
+                    SType::STuple(STuple::pair(SType::SByte, SType::SByte).into()),
                     vec![tup(Literal::Byte(1), Literal::Byte(2))],
                 ),
             ),
@@ -778,12 +780,11 @@ mod tests {
                 wrapped(coll(SType::SByte), vec![bytes(&[1]), bytes(&[])]),
             ),
             (
-                coll(SType::STuple(STuple::pair(
-                    SType::STuple(int_pair.clone()),
-                    SType::SInt,
-                ))),
+                coll(SType::STuple(
+                    STuple::pair(SType::STuple(int_pair.clone().into()), SType::SInt).into(),
+                )),
                 wrapped(
-                    SType::STuple(STuple::pair(SType::STuple(int_pair), SType::SInt)),
+                    SType::STuple(STuple::pair(SType::STuple(int_pair.into()), SType::SInt).into()),
                     vec![tup(tup(Literal::Int(1), Literal::Int(2)), Literal::Int(3))],
                 ),
             ),
@@ -876,7 +877,7 @@ mod tests {
                 items: [Literal::Boolean(true)].as_slice().into(),
             }),
             Literal::Coll(CollKind::WrappedColl {
-                elem_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt)),
+                elem_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt).into()),
                 items: [pair_lit].as_slice().into(),
             }),
             Literal::Coll(CollKind::WrappedColl {

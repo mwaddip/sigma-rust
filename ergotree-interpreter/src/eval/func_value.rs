@@ -110,7 +110,7 @@ mod tests {
         use crate::eval::Evaluable;
 
         fn int_to_int() -> SType {
-            SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt))
+            SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt).into())
         }
 
         fn int(id: u32) -> Expr {

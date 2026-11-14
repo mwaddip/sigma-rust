@@ -1695,7 +1695,7 @@ mod pair_value_tests {
     fn var0() -> Expr {
         GetVar {
             var_id: 0,
-            var_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt)),
+            var_tpe: SType::STuple(STuple::pair(SType::SInt, SType::SInt).into()),
         }
         .into()
     }

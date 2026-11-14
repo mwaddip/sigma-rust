@@ -178,11 +178,8 @@ mod tests {
         // The JVM `ConstantPlaceholder.eval` checkTypes the resolved constant
         // (values.scala:412), so a segregated constant of an arity-3 tuple type
         // is rejected ("Unsupported tuple type") rather than returned.
-        let triple_tpe = SType::STuple(STuple::triple(
-            SType::SBoolean,
-            SType::SBoolean,
-            SType::SBoolean,
-        ));
+        let triple_tpe =
+            SType::STuple(STuple::triple(SType::SBoolean, SType::SBoolean, SType::SBoolean).into());
         let triple = Constant {
             tpe: triple_tpe.clone(),
             v: Literal::Tup(

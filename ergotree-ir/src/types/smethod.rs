@@ -12,10 +12,10 @@ use hashbrown::HashMap;
 
 use super::sfunc::SFunc;
 use super::stype::SType;
+use super::stype::TypeSubstError;
 use super::stype_companion::STypeCompanion;
 use super::stype_param::STypeVar;
 use super::type_unify::unify_many;
-use super::type_unify::TypeUnificationError;
 use crate::serialization::SigmaParsingError::UnknownMethodId;
 
 /// Method id unique among the methods of the same object
@@ -91,26 +91,70 @@ impl SMethod {
         self.method_raw.method_id
     }
 
-    /// Return new SMethod with type variables substituted
-    pub fn with_concrete_types(self, subst: &HashMap<STypeVar, SType>) -> Self {
-        let new_tpe = self.method_raw.tpe.clone().with_subst(subst);
-        Self {
+    /// Return new SMethod with type variables substituted: sigmastate's `withConcreteTypes`
+    /// (v6.0.7 `SMethod.scala:177-178`), which fails where its substitution does
+    /// (`SType::with_subst`)
+    pub fn with_concrete_types(
+        self,
+        subst: &HashMap<STypeVar, SType>,
+    ) -> Result<Self, TypeSubstError> {
+        let new_tpe = self.method_raw.tpe.with_subst(subst)?;
+        Ok(Self {
             method_raw: self.method_raw.with_tpe(new_tpe),
             ..self
-        }
+        })
     }
 
     /// Specializes this instance by creating a new [`SMethod`] instance where signature
-    /// is specialized with respect to the given object and args types.
+    /// is specialized with respect to the given object and args types: sigmastate's
+    /// `specializeFor` (v6.0.7 `SMethod.scala:193-199`). The method comes back as it is when
+    /// the types do not unify or unify with no substitution; a substitution is applied with
+    /// [`Self::with_concrete_types`], which can fail.
     pub fn specialize_for(
         self,
         obj_tpe: SType,
         args: Vec<SType>,
-    ) -> Result<SMethod, TypeUnificationError> {
+    ) -> Result<SMethod, TypeSubstError> {
         let mut items2 = vec![obj_tpe];
         let mut args = args;
         items2.append(args.as_mut());
-        unify_many(self.tpe().t_dom.clone(), items2).map(|subst| self.with_concrete_types(&subst))
+        match unify_many(self.tpe().t_dom.clone(), items2) {
+            Ok(subst) if !subst.is_empty() => self.with_concrete_types(&subst),
+            _ => Ok(self),
+        }
+    }
+
+    /// The static type of a call of this (specialised) method: sigmastate's `MethodCall.tpe`
+    /// (v6.0.7 `values.scala:1355-1358`), the method's range with the call's explicit type
+    /// arguments substituted ONCE MORE. The method already holds them (the parser's
+    /// `withConcreteTypes`), so the second pass changes the range only where the range still
+    /// names the method's type variable `T`: where a type argument names it itself
+    /// (`getReg[Coll[T]]` has the type `Option[Coll[Coll[T]]]`), or where `specializeFor`
+    /// brought it in with the type of `Global.some`'s argument (`some[U]({(x: T) => 1})` has
+    /// the type `Option[(U) => Int]`). A function type there whose type parameter is that
+    /// variable loses the parameter or makes the substitution fail (`SType::with_subst`).
+    /// sigmastate computes it when it builds the call, so a failure is a failure to parse
+    /// (`try_call_tpe`); for a call put together field by field whose type
+    /// sigmastate could not build, this is the method's range.
+    pub fn call_tpe(&self, explicit_type_args: &HashMap<STypeVar, SType>) -> SType {
+        self.try_call_tpe(explicit_type_args)
+            .unwrap_or_else(|_| *self.tpe().t_range.clone())
+    }
+
+    /// [`Self::call_tpe`] where sigmastate builds the call: an error where its substitution
+    /// throws
+    pub(crate) fn try_call_tpe(
+        &self,
+        explicit_type_args: &HashMap<STypeVar, SType>,
+    ) -> Result<SType, TypeSubstError> {
+        let range = &*self.tpe().t_range;
+        // `withSubstTypes` gives the type as it is for an empty substitution (v6.0.7
+        // `sigma/ast/package.scala:166-169`): a call with no explicit type argument, which
+        // is nearly every call, and its type is read whenever a node checks its value
+        if explicit_type_args.is_empty() {
+            return Ok(range.clone());
+        }
+        range.with_subst(explicit_type_args)
     }
 }
 

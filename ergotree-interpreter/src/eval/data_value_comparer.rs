@@ -850,20 +850,16 @@ mod tests {
     }
 
     fn int_pair() -> SType {
-        SType::STuple(ergotree_ir::types::stuple::STuple::pair(
-            SType::SInt,
-            SType::SInt,
-        ))
+        SType::STuple(ergotree_ir::types::stuple::STuple::pair(SType::SInt, SType::SInt).into())
     }
 
     #[test]
     fn empty_colls_of_different_tuple_item_types_are_unequal() {
         let ctx = force_any_val::<Context>();
         let before = ctx.jit_cost_value();
-        let long_pair = SType::STuple(ergotree_ir::types::stuple::STuple::pair(
-            SType::SLong,
-            SType::SLong,
-        ));
+        let long_pair = SType::STuple(
+            ergotree_ir::types::stuple::STuple::pair(SType::SLong, SType::SLong).into(),
+        );
         assert!(!eq_with_cost(&empty_coll(int_pair()), &empty_coll(long_pair), &ctx).unwrap());
         assert_eq!(ctx.jit_cost_value() - before, MATCH_TYPE_COST);
     }
@@ -939,7 +935,7 @@ mod tests {
         // a collection compares its items the same way
         let lambdas = || -> Expr {
             Collection::new(
-                SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt)),
+                SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt).into()),
                 vec![identity()],
             )
             .unwrap()

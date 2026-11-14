@@ -159,7 +159,7 @@ lazy_static! {
             t_range: Box::new(SType::STuple(STuple::pair(
                 SType::SInt,
                 SType::SColl(SType::SByte.into())
-            ))),
+            ).into())),
             tpe_params: vec![],
         },
         explicit_type_args: vec![],
@@ -289,7 +289,7 @@ mod tests {
         let type_args = core::iter::once((STypeVar::t(), SType::SInt)).collect();
         let mc = MethodCall::with_type_args(
             GlobalVars::SelfBox.into(),
-            GET_REG_METHOD.clone().with_concrete_types(&type_args),
+            GET_REG_METHOD.clone(),
             vec![Constant::from(4i32).into()],
             type_args,
         )

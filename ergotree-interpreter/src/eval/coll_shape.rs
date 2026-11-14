@@ -686,7 +686,7 @@ mod producers {
                 .into()
         };
         let pairs: Expr = Collection::new(
-            SType::STuple(STuple::pair(SType::SInt, SType::SInt)),
+            SType::STuple(STuple::pair(SType::SInt, SType::SInt).into()),
             vec![pair(1, 2), pair(3, 4)],
         )
         .unwrap()
@@ -1431,7 +1431,7 @@ mod append_tests {
             body: Arc::new(Expr::Const(true.into())),
             captured: Arc::default(),
         });
-        let func = SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt));
+        let func = SType::SFunc(SFunc::new(vec![SType::SInt], SType::SInt).into());
         assert_eq!(twice(func, lambda).unwrap(), 2);
     }
 
