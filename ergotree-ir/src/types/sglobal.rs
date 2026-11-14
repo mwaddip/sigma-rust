@@ -101,7 +101,7 @@ lazy_static! {
 
     static ref ENCODE_NBITS_METHOD_DESC: SMethodDesc = SMethodDesc {
         method_id: ENCODE_NBITS_METHOD_ID,
-        name: "encodeNBits",
+        name: "encodeNbits",
         tpe: SFunc {
             t_dom: vec![
                 SType::SGlobal,
@@ -118,7 +118,7 @@ lazy_static! {
 
     static ref DECODE_NBITS_METHOD_DESC: SMethodDesc = SMethodDesc {
         method_id: DECODE_NBITS_METHOD_ID,
-        name: "decodeNBits",
+        name: "decodeNbits",
         tpe: SFunc {
             t_dom: vec![
                 SType::SGlobal,
@@ -135,7 +135,7 @@ lazy_static! {
 
     static ref DESERIALIZE_METHOD_DESC: SMethodDesc = SMethodDesc {
         method_id: DESERIALIZE_METHOD_ID,
-        name: "deserialize",
+        name: "deserializeTo",
         tpe: SFunc {
             t_dom: vec![
                 SType::SGlobal,

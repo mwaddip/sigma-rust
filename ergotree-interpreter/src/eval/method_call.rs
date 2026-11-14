@@ -1378,7 +1378,7 @@ mod argument_widening_tests {
             ("Coll", "slice", 1, "SInt"),
             ("Coll", "updated", 0, "SInt"),
             ("Context", "getVarFromInput", 0, "SShort"),
-            ("Global", "decodeNBits", 0, "SLong"),
+            ("Global", "decodeNbits", 0, "SLong"),
             ("Global", "powHit", 0, "SInt"),
             ("Global", "powHit", 4, "SInt"),
         ];
