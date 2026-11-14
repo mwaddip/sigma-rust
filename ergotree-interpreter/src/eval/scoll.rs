@@ -134,10 +134,10 @@ pub(crate) fn flatmap_eval<'ctx>(
     // type variable, the call's own `OV` when it could not be specialised, throws there, with
     // or without items; and the result's array is of that static class, whichever lambda the
     // mapper evaluated to (SANTA's third reference-store reply: R8, R8e, A2)
-    let SType::SColl(item_tpe) = &*mc.tpe().t_range else {
+    let call_tpe = mc.call_tpe();
+    let SType::SColl(item_tpe) = &call_tpe else {
         return Err(EvalError::UnexpectedValue(format!(
-            "flatMap: expected a collection range, found {:?}",
-            mc.tpe().t_range
+            "flatMap: expected a collection range, found {call_tpe:?}"
         )));
     };
     super::runtime_type::check_runtime_type(item_tpe, "flatMap")?;
@@ -523,10 +523,10 @@ pub(crate) static GET_OR_ELSE_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
 /// type is the call's, `mc.tpe` (when the call's types didn't unify it still holds a type
 /// variable, which [`map_coll`] refuses before charging, as `stypeToRType` throws)
 pub(crate) static MAP_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
-    let SType::SColl(item_tpe) = &*mc.tpe().t_range else {
+    let call_tpe = mc.call_tpe();
+    let SType::SColl(item_tpe) = &call_tpe else {
         return Err(EvalError::UnexpectedValue(format!(
-            "map: expected a collection range, found {:?}",
-            mc.tpe().t_range
+            "map: expected a collection range, found {call_tpe:?}"
         )));
     };
     let mapper = args

@@ -14,6 +14,8 @@ use ergotree_ir::sigma_protocol::sigma_boolean::SigmaBoolean;
 
 use ergotree_ir::types::smethod::SMethod;
 use ergotree_ir::types::stype::SType;
+use ergotree_ir::types::stype_param::STypeVar;
+use hashbrown::HashMap;
 
 use self::env::Env;
 use ergotree_ir::chain::context::Context;
@@ -560,6 +562,17 @@ pub(crate) struct MethodCallSite<'a> {
     pub(crate) method: &'a SMethod,
     /// the call's argument expressions; empty for a `PropertyCall`
     pub(crate) args: &'a [Expr],
+    /// the call's explicit type arguments
+    pub(crate) explicit_type_args: &'a HashMap<STypeVar, SType>,
+}
+
+impl MethodCallSite<'_> {
+    /// The call's static type, sigmastate's `mc.tpe` (`SMethod::call_tpe`): the method's
+    /// range with the call's type arguments substituted once more, which is the range itself
+    /// for a call with no type argument
+    pub(crate) fn call_tpe(&self) -> SType {
+        self.method.call_tpe(self.explicit_type_args)
+    }
 }
 
 impl core::ops::Deref for MethodCallSite<'_> {

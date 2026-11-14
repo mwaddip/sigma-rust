@@ -13,7 +13,14 @@ impl Evaluable for PropertyCall {
         ectx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
         // a PropertyCall is sigmastate's MethodCall with no arguments (`values.scala:1351`)
-        super::method_call::call_method(&self.method, &self.obj, &[], env, ectx)
+        super::method_call::call_method(
+            &self.method,
+            &self.obj,
+            &[],
+            &self.explicit_type_args,
+            env,
+            ectx,
+        )
     }
 }
 

@@ -14,6 +14,8 @@ use super::MethodCallSite;
 use ergotree_ir::types::smethod::SMethod;
 use ergotree_ir::types::stype::SType;
 use ergotree_ir::types::stype_companion::STypeCompanion;
+use ergotree_ir::types::stype_param::STypeVar;
+use hashbrown::HashMap;
 
 impl Evaluable for MethodCall {
     fn eval<'ctx>(
@@ -21,7 +23,14 @@ impl Evaluable for MethodCall {
         env: &mut Env<'ctx>,
         ectx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        call_method(&self.method, &self.obj, &self.args, env, ectx)
+        call_method(
+            &self.method,
+            &self.obj,
+            &self.args,
+            &self.explicit_type_args,
+            env,
+            ectx,
+        )
     }
 }
 
@@ -35,6 +44,7 @@ pub(crate) fn call_method<'ctx>(
     method: &SMethod,
     obj: &Expr,
     args: &[Expr],
+    explicit_type_args: &HashMap<STypeVar, SType>,
     env: &mut Env<'ctx>,
     ectx: &Context<'ctx>,
 ) -> Result<Value<'ctx>, EvalError> {
@@ -56,7 +66,11 @@ pub(crate) fn call_method<'ctx>(
     check_receiver(method, &ov)?;
     let argsv = widen_arguments(method, argsv);
     check_arguments(method, &argsv)?;
-    let site = MethodCallSite { method, args };
+    let site = MethodCallSite {
+        method,
+        args,
+        explicit_type_args,
+    };
     smethod_eval_fn(method)?(&site, env, ectx, ov, argsv)
 }
 /// sigmastate's parser checks no receiver against the method: the owner is the type code in
