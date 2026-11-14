@@ -451,10 +451,7 @@ mod array_class {
                 Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
             ),
             (SType::SBox, Value::CBox(force_any_val::<ErgoBox>().into())),
-            (
-                SType::SAvlTree,
-                Value::AvlTree(Box::new(force_any_val::<AvlTreeData>())),
-            ),
+            (SType::SAvlTree, Value::from(force_any_val::<AvlTreeData>())),
             (
                 SType::SHeader,
                 Value::Header(Box::new(force_any_val::<Header>())),

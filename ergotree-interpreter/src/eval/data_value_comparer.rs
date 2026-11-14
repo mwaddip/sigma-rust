@@ -1020,7 +1020,7 @@ mod tests {
             (
                 "AvlTree",
                 "avl tree",
-                Value::AvlTree(Box::new(force_any_val::<AvlTreeData>())),
+                Value::from(force_any_val::<AvlTreeData>()),
                 6,
             ),
             // by reading (`:385-396`): the harness builds none of these three

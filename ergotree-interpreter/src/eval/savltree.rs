@@ -14,6 +14,7 @@ use ergo_avltree_rust::operation::KeyValue;
 use ergo_avltree_rust::operation::Operation;
 use ergotree_ir::mir::avl_tree_data::AvlTreeData;
 use ergotree_ir::mir::avl_tree_data::AvlTreeFlags;
+use ergotree_ir::mir::avl_tree_data::AvlTreeValue;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
@@ -74,20 +75,14 @@ fn bytes_of(v: Value<'_>) -> Result<Bytes, EvalError> {
     Ok(Bytes::from(v.try_extract_into::<Vec<u8>>()?))
 }
 
-/// Build the batch AVL verifier for `avl_tree_data` over `proof`, charging the
-/// proof-size-scaled construction cost: `CreateAvlVerifier_Info` =
-/// PerItemCost(110, 20, 64) per proof byte (Scala `CErgoTreeEvaluator.createVerifier`
-/// — "the cost of tree reconstruction from proof is O(proof.length)").
-///
-/// The proof comes as the argument's VALUE, which the call has checked to be a collection:
-/// sigmastate adds the cost over the collection's length and builds the verifier inside that
-/// block, where the array is cast to bytes (`CErgoTreeEvaluator.scala:71-75`). So a proof of
-/// another item type has paid for the verifier before it is refused.
-fn create_verifier(
+/// What the verifier is built from. sigmastate adds the verifier's cost over the proof's length
+/// (`CreateAvlVerifier_Info`, `CErgoTreeEvaluator.scala:71-75`), then casts the proof's array
+/// and then the digest's to bytes (`CAvlTreeVerifier.scala:57-59`)
+fn verifier_inputs(
     ctx: &Context,
-    avl_tree_data: &AvlTreeData,
+    tree: AvlTreeValue<'_>,
     proof: Value,
-) -> Result<BatchAVLVerifier, EvalError> {
+) -> Result<(AvlTreeData, Bytes), EvalError> {
     let proof_len = match &proof {
         Value::Coll(coll) => coll.len(),
         _ => {
@@ -97,7 +92,15 @@ fn create_verifier(
         }
     };
     ctx.add_per_item_jit_cost(110, 20, 64, proof_len as u32)?;
-    let proof = &Bytes::from(proof.try_extract_into::<Vec<u8>>()?);
+    let proof = Bytes::from(proof.try_extract_into::<Vec<u8>>()?);
+    Ok((AvlTreeData::try_from(tree)?, proof))
+}
+
+/// Build the batch AVL verifier for `avl_tree_data` over `proof`
+fn create_verifier(
+    avl_tree_data: &AvlTreeData,
+    proof: &Bytes,
+) -> Result<BatchAVLVerifier, EvalError> {
     let starting_digest = Bytes::from(avl_tree_data.digest.clone());
     BatchAVLVerifier::new(
         &starting_digest,
@@ -117,61 +120,58 @@ fn create_verifier(
 }
 
 pub(crate) static DIGEST_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Coll(CollValue::Bytes(
-        avl_tree_data.digest.iter().map(|&b| b as i8).collect(),
-    )))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Coll(tree.digest))
 };
 
 pub(crate) static ENABLED_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Byte(avl_tree_data.tree_flags.serialize() as i8))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Byte(tree.tree_flags.serialize() as i8))
 };
 
 pub(crate) static KEY_LENGTH_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Int(avl_tree_data.key_length as i32))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Int(tree.key_length as i32))
 };
 
 pub(crate) static VALUE_LENGTH_OPT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
     Ok(Value::Opt(
-        avl_tree_data
-            .value_length_opt
+        tree.value_length_opt
             .map(|v| Value::Int(*v as i32))
             .map(Box::new),
     ))
 };
 
 pub(crate) static IS_INSERT_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Boolean(avl_tree_data.tree_flags.insert_allowed()))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Boolean(tree.tree_flags.insert_allowed()))
 };
 
 pub(crate) static IS_UPDATE_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Boolean(avl_tree_data.tree_flags.update_allowed()))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Boolean(tree.tree_flags.update_allowed()))
 };
 
 pub(crate) static IS_REMOVE_ALLOWED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
-    Ok(Value::Boolean(avl_tree_data.tree_flags.remove_allowed()))
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
+    Ok(Value::Boolean(tree.tree_flags.remove_allowed()))
 };
 
 pub(crate) static UPDATE_OPERATIONS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let mut tree = obj.try_extract_into::<AvlTreeValue>()?;
     let new_operations = {
         let v = args.first().cloned().ok_or_else(|| {
             EvalError::AvlTree("eval is missing first arg (new_operations)".to_string())
         })?;
         v.try_extract_into::<i8>()? as u8
     };
-    avl_tree_data.tree_flags = AvlTreeFlags::parse(new_operations);
-    Ok(Value::AvlTree(Box::new(avl_tree_data)))
+    tree.tree_flags = AvlTreeFlags::parse(new_operations);
+    Ok(Value::AvlTree(Box::new(tree)))
 };
 
 pub(crate) static UPDATE_DIGEST_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let mut tree = obj.try_extract_into::<AvlTreeValue>()?;
     // `CAvlTree.updateDigest` stores the new digest with no length check; mirror
     // that — accept any-length `Coll[Byte]`. A non-33 digest exists only in
     // memory (it cannot round-trip through serialization), same as the reference.
@@ -179,14 +179,14 @@ pub(crate) static UPDATE_DIGEST_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, args| {
         let v = args.first().cloned().ok_or_else(|| {
             EvalError::AvlTree("eval is missing first arg (new_digest)".to_string())
         })?;
-        v.try_extract_into::<Vec<u8>>()?
+        v.try_extract_into::<Vec<i8>>()?
     };
-    avl_tree_data.digest = new_digest;
-    Ok(Value::AvlTree(Box::new(avl_tree_data)))
+    tree.digest = CollValue::Bytes(new_digest.into());
+    Ok(Value::AvlTree(Box::new(tree)))
 };
 
 pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
     let key = args
         .first()
         .cloned()
@@ -196,7 +196,8 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: a proof that
         // does not match the tree digest yields a verifier with no reconstructed
@@ -233,7 +234,7 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 };
 
 pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     let keys =
         coll_items(args.first().cloned().ok_or_else(|| {
@@ -244,7 +245,8 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: lookups
         // fail on the no-tree verifier, so the first key raises the same
@@ -303,11 +305,11 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 };
 
 pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     // Flag-check cost: `isInsertAllowed_Info` = FixedCost(15) (Scala `insert_eval`).
     ctx.add_jit_cost(15)?;
-    if !avl_tree_data.tree_flags.insert_allowed() {
+    if !tree.tree_flags.insert_allowed() {
         return Ok(Value::Opt(None));
     }
 
@@ -321,7 +323,8 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (mut avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: every
         // insert fails on the no-tree verifier, which pre-v3 raises at the
@@ -379,18 +382,18 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Value::Opt(Some(Box::new(Value::AvlTree(avl_tree_data.into()))))
+        Value::Opt(Some(Box::new(Value::from(avl_tree_data))))
     } else {
         Value::Opt(None)
     })
 };
 
 pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     // Flag-check cost: `isRemoveAllowed_Info` = FixedCost(15) (Scala `remove_eval`).
     ctx.add_jit_cost(15)?;
-    if !avl_tree_data.tree_flags.remove_allowed() {
+    if !tree.tree_flags.remove_allowed() {
         return Ok(Value::Opt(None));
     }
 
@@ -405,7 +408,8 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (mut avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: every
         // remove fails on the no-tree verifier (op results are ignored —
@@ -446,16 +450,14 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Ok(Value::Opt(Some(Box::new(Value::AvlTree(
-            avl_tree_data.into(),
-        )))))
+        Ok(Value::Opt(Some(Box::new(Value::from(avl_tree_data)))))
     } else {
         Ok(Value::Opt(None))
     }
 };
 
 pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
     let key = args
         .first()
         .cloned()
@@ -466,7 +468,8 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: the lookup
         // fails on the no-tree verifier and `contains_eval` maps the failure to
@@ -496,11 +499,11 @@ pub(crate) static CONTAINS_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 };
 
 pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     // Flag-check cost: `isUpdateAllowed_Info` = FixedCost(15) (Scala `update_eval`).
     ctx.add_jit_cost(15)?;
-    if !avl_tree_data.tree_flags.update_allowed() {
+    if !tree.tree_flags.update_allowed() {
         return Ok(Value::Opt(None));
     }
 
@@ -514,7 +517,8 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (mut avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: every
         // update fails on the no-tree verifier (`update_eval`'s forall
@@ -556,20 +560,20 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Value::Opt(Some(Value::AvlTree(avl_tree_data.into()).into()))
+        Value::Opt(Some(Value::from(avl_tree_data).into()))
     } else {
         Value::Opt(None)
     })
 };
 
 pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let mut avl_tree_data = obj.try_extract_into::<AvlTreeData>()?;
+    let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     // Flag-check costs: `isUpdateAllowed_Info` + `isInsertAllowed_Info` =
     // FixedCost(15) each (Scala `insertOrUpdate_eval` charges both).
     ctx.add_jit_cost(15)?;
     ctx.add_jit_cost(15)?;
-    if !avl_tree_data.tree_flags.insert_allowed() || !avl_tree_data.tree_flags.update_allowed() {
+    if !tree.tree_flags.insert_allowed() || !tree.tree_flags.update_allowed() {
         return Ok(Value::Opt(None));
     }
 
@@ -583,7 +587,8 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         .cloned()
         .ok_or_else(|| EvalError::AvlTree("eval is missing second arg (proof)".to_string()))?;
 
-    let mut bv = match create_verifier(ctx, &avl_tree_data, proof) {
+    let (mut avl_tree_data, proof) = verifier_inputs(ctx, tree, proof)?;
+    let mut bv = match create_verifier(&avl_tree_data, &proof) {
         Ok(bv) => bv,
         // The reference impl's verifier construction never throws: with a proof
         // that does not match the tree digest it yields a verifier with no
@@ -626,7 +631,7 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Value::Opt(Some(Box::new(Value::AvlTree(avl_tree_data.into()))))
+        Value::Opt(Some(Box::new(Value::from(avl_tree_data))))
     } else {
         Value::Opt(None)
     })
@@ -883,7 +888,10 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest.0.to_vec());
+                assert_eq!(
+                    Value::Coll(avl.digest.clone()),
+                    Value::from(final_digest.0.to_vec())
+                );
             } else {
                 unreachable!();
             }
@@ -976,7 +984,10 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest.0.to_vec());
+                assert_eq!(
+                    Value::Coll(avl.digest.clone()),
+                    Value::from(final_digest.0.to_vec())
+                );
             } else {
                 unreachable!();
             }
@@ -1259,7 +1270,7 @@ mod tests {
             .into();
             let res = eval_out_wo_ctx::<Value>(&expr);
             if let Value::AvlTree(a) = res {
-                assert_eq!(a.digest, new_digest.0.to_vec());
+                assert_eq!(Value::Coll(a.digest.clone()), Value::from(new_digest.0.to_vec()));
             } else {
                 unreachable!();
             }
@@ -1392,7 +1403,10 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest.0.to_vec());
+                assert_eq!(
+                    Value::Coll(avl.digest.clone()),
+                    Value::from(final_digest.0.to_vec())
+                );
             } else {
                 unreachable!();
             }
@@ -1465,7 +1479,10 @@ mod tests {
         let res = eval_out_wo_ctx::<Value>(&expr);
         if let Value::Opt(opt) = res {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
-                assert_eq!(avl.digest, final_digest.0.to_vec());
+                assert_eq!(
+                    Value::Coll(avl.digest.clone()),
+                    Value::from(final_digest.0.to_vec())
+                );
             } else {
                 unreachable!();
             }

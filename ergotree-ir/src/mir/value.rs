@@ -22,6 +22,7 @@ use crate::unsignedbigint256::UnsignedBigInt;
 use ergo_chain_types::{EcPoint, Header, PreHeader};
 
 use super::avl_tree_data::AvlTreeData;
+use super::avl_tree_data::AvlTreeValue;
 use super::coll_value::CollValue;
 use super::constant::Literal;
 use super::constant::TryExtractFrom;
@@ -338,7 +339,7 @@ pub enum Value<'ctx> {
     /// Ergo box
     CBox(Ref<'ctx, ErgoBox>),
     /// AVL tree
-    AvlTree(Box<AvlTreeData>),
+    AvlTree(Box<AvlTreeValue<'ctx>>),
     /// Collection of values of the same type, in the form of the JVM object that holds it
     Coll(CollValue<'ctx>),
     /// A pair, sigmastate's `Tuple2`. A tuple of any other count is a collection of `Any`
@@ -385,7 +386,12 @@ impl<'ctx> Value<'ctx> {
             Value::GroupElement(b) => Value::GroupElement(b.to_static()),
             Value::SigmaProp(p) => Value::SigmaProp(p.clone()),
             Value::UnsignedBigInt(b) => Value::UnsignedBigInt(*b),
-            Value::AvlTree(t) => Value::AvlTree(t.clone()),
+            Value::AvlTree(t) => Value::AvlTree(Box::new(AvlTreeValue {
+                digest: coll_to_static_shared(&t.digest, memo),
+                tree_flags: t.tree_flags.clone(),
+                key_length: t.key_length,
+                value_length_opt: t.value_length_opt.clone(),
+            })),
             Value::Coll(coll) => Value::Coll(coll_to_static_shared(coll, memo)),
             Value::Pair(pair) => {
                 Value::pair(pair.0.to_static_shared(memo), pair.1.to_static_shared(memo))
@@ -484,7 +490,7 @@ impl From<Literal> for Value<'static> {
             Literal::GroupElement(e) => Value::GroupElement(e.into()),
             Literal::CBox(b) => Value::CBox(b),
             Literal::Coll(coll) => Value::Coll(CollValue::from(coll)),
-            Literal::AvlTree(a) => Value::AvlTree(a),
+            Literal::AvlTree(a) => Value::AvlTree(Box::new((*a).into())),
             Literal::Header(h) => Value::Header(h),
             Literal::Opt(lit) => Value::Opt(lit.map(|boxed| *boxed).map(Value::from).map(Box::new)),
             // sigmastate's data of a tuple: a `Tuple2` for a pair, a generic `Coll[Any]` for any
@@ -841,10 +847,32 @@ impl TryExtractFrom<Value<'_>> for BigInt256 {
     }
 }
 
+/// A tree as data (the enum's derived `From` takes the boxed runtime tree)
+impl From<AvlTreeData> for Value<'_> {
+    fn from(d: AvlTreeData) -> Self {
+        Value::AvlTree(Box::new(d.into()))
+    }
+}
+
+/// A runtime tree as it is, whatever its digest
+impl<'ctx> TryExtractFrom<Value<'ctx>> for AvlTreeValue<'ctx> {
+    fn try_extract_from(v: Value<'ctx>) -> Result<Self, TryExtractFromError> {
+        match v {
+            Value::AvlTree(a) => Ok(*a),
+            _ => Err(TryExtractFromError(format!(
+                "expected {:?}, found {:?}",
+                core::any::type_name::<Self>(),
+                v
+            ))),
+        }
+    }
+}
+
+/// A runtime tree as data: an error for a digest that is not of bytes
 impl TryExtractFrom<Value<'_>> for AvlTreeData {
     fn try_extract_from(v: Value) -> Result<Self, TryExtractFromError> {
         match v {
-            Value::AvlTree(a) => Ok(*a),
+            Value::AvlTree(a) => AvlTreeData::try_from(*a),
             _ => Err(TryExtractFromError(format!(
                 "expected {:?}, found {:?}",
                 core::any::type_name::<Self>(),

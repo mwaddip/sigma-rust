@@ -559,7 +559,7 @@ mod receiver_kind_tests {
             Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
             Value::UnsignedBigInt(UnsignedBigInt::from(1u32)),
             Value::CBox(Ref::from(force_any_val::<ErgoBox>())),
-            Value::AvlTree(Box::new(force_any_val::<AvlTreeData>())),
+            Value::from(force_any_val::<AvlTreeData>()),
             // a collection in each of its forms
             Value::Coll(CollValue::Bytes(vec![1i8].into())),
             Value::Coll(CollValue::Booleans(vec![true].into())),

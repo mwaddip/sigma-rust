@@ -417,7 +417,9 @@ impl<'ctx> TryFrom<Value<'ctx>> for Literal {
                     [Literal::try_from(l)?, Literal::try_from(r)?].into(),
                 ))
             }
-            Value::AvlTree(a) => Ok(Literal::from(*a)),
+            // data is a tree whose digest is bytes: sigmastate's writer casts the digest's array
+            // (v6.0.6 `AvlTreeData.scala:75`)
+            Value::AvlTree(a) => Ok(Literal::from(AvlTreeData::try_from(*a).map_err(|e| e.0)?)),
             Value::String(s) => Ok(Literal::from(s)),
             Value::Header(h) => Ok(Literal::from(*h)),
             Value::Context => Err("Cannot convert Value::Context into Literal".into()),

@@ -449,7 +449,7 @@ mod tests {
             C::Header => Value::Header(Box::new(force_any_val::<Header>())),
             C::PreHeader => Value::PreHeader(Box::new(force_any_val::<PreHeader>())),
             C::Option => Value::Opt(Some(Box::new(Value::Int(1)))),
-            C::AvlTree => Value::AvlTree(Box::new(force_any_val::<AvlTreeData>())),
+            C::AvlTree => Value::from(force_any_val::<AvlTreeData>()),
         }
     }
 
