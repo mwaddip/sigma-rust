@@ -266,7 +266,7 @@ mod tests {
             vec![1i64, 2i64].into(),
             scoll::INDEX_OF_METHOD
                 .clone()
-                .with_concrete_types(&[(STypeVar::t(), SType::SLong)].iter().cloned().collect())
+                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
                 .unwrap(),
             vec![2i64.into(), 0i32.into()],
         )
@@ -561,7 +561,7 @@ mod tests {
             vec![1i64, 2i64].into(),
             scoll::INDEX_OF_METHOD
                 .clone()
-                .with_concrete_types(&t_is(SType::SLong))
+                .with_concrete_types(&core::iter::once((STypeVar::iv(), SType::SLong)).collect())
                 .unwrap(),
             vec![2i64.into(), 0i32.into()],
         )

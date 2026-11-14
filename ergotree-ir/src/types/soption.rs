@@ -27,6 +27,10 @@ pub const GET_METHOD_ID: MethodId = MethodId(3);
 /// Option.getOrElse
 pub const GET_OR_ELSE_METHOD_ID: MethodId = MethodId(4);
 
+// The type variables of this table are sigmastate's by NAME: `T` for the option's type and `R`
+// for `map`'s result (`tT`, `tR`, v6.0.7 `SType.scala:81-82`; `SOptionMethods`,
+// `methods.scala:727-`). The name decides whether a call specialises: see the `Coll` table
+// (`scoll.rs`).
 lazy_static! {
     /// Option method descriptors
     pub(crate) static ref METHOD_DESC: Vec<SMethodDesc> =
@@ -84,13 +88,13 @@ lazy_static! {
         name: "map",
         tpe: SFunc::new(
             vec![
-                SType::SOption(SType::STypeVar(STypeVar::iv()).into()),
+                SType::SOption(SType::STypeVar(STypeVar::t()).into()),
                 SFunc::new(
-                    vec![STypeVar::iv().into()],
-                    STypeVar::ov().into(),
+                    vec![STypeVar::t().into()],
+                    STypeVar::r().into(),
                 ).into()
                 ],
-            SType::SOption(SType::STypeVar(STypeVar::ov()).into()),
+            SType::SOption(SType::STypeVar(STypeVar::r()).into()),
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
@@ -107,13 +111,13 @@ lazy_static! {
         name: "filter",
         tpe: SFunc::new(
             vec![
-                SType::SOption(SType::STypeVar(STypeVar::iv()).into()),
+                SType::SOption(SType::STypeVar(STypeVar::t()).into()),
                 SFunc::new(
-                    vec![STypeVar::iv().into()],
+                    vec![STypeVar::t().into()],
                     SType::SBoolean,
                 ).into()
                 ],
-            SType::SOption(SType::STypeVar(STypeVar::iv()).into()),
+            SType::SOption(SType::STypeVar(STypeVar::t()).into()),
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0

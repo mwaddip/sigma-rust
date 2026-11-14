@@ -2149,20 +2149,27 @@ mod value_check_tests {
         }
         .into();
         let map = |arg_tpe: SType| -> Expr {
+            let method = soption::MAP_METHOD
+                .clone()
+                .with_concrete_types(
+                    &[
+                        (STypeVar::t(), arg_tpe.clone()),
+                        (STypeVar::r(), arg_tpe.clone()),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                )
+                .unwrap();
+            // the call is built field by field, so nothing else says the keys are the
+            // variables `Option.map` declares
+            assert_eq!(
+                *method.tpe().t_range,
+                SType::SOption(arg_tpe.clone().into())
+            );
             MethodCall {
                 obj: Box::new(opt.clone()),
-                method: soption::MAP_METHOD
-                    .clone()
-                    .with_concrete_types(
-                        &[
-                            (STypeVar::iv(), arg_tpe.clone()),
-                            (STypeVar::ov(), arg_tpe.clone()),
-                        ]
-                        .iter()
-                        .cloned()
-                        .collect(),
-                    )
-                    .unwrap(),
+                method,
                 args: vec![lambda(
                     arg_tpe.clone(),
                     ValUse {

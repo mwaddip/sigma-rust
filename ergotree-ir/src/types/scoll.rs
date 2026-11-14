@@ -61,6 +61,16 @@ pub const APPEND_METHOD_ID: MethodId = MethodId(9);
 /// Coll.apply
 pub const APPLY_METHOD_ID: MethodId = MethodId(10);
 
+// The type variables of this table are sigmastate's by NAME: `IV` for a collection's item type
+// and `OV` for a second type (`tIV`, `tOV`, v6.0.7 `SType.scala:88-89`; `SCollectionMethods`,
+// `methods.scala:805-`). Two type variables unify only when their names are equal
+// (`sigma/ast/package.scala:39-42`), so a method's variable matches a variable in the type of
+// a receiver or an argument by its name alone, and the name decides whether the call
+// specialises. Such a variable is one a script wrote, or one a method table left in the type
+// of a call that did not specialise: a call whose receiver and arguments do not unify with
+// its domain keeps its range as the table has it (`Coll[IV]`), and the next call meets that
+// name, in a tree that writes no type variable at all. The interpreter's
+// `a_call_specialises_by_the_jvms_variable_names` holds the rows measured on the jars.
 lazy_static! {
     /// Coll method descriptors
     pub(crate) static ref METHOD_DESC: Vec<SMethodDesc> =
@@ -95,8 +105,8 @@ lazy_static! {
         name: "indexOf",
         tpe: SFunc {
             t_dom: vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
-                STypeVar::t().into(),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
+                STypeVar::iv().into(),
                 SType::SInt],
             t_range: SType::SInt.into(),
             tpe_params: vec![],
@@ -135,11 +145,11 @@ lazy_static! {
         name: "zip",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
-                SType::SColl(SType::STypeVar(STypeVar::iv()).into())
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::ov()).into())
             ],
             SType::SColl(SType::STuple(STuple::pair(
-                STypeVar::t().into(), STypeVar::iv().into()
+                STypeVar::iv().into(), STypeVar::ov().into()
             ).into()).into())
         ),
         explicit_type_args: vec![],
@@ -155,7 +165,7 @@ lazy_static! {
         name: "indices",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
             ],
             SType::SColl(SType::SInt.into())
         ),
@@ -172,12 +182,12 @@ lazy_static! {
         name: "patch",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
                 SType::SInt,
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
                 SType::SInt,
             ],
-            SType::SColl(SType::STypeVar(STypeVar::t()).into())
+            SType::SColl(SType::STypeVar(STypeVar::iv()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
@@ -192,12 +202,12 @@ lazy_static! {
         name: "updated",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
                 SType::SInt,
-                SType::STypeVar(STypeVar::t())
+                SType::STypeVar(STypeVar::iv())
 
             ],
-            SType::SColl(SType::STypeVar(STypeVar::t()).into())
+            SType::SColl(SType::STypeVar(STypeVar::iv()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
@@ -212,12 +222,12 @@ lazy_static! {
         name: "updateMany",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
                 SType::SColl(SType::SInt.into()),
-                SType::SColl(SType::STypeVar(STypeVar::t()).into())
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into())
 
             ],
-            SType::SColl(SType::STypeVar(STypeVar::t()).into())
+            SType::SColl(SType::STypeVar(STypeVar::iv()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
@@ -231,8 +241,8 @@ lazy_static! {
         method_id: REVERSE_METHOD_ID,
         name: "reverse",
         tpe: SFunc::new(
-            vec![SType::SColl(SType::STypeVar(STypeVar::t()).into())],
-            SType::SColl(SType::STypeVar(STypeVar::t()).into())
+            vec![SType::SColl(SType::STypeVar(STypeVar::iv()).into())],
+            SType::SColl(SType::STypeVar(STypeVar::iv()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V3
@@ -247,8 +257,8 @@ lazy_static! {
         name: "startsWith",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
-                SType::SColl(SType::STypeVar(STypeVar::t()).into())
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into())
             ],
             SType::SBoolean
         ),
@@ -265,8 +275,8 @@ lazy_static! {
         name: "endsWith",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
-                SType::SColl(SType::STypeVar(STypeVar::t()).into())
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into())
             ],
             SType::SBoolean
         ),
@@ -283,10 +293,10 @@ lazy_static! {
         name: "get",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
                 SType::SInt
             ],
-            SType::SOption(SType::STypeVar(STypeVar::t()).into())
+            SType::SOption(SType::STypeVar(STypeVar::iv()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V3
