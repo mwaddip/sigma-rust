@@ -57,6 +57,16 @@ impl Evaluable for SubstConstants {
             let mut new_values = vec![];
             for v in &coll.as_vec() {
                 let v = v.to_static();
+                // sigmastate's lift is a table of classes with no arm for a pair, an option
+                // or `Unit` (`Platform.liftToConstant`, v6.0.6 `Platform.scala:16-63`): such
+                // a new value throws here, whatever its position (`Extensions.scala:60`).
+                // Inside a collection they are lifted with it (the `Coll` arm)
+                if matches!(v, Value::Pair(_) | Value::Opt(_) | Value::Unit) {
+                    return Err(EvalError::Misc(format!(
+                        "SubstConstants: a new value of this kind is not lifted to a constant: \
+                         {v:?}"
+                    )));
+                }
                 new_values.push(match Constant::try_from(v.clone()) {
                     Ok(c) => NewValue::Constant(c),
                     Err(e) => {
@@ -221,6 +231,119 @@ fn coll_with_writable_parts(coll: CollValue<'static>) -> CollValue<'static> {
     }
 }
 
+/// What `substConstants` lifts. sigmastate turns each new value into a constant with
+/// `liftToConstant`, a table of classes (v6.0.6 `Platform.scala:16-63`), and throws for a value
+/// the table has no arm for (`Extensions.scala:53-64`). Each row gives one new value for
+/// position 7 of a script whose only constant is at position 0, so nothing is written.
+/// Measured on the sigma-state 6.0.7 jars, cost included, also at a throw
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod lift_rows {
+    use crate::eval::test_util::{eval_body, innermost};
+    use crate::eval::EvalError;
+    use alloc::format;
+    use alloc::string::String;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
+
+    const V0: ErgoTreeVersion = ErgoTreeVersion::V0;
+    const V3: ErgoTreeVersion = ErgoTreeVersion::V3;
+
+    /// A tree constant: 1-byte keys, every operation allowed
+    const TREE: &str = "6415cc1ba1054bf74431a2ccfc57e6051b9d0e7561f70586e5512c0ae3f3bac4fd02070100";
+    /// The group's generator
+    const G: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// A tree with constant segregation whose one constant is [`TREE`] and whose root is the
+    /// placeholder
+    fn script() -> String {
+        format!("1001{TREE}7300")
+    }
+    /// `substConstants(script, Coll(7), Coll[item_type](item))`
+    fn subst(item_type: &str, item: &str) -> String {
+        let script = script();
+        format!(
+            "740e{:02x}{script}10010e8301{item_type}{item}",
+            script.len() / 2
+        )
+    }
+    /// `TREE.updateDigest(Coll[Int](1, 2))`: a tree only the writer refuses
+    fn tree_with_ints() -> String {
+        format!("dc640f{TREE}0110020204")
+    }
+
+    // a pair, an option and `Unit` have no arm: the lift throws before anything is
+    // substituted, also when the value holds a tree the writer alone would refuse
+    #[test]
+    fn a_value_the_jvms_table_has_no_arm_for_is_refused() {
+        let t = tree_with_ints();
+        let both: &[ErgoTreeVersion] = &[V0, V3];
+        // an option constant does not parse below tree version 3, and `Global.some` is a
+        // method of version 3
+        let v3: &[ErgoTreeVersion] = &[V3];
+        let rows: [(&str, String, &[ErgoTreeVersion], u64); 8] = [
+            ("62", "62".into(), both, 35),                   // ()
+            ("58", "580204".into(), both, 35),               // the constant (1, 2)
+            ("58", "860204020404".into(), both, 55),         // (1, 2) built by a node
+            ("3c6404", format!("8602{t}0402"), both, 104),   // (that tree, 1)
+            ("28", "280102".into(), v3, 35),                 // the constant Some(1)
+            ("28", "dc6a09dd01040204".into(), v3, 49),       // Global.some(1)
+            ("2464", format!("dc6a09dd01{TREE}64"), v3, 49), // Global.some(the tree)
+            ("2464", format!("dc6a09dd01{t}64"), v3, 98),    // Global.some(that tree)
+        ];
+        for (item_type, item, versions, cost) in rows {
+            for version in versions {
+                let body = subst(item_type, &item);
+                let (res, c) = eval_body(&body, *version);
+                assert!(res.is_err(), "{body}: {res:?}");
+                let e = res.unwrap_err();
+                assert!(matches!(innermost(&e), EvalError::Misc(_)), "{body}: {e:?}");
+                assert_eq!(c, cost, "{body}");
+            }
+        }
+    }
+
+    // every other kind is lifted and, at a position that holds no constant, leaves the script
+    // as it was; a pair or an option INSIDE a collection is lifted with the collection
+    #[test]
+    fn a_value_the_jvms_table_has_an_arm_for_is_lifted() {
+        let unchanged = Value::from(base16::decode(script().as_bytes()).unwrap());
+        let t = tree_with_ints();
+        let rows: [(&str, String, u64); 11] = [
+            ("01", "0101".into(), 235),      // true
+            ("02", "0201".into(), 235),      // 1.toByte
+            ("03", "0302".into(), 235),      // 1.toShort
+            ("04", "0402".into(), 235),      // 1
+            ("05", "0502".into(), 235),      // 1L
+            ("06", "060101".into(), 235),    // 1.toBigInt
+            ("07", format!("07{G}"), 235),   // a group element
+            ("08", format!("08cd{G}"), 235), // a sigma proposition
+            ("64", TREE.into(), 235),        // a tree
+            ("10", "100102".into(), 235),    // Coll[Int](1)
+            ("64", t.clone(), 284),          // the tree only the writer refuses
+        ];
+        for (item_type, item, cost) in rows {
+            for version in [V0, V3] {
+                let (res, c) = eval_body(&subst(item_type, &item), version);
+                assert_eq!(res.ok().as_ref(), Some(&unchanged), "{item}");
+                assert_eq!(c, cost, "{item}");
+            }
+        }
+        // Coll(Coll((that tree, 1))) at both versions, Coll(Coll(Some(that tree))) at version 3
+        let pairs = format!("83014c648602{t}0402");
+        for version in [V0, V3] {
+            let (res, c) = eval_body(&subst("0c4c64", &pairs), version);
+            assert_eq!(res.ok().as_ref(), Some(&unchanged), "{pairs}");
+            assert_eq!(c, 324, "{pairs}");
+        }
+        let options = format!("83012464dc6a09dd01{t}64");
+        let (res, c) = eval_body(&subst("0c2464", &options), V3);
+        assert_eq!(res.ok().as_ref(), Some(&unchanged), "{options}");
+        assert_eq!(c, 318, "{options}");
+    }
+}
+
 /// SANTA `Tuple.non_pair_value_type_directed` #5 and #6 (sigma-state 6.0.7), and the positions'
 /// array
 #[cfg(test)]
@@ -276,8 +399,9 @@ mod tests {
     use super::*;
     proptest! {
 
+        // a collection, which sigmastate's lift has an arm for; a pair it refuses (`lift_rows`)
         #[test]
-        fn eval_single_substitution(original in any::<((i32, i32), Vec<i64>)>(), new in any::<((i32, i32), Vec<i64>)>()) {
+        fn eval_single_substitution(original in any::<Vec<i64>>(), new in any::<Vec<i64>>()) {
             test_single_substitution(original, new);
         }
 
