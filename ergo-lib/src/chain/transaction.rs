@@ -997,6 +997,37 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_string_is_written_as_the_jvm_writes_it() {
+        // sigma-state 6.0.7 (the round's `measure/rows/tx.txt`): an encoded surrogate,
+        // `ED A0 80`, is one U+FFFD on the JVM
+        let (sur, repl) = (
+            [0x66, 0x03, 0xed, 0xa0, 0x80],
+            [0x66, 0x03, 0xef, 0xbf, 0xbd],
+        );
+        let hex = |s: &str| base16::decode(s.as_bytes()).unwrap();
+        assert_written_as_twins(&[
+            // in an output's R4
+            (
+                tx_with_r4(&sur),
+                tx_with_r4(&repl),
+                "5e2cec6f0eb46b55ca37a1b3f2cbd48c5e480648e0a353dbbfa5a4cdcc3525a1",
+            ),
+            // in a context extension value
+            (
+                tx_bytes(&[&[1, 0][..], &sur].concat(), &[0x00, 0x08, 0xd3]),
+                tx_bytes(&[&[1, 0][..], &repl].concat(), &[0x00, 0x08, 0xd3]),
+                "b1ca98ac374749fe25b46007abb66d4c7b35d05ce88fa46347b57396285f9237",
+            ),
+            // in an output's tree: `sigmaProp(Coll[String](..) == Coll[String](..))`
+            (
+                tx_bytes(&[0], &hex("00d1930c660103eda0800c660103efbfbd")),
+                tx_bytes(&[0], &hex("00d1930c660103efbfbd0c660103efbfbd")),
+                "ee6ae9ea55f417ff2071c433813f1cb9551d55c3fee42fb6ec890f95a739d86c",
+            ),
+        ]);
+    }
+
+    #[test]
     fn a_transaction_is_read_and_its_id_written_at_its_reader_s_version() {
         // ergo reads a v6 block's transactions at version context (3, 3), and one from a peer
         // at the activated version (v6.0.6 `BlockTransactions.scala:184-202`,

@@ -3,7 +3,6 @@ use alloc::format;
 use ergo_chain_types::Header;
 use sigma_ser::ScorexSerializable;
 
-use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -32,6 +31,7 @@ use num_traits::Zero;
 
 use super::sigma_byte_writer::SigmaByteWrite;
 use super::types::TypeCode;
+use crate::serialization::jvm_string::jvm_string;
 use alloc::sync::Arc;
 
 /// Used to serialize and parse `Literal` and `Value`.
@@ -240,7 +240,7 @@ impl DataSerializer {
                 r.check_remaining(len as usize)?;
                 let mut buf = vec![0; len as usize];
                 r.get_bytes_into(&mut buf)?;
-                Literal::String(String::from_utf8_lossy(&buf).into())
+                Literal::String(jvm_string(&buf).into())
             }
             SBigInt => Literal::BigInt(BigInt256::sigma_parse(r)?),
             SUnit => Literal::Unit,
