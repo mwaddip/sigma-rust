@@ -32,7 +32,8 @@ impl PropertyCall {
     }
 
     /// Create new object with explicit type args, returns an error if any of the requirements
-    /// failed
+    /// failed. `method` is the method as its table has it, generic: the type arguments are
+    /// substituted into it here, as the parser substitutes them
     pub fn with_type_args(
         obj: Expr,
         method: SMethod,
@@ -77,6 +78,10 @@ impl PropertyCall {
         let method = method
             .with_concrete_types(&type_args)
             .map_err(|e| InvalidArgumentError(format!("PropertyCall: {e:?}")))?;
+        // sigmastate computes the call's type when it builds the call (`val tpe`)
+        method
+            .try_call_tpe(&type_args)
+            .map_err(|e| InvalidArgumentError(format!("PropertyCall: {e:?}")))?;
         Ok(Self {
             obj: obj.into(),
             method,
@@ -84,9 +89,9 @@ impl PropertyCall {
         })
     }
 
-    /// Type
+    /// Type: the call's, [`SMethod::call_tpe`]
     pub fn tpe(&self) -> SType {
-        *self.method.tpe().t_range.clone()
+        self.method.call_tpe(&self.explicit_type_args)
     }
 }
 

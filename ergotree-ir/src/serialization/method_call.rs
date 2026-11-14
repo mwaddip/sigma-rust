@@ -53,6 +53,9 @@ impl SigmaSerializable for MethodCall {
             .collect::<Result<_, _>>()?;
         let obj_tpe = obj.try_tpe()?;
         let method = method.specialize_for(obj_tpe, arg_types)?;
+        // the call's type is a `val` of the node sigmastate builds (`values.scala:1355-1358`):
+        // a second substitution of the explicit types that can throw
+        method.try_call_tpe(&explicit_type_args)?;
         Ok(MethodCall {
             obj: obj.into(),
             method,
@@ -449,6 +452,12 @@ mod tests {
             "some(Coll[Int]())" => "dc6a09dd011000",
             "fromBigEndianBytes" => "dc6a05dd010e0101",
             "deserializeTo" => "dc6a04dd010e0100",
+            // `some` of `{(x: T) => 1}`, of `{(f: [T](Int) => Int) => 1}` and of a collection of it
+            "some(lambda of T)" => "dc6a09dd01d901016701540402",
+            "some(lambda of [T](Int)=>Int)" => "dc6a09dd01d9010170010404016701540402",
+            "some(Coll(lambda of [T](Int)=>Int))" => {
+                "dc6a09dd018301700170010404016701540400d9010170010404016701540402"
+            }
             _ => "",
         };
         assert!(!start.is_empty(), "{method}");
@@ -458,6 +467,149 @@ mod tests {
     fn parse_v3(body_hex: &str) -> Result<Expr, crate::serialization::SigmaParsingError> {
         use crate::serialization::SigmaSerializable;
         from_bytes(&hex(body_hex)).with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
+    }
+
+    fn tpe(type_hex: &str) -> SType {
+        use crate::serialization::SigmaSerializable;
+        from_bytes(&hex(type_hex))
+            .with_tree_version(ErgoTreeVersion::V3, SType::sigma_parse)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_calls_type_is_the_range_with_the_type_argument_substituted_again() {
+        // sigma-state 6.0.7, read from the jars: the method, its type argument, the type of
+        // the call. A type argument that names `T` is substituted into itself; a function
+        // type at the top of the range loses its parameter `T`; `some`'s argument can bind a
+        // variable of the type argument (`specializeFor`).
+        for (method, type_arg, call_tpe) in [
+            ("getReg", "04", "28"),                                   // Int
+            ("getReg", "670154", "24670154"),                         // T
+            ("getReg", "0c670154", "240c0c670154"),                   // Coll[T]
+            ("getReg", "40670154", "244040670154"),                   // (Int,T)
+            ("getReg", "70010467015400", "247001047001046701540000"), // (Int)=>T
+            ("getReg", "7001040401670155", "247001040401670155"),     // [U](Int)=>Int
+            (
+                "getReg",
+                "0c70016701540401670155",
+                "240c70010c700167015404016701550401670155",
+            ), // Coll[[U](T)=>Int]
+            ("getVarFromInput", "24670154", "242424670154"),          // Option[T]
+            ("none", "0c0c670154", "240c0c0c0c670154"),               // Coll[Coll[T]]
+            ("none", "70016701540400", "247001700167015404000400"),   // (T)=>Int
+            ("some(1)", "0c670154", "240c0c670154"),                  // Coll[T]
+            ("some(1)", "670154", "28"),                              // T
+            ("some(Coll[Int]())", "0c670154", "34"),                  // Coll[T]
+            ("fromBigEndianBytes", "0c670154", "0c0c670154"),         // Coll[T]
+            ("fromBigEndianBytes", "7001040401670154", "7001040400"), // [T](Int)=>Int
+            (
+                "fromBigEndianBytes",
+                "7001040402670154670155",
+                "7001040401670155",
+            ), // [T,U](Int)=>Int
+            ("deserializeTo", "0c670154", "0c0c670154"),              // Coll[T]
+            ("deserializeTo", "7001040401670154", "7001040400"),      // [T](Int)=>Int
+            ("deserializeTo", "7001040401670155", "7001040401670155"), // [U](Int)=>Int
+            (
+                "deserializeTo",
+                "70016701540401670154",
+                "7001700167015404016701540400",
+            ), // [T](T)=>Int
+            (
+                "deserializeTo",
+                "70010467015401670154",
+                "7001047001046701540167015400",
+            ), // [T](Int)=>T
+            (
+                "deserializeTo",
+                "700104700104040167015400",
+                "700104700104040000",
+            ), // (Int)=>[T](Int)=>Int
+            (
+                "deserializeTo",
+                "700170010404016701540400",
+                "700170010404000400",
+            ), // ([T](Int)=>Int)=>Int
+            (
+                "deserializeTo",
+                "700104700104040167015401670154",
+                "700104700104040000",
+            ), // [T](Int)=>[T](Int)=>Int
+            ("some(lambda)", "70016701550400", "247001040400"),       // (U)=>Int
+            ("some(lambda)", "70016701550401670156", "247001040401670156"), // [V](U)=>Int
+            ("some(Coll(lambda))", "0c70016701540400", "240c7001040400"), // Coll[(T)=>Int]
+            (
+                "some(Coll(lambda))",
+                "0c70016701540401670155",
+                "240c7001040401670155",
+            ), // Coll[[U](T)=>Int]
+            // the `T` that `some`'s ARGUMENT brought into the range is substituted too: `U`
+            // is the type argument here
+            ("some(lambda of T)", "670155", "2470016701550400"), // Option[(U) => Int]
+            // ... and a function type's parameter `T` there is renamed
+            (
+                "some(lambda of [T](Int)=>Int)",
+                "670155",
+                "24700170010404016701550400",
+            ), // Option[([U](Int) => Int) => Int]
+        ] {
+            let expr = parse_v3(&call(method, type_arg)).unwrap();
+            assert_eq!(expr.tpe(), tpe(call_tpe), "{method}[{type_arg}]");
+        }
+        // a call with no type argument has its method's range
+        let index_of = MethodCall::new(
+            vec![1i64, 2i64].into(),
+            scoll::INDEX_OF_METHOD
+                .clone()
+                .with_concrete_types(&t_is(SType::SLong))
+                .unwrap(),
+            vec![2i64.into(), 0i32.into()],
+        )
+        .unwrap();
+        assert_eq!(index_of.tpe(), *index_of.method.tpe().t_range.clone());
+        assert_eq!(index_of.tpe(), SType::SInt);
+    }
+
+    #[test]
+    fn a_rebuilt_call_keeps_its_type() {
+        // sigmastate's `dup` builds the call again from the same method and the same type
+        // arguments (`Rewriter.scala:241-260`): its type is computed from what it was
+        let mut expr = parse_v3(&call("deserializeTo", "0c670154")).unwrap();
+        crate::serialization::check_build::rebuild(&mut expr).unwrap();
+        assert_eq!(expr.tpe(), tpe("0c0c670154"));
+    }
+
+    #[test]
+    fn a_call_whose_type_sigmastate_cannot_build_does_not_parse() {
+        // sigma-state 6.0.7, read from the jars: each throws kiama's `RuntimeException` when
+        // the call is built. A function type with a type parameter named by the substitution,
+        // anywhere but at the top of the range of `deserializeTo` or `fromBigEndianBytes`
+        for (method, type_arg) in [
+            ("getReg", "7001040401670154"),                       // [T](Int)=>Int
+            ("getReg", "700104700104040167015400"),               // (Int)=>[T](Int)=>Int
+            ("getVarFromInput", "70016701540401670154"),          // [T](T)=>Int
+            ("none", "7001040401670154"),                         // [T](Int)=>Int
+            ("none", "0c7001040401670154"),                       // Coll[[T](Int)=>Int]
+            ("some(1)", "7001040402670154670155"),                // [T,U](Int)=>Int
+            ("some(lambda)", "70016701540401670154"),             // [T](T)=>Int
+            ("some(lambda)", "70010467015401670154"),             // [T](Int)=>T
+            ("fromBigEndianBytes", "247001040401670154"),         // Option[[T](Int)=>Int]
+            ("fromBigEndianBytes", "7001040c700104040167015400"), // (Int)=>Coll[[T](Int)=>Int]
+            ("deserializeTo", "0c7001040401670154"),              // Coll[[T](Int)=>Int]
+            ("deserializeTo", "407001040401670154"),              // (Int,[T](Int)=>Int)
+            ("deserializeTo", "0c700104700104040167015400"),      // Coll[(Int)=>[T](Int)=>Int]
+            // the type argument holds no type parameter; the argument's type does
+            ("some(lambda of [T](Int)=>Int)", "70016701550400"), // (U)=>Int
+            ("some(Coll(lambda of [T](Int)=>Int))", "0c670155"), // Coll[U]
+        ] {
+            assert!(
+                matches!(
+                    parse_v3(&call(method, type_arg)),
+                    Err(crate::serialization::SigmaParsingError::TypeSubstFailed(_))
+                ),
+                "{method}[{type_arg}]"
+            );
+        }
     }
 
     #[test]
@@ -480,5 +632,121 @@ mod tests {
                 "{method}[{type_arg}]"
             );
         }
+    }
+
+    #[test]
+    fn the_calls_type_decides_the_checks_of_the_node_around_it() {
+        use crate::serialization::SigmaParsingError;
+        let by_index = |coll: &str| alloc::format!("b2{coll}040000");
+        // box.getReg[Coll[T]](4) is an Option[Coll[Coll[T]]]: `.get(0)(0)` is a `T`
+        let get = alloc::format!("e4{}", call("getReg", "0c670154"));
+        assert_eq!(
+            parse_v3(&by_index(&by_index(&get))).unwrap().tpe(),
+            tpe("670154")
+        );
+        // deserializeTo[Coll[T]](bytes) is a Coll[Coll[T]]: its item is no `T`, its item's is
+        let coll = call("deserializeTo", "0c670154");
+        let t = call("deserializeTo", "670154");
+        assert!(matches!(
+            parse_v3(&alloc::format!("93{}{t}", by_index(&coll))),
+            Err(SigmaParsingError::ConstraintFailed(_))
+        ));
+        assert_eq!(
+            parse_v3(&alloc::format!("93{}{t}", by_index(&by_index(&coll))))
+                .unwrap()
+                .tpe(),
+            SType::SBoolean
+        );
+        // deserializeTo[[T](Int) => Int](bytes) is an Int => Int, a lambda's type
+        let func = call("deserializeTo", "7001040401670154");
+        assert_eq!(
+            parse_v3(&alloc::format!("93{func}d90101040402"))
+                .unwrap()
+                .tpe(),
+            SType::SBoolean
+        );
+        // some[U]({(x: T) => 1}) is an Option[(U) => Int]: its content is no `(T) => Int`
+        let get = alloc::format!("e4{}", call("some(lambda of T)", "670155"));
+        assert!(matches!(
+            parse_v3(&alloc::format!("93{get}d901016701540402")),
+            Err(SigmaParsingError::ConstraintFailed(_))
+        ));
+        assert_eq!(
+            parse_v3(&alloc::format!("93{get}d901016701550402"))
+                .unwrap()
+                .tpe(),
+            SType::SBoolean
+        );
+    }
+
+    #[allow(clippy::panic)]
+    fn tuple_of(tpe: &SType) -> &alloc::sync::Arc<crate::types::stuple::STuple> {
+        match tpe {
+            SType::STuple(tuple) => tuple,
+            _ => panic!("not a tuple type: {tpe:?}"),
+        }
+    }
+
+    #[test]
+    fn a_calls_grown_type_is_shared() {
+        // sigmastate puts ONE object at every place the second substitution replaces `T`, so
+        // a call's type costs what its type argument costs however often it names `T`.
+        // deserializeTo[(T, T)](bytes) is a ((T, T), (T, T)) whose two items are one
+        // allocation
+        let expr = parse_v3(&call("deserializeTo", "3c670154670154")).unwrap();
+        let call_tpe = expr.tpe();
+        assert_eq!(call_tpe, tpe("3c3c6701546701543c670154670154"));
+        let items = tuple_of(&call_tpe).items.as_slice();
+        assert!(alloc::sync::Arc::ptr_eq(
+            tuple_of(&items[0]),
+            tuple_of(&items[1])
+        ));
+    }
+
+    #[test]
+    fn a_call_assembled_by_hand_falls_back_to_the_range() {
+        use crate::mir::property_call::PropertyCall;
+        // none[[T](Int) => Int] cannot be built by the parser or by the constructor
+        // (sigmastate cannot build its type); put together field by field, its type is the
+        // method's range. That value is this library's choice: the JVM has no such call
+        let fp = tpe("7001040401670154");
+        let method = sglobal::NONE_METHOD
+            .clone()
+            .with_concrete_types(&t_is(fp.clone()))
+            .unwrap();
+        let call = PropertyCall {
+            obj: Expr::Global.into(),
+            method,
+            explicit_type_args: t_is(fp.clone()),
+        };
+        assert_eq!(call.tpe(), SType::SOption(fp.into()));
+    }
+
+    #[test]
+    fn a_call_built_in_memory_is_refused_where_the_parser_refuses_it() {
+        use crate::mir::property_call::PropertyCall;
+        // none[[T](Int) => Int] and deserializeTo[Coll[[T](Int) => Int]](bytes)
+        assert!(PropertyCall::with_type_args(
+            Expr::Global,
+            sglobal::NONE_METHOD.clone(),
+            t_is(tpe("7001040401670154")),
+        )
+        .is_err());
+        assert!(MethodCall::with_type_args(
+            Expr::Global,
+            sglobal::DESERIALIZE_METHOD.clone(),
+            vec![Constant::from(vec![0i8]).into()],
+            t_is(tpe("0c7001040401670154")),
+        )
+        .is_err());
+        // the control: deserializeTo[[T](Int) => Int](bytes), whose type is Int => Int
+        let call = MethodCall::with_type_args(
+            Expr::Global,
+            sglobal::DESERIALIZE_METHOD.clone(),
+            vec![Constant::from(vec![0i8]).into()],
+            t_is(tpe("7001040401670154")),
+        )
+        .unwrap();
+        assert_eq!(call.tpe(), tpe("7001040400"));
     }
 }

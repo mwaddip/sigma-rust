@@ -631,10 +631,7 @@ mod test {
         .into();
         let expr: Expr = MethodCall::with_type_args(
             Expr::Global,
-            sglobal::FROM_BIGENDIAN_BYTES_METHOD
-                .clone()
-                .with_concrete_types(&type_args)
-                .unwrap(),
+            sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone(),
             vec![to_be_bytes_expr],
             type_args,
         )

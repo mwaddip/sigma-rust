@@ -103,6 +103,9 @@ impl SigmaSerializable for PropertyCall {
                 explicit_type_args,
             )
         };
+        // the call's type is a `val` of the node sigmastate builds (`values.scala:1355-1358`):
+        // a second substitution of the explicit types that can throw
+        method.try_call_tpe(&explicit_type_args)?;
         Ok(PropertyCall {
             obj: obj.into(),
             method,

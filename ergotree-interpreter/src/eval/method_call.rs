@@ -1494,3 +1494,43 @@ mod charge_order {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod call_type_tests {
+    //! A call's static type is the JVM's (`SMethod::call_tpe`): the rows are sigma-state
+    //! 6.0.7's, read from the jars
+    use crate::eval::test_util::eval_body;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::value::Value;
+
+    #[test]
+    fn a_branch_that_is_not_taken_parses_by_the_calls_type() {
+        // each `else` branch type-checks only with the JVM's type of the call in it, and the
+        // tree evaluates to its `then` branch at 20
+        for (body, value) in [
+            // if (true) 1 else box.getReg[Coll[T]](4).get(0)(0).size: the call is an
+            // Option[Coll[Coll[T]]]
+            (
+                "9501010402b1b2b2e4dc631363c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000000000000000000000000000000000000000000000000000000000000000000000000104080c670154040000040000",
+                Value::Int(1),
+            ),
+            // if (true) true else deserializeTo[Coll[T]](bytes)(0)(0) == deserializeTo[T](bytes)
+            (
+                "950101010193b2b2dc6a04dd010e01000c670154040000040000dc6a04dd010e0100670154",
+                Value::Boolean(true),
+            ),
+            // if (true) true else deserializeTo[[T](Int) => Int](bytes) == {(x: Int) => 1}: the
+            // call is an Int => Int
+            (
+                "950101010193dc6a04dd010e01007001040401670154d90101040402",
+                Value::Boolean(true),
+            ),
+        ] {
+            let (res, cost) = eval_body(body, ErgoTreeVersion::V3);
+            assert_eq!(res.unwrap(), value, "{body}");
+            assert_eq!(cost, 20, "{body}");
+        }
+    }
+}

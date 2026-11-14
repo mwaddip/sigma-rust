@@ -249,9 +249,9 @@ pub enum SigmaParsingError {
     /// no validation rule, so a size-flagged tree is refused too
     #[error("collection data with an item type that has no runtime type: {0}")]
     NoRuntimeType(String),
-    /// A method call sigmastate cannot specialise: the substitution of what its arguments'
-    /// types unify to (`specializeFor`) replaced the variable of a function type's type
-    /// parameter with a type
+    /// A method call whose type sigmastate cannot build: substituting the call's explicit
+    /// type arguments (`specializeFor`, or the call's own `tpe`) replaced the variable of a
+    /// function type's type parameter with a type
     /// ([`SType::with_subst`](crate::types::stype::SType)). kiama's `dup` throws a
     /// `RuntimeException`: no validation rule, so a size-flagged tree is refused too
     #[error("a method call's type substitution failed: {0}")]

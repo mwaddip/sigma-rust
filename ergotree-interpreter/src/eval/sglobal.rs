@@ -332,10 +332,7 @@ mod tests {
         let type_args = [(STypeVar::t(), return_type.clone())].into_iter().collect();
         let deserialize_node = MethodCall::with_type_args(
             Expr::Global,
-            DESERIALIZE_METHOD
-                .clone()
-                .with_concrete_types(&type_args)
-                .unwrap(),
+            DESERIALIZE_METHOD.clone(),
             vec![Constant::from(array.to_owned()).into()],
             type_args,
         )
@@ -1020,7 +1017,7 @@ mod tests {
                 let type_args = std::iter::once((STypeVar::t(), SType::SByte)).collect();
                 let expr: Expr = MethodCall::with_type_args(
                     Expr::Global,
-                    sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone().with_concrete_types(&type_args).unwrap(),
+                    sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone(),
                     vec![bytes.into()],
                     type_args,
                 )
@@ -1035,7 +1032,7 @@ mod tests {
                 let type_args = std::iter::once((STypeVar::t(), SType::SShort)).collect();
                 let expr: Expr = MethodCall::with_type_args(
                     Expr::Global,
-                    sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone().with_concrete_types(&type_args).unwrap(),
+                    sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone(),
                     vec![bytes.into()],
                     type_args,
                 )
@@ -1049,7 +1046,7 @@ mod tests {
                 let type_args = std::iter::once((STypeVar::t(), SType::SInt)).collect();
                 let expr: Expr = MethodCall::with_type_args(
                     Expr::Global,
-                    sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone().with_concrete_types(&type_args).unwrap(),
+                    sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone(),
                     vec![bytes.into()],
                     type_args,
                 )
@@ -1063,7 +1060,7 @@ mod tests {
                 let type_args = std::iter::once((STypeVar::t(), SType::SLong)).collect();
                 let expr: Expr = MethodCall::with_type_args(
                     Expr::Global,
-                    sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone().with_concrete_types(&type_args).unwrap(),
+                    sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone(),
                     vec![bytes.clone().into()],
                     type_args,
                 )
@@ -1080,7 +1077,7 @@ mod tests {
             let type_args = std::iter::once((STypeVar::t(), SType::SBigInt)).collect();
             let expr: Expr = MethodCall::with_type_args(
                 Expr::Global,
-                sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone().with_concrete_types(&type_args).unwrap(),
+                sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone(),
                 vec![bytes.into()],
                 type_args,
             )
@@ -1096,7 +1093,7 @@ mod tests {
             let type_args = std::iter::once((STypeVar::t(), SType::SUnsignedBigInt)).collect();
             let expr: Expr = MethodCall::with_type_args(
                 Expr::Global,
-                sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone().with_concrete_types(&type_args).unwrap(),
+                sglobal::FROM_BIGENDIAN_BYTES_METHOD.clone(),
                 vec![bytes.into()],
                 type_args,
             )
@@ -1195,10 +1192,7 @@ mod tests {
             let type_args = [(STypeVar::t(), SType::SBox)].into_iter().collect();
             let node = MethodCall::with_type_args(
                 Expr::Global,
-                DESERIALIZE_METHOD
-                    .clone()
-                    .with_concrete_types(&type_args)
-                    .unwrap(),
+                DESERIALIZE_METHOD.clone(),
                 vec![Constant::from(box_bytes(header)).into()],
                 type_args,
             )

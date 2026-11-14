@@ -123,6 +123,39 @@ impl SMethod {
             _ => Ok(self),
         }
     }
+
+    /// The static type of a call of this (specialised) method: sigmastate's `MethodCall.tpe`
+    /// (v6.0.7 `values.scala:1355-1358`), the method's range with the call's explicit type
+    /// arguments substituted ONCE MORE. The method already holds them (the parser's
+    /// `withConcreteTypes`), so the second pass changes the range only where the range still
+    /// names the method's type variable `T`: where a type argument names it itself
+    /// (`getReg[Coll[T]]` has the type `Option[Coll[Coll[T]]]`), or where `specializeFor`
+    /// brought it in with the type of `Global.some`'s argument (`some[U]({(x: T) => 1})` has
+    /// the type `Option[(U) => Int]`). A function type there whose type parameter is that
+    /// variable loses the parameter or makes the substitution fail (`SType::with_subst`).
+    /// sigmastate computes it when it builds the call, so a failure is a failure to parse
+    /// (`try_call_tpe`); for a call put together field by field whose type
+    /// sigmastate could not build, this is the method's range.
+    pub fn call_tpe(&self, explicit_type_args: &HashMap<STypeVar, SType>) -> SType {
+        self.try_call_tpe(explicit_type_args)
+            .unwrap_or_else(|_| *self.tpe().t_range.clone())
+    }
+
+    /// [`Self::call_tpe`] where sigmastate builds the call: an error where its substitution
+    /// throws
+    pub(crate) fn try_call_tpe(
+        &self,
+        explicit_type_args: &HashMap<STypeVar, SType>,
+    ) -> Result<SType, TypeSubstError> {
+        let range = &*self.tpe().t_range;
+        // `withSubstTypes` gives the type as it is for an empty substitution (v6.0.7
+        // `sigma/ast/package.scala:166-169`): a call with no explicit type argument, which
+        // is nearly every call, and its type is read whenever a node checks its value
+        if explicit_type_args.is_empty() {
+            return Ok(range.clone());
+        }
+        range.with_subst(explicit_type_args)
+    }
 }
 
 /// Object method description
