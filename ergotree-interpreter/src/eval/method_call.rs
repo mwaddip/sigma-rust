@@ -1378,7 +1378,7 @@ mod argument_widening_tests {
             ("Coll", "slice", 1, "SInt"),
             ("Coll", "updated", 0, "SInt"),
             ("Context", "getVarFromInput", 0, "SShort"),
-            ("Global", "decodeNBits", 0, "SLong"),
+            ("Global", "decodeNbits", 0, "SLong"),
             ("Global", "powHit", 0, "SInt"),
             ("Global", "powHit", 4, "SInt"),
         ];
@@ -1546,5 +1546,237 @@ mod call_type_tests {
             assert_eq!(res.unwrap(), value, "{body}");
             assert_eq!(cost, 20, "{body}");
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod signature_name_rows {
+    use crate::eval::test_util::eval_body;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::constant::TryExtractInto;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::mir::value::Value;
+    use ergotree_ir::serialization::sigma_byte_reader::from_bytes;
+    use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
+    use ergotree_ir::serialization::SigmaParsingError;
+    use ergotree_ir::serialization::SigmaSerializable;
+
+    /// What the 6.0.7 jars gave for a row
+    enum Jvm {
+        Int(i32),
+        Ints(&'static [i32]),
+        Bytes(&'static [i8]),
+        Bool(bool),
+        /// a value of another kind: only that it is one is compared
+        Value,
+        Throws,
+        /// the expression is refused at parse
+        Refused,
+    }
+    use Jvm::*;
+
+    // A method's type variables unify with a type variable in the type of a receiver or an
+    // argument only when the NAMES are equal (`sigma/ast/package.scala:39-42`), so the names
+    // sigmastate's tables use decide whether a call specialises, and with it the call's static
+    // type and whatever reads that type. In these rows the variable is one the script wrote.
+    // Rows measured on the 6.0.7 jars (queue item 29's `measure/rows/`): name, tree
+    // version, expression bytes, the expression's static type as written bytes, the outcome,
+    // the cost counter. `[..]` lists the type each variable position of the call is given: the
+    // value there is real (an Int, a Coll[Int], a lambda, `some[Int](1)`) and its static type is
+    // put on by an untaken branch, `if (false) Coll[ty]()(0) else <real>`. `ser|` is
+    // `Global.serialize(call)`, `plus|` is an Int read out of the call `+ 1`. A row is here when
+    // the tables' older names gave another static type or outcome; a `control` is the all-Int
+    // row, which the names never moved. A cost of `None`: the JVM's counter at that throw
+    // differs for another reason (a charge of the consumer around the call).
+    type Row = (
+        &'static str,
+        u8,
+        &'static str,
+        &'static str,
+        Jvm,
+        Option<u64>,
+    );
+    #[rustfmt::skip]
+    const ROWS: &[Row] = &[
+        ("Coll.patch[Int,Int]@v0", 0, "dc0c131003060204030400100206020402", "10", Ints(&[3, 1, 1, 2]), Some(56)), // control
+        ("Coll.patch[T,T]@v0", 0, "dc0c13950100b283000c6701540400001003060204030400950100b283000c670154040000100206020402", "0c67024956", Ints(&[3, 1, 1, 2]), Some(86)), // the base's type was 0c670154
+        ("Coll.patch[T,Int]@v0", 0, "dc0c13950100b283000c6701540400001003060204030400100206020402", "0c67024956", Ints(&[3, 1, 1, 2]), Some(71)), // the base's type was 10
+        ("Coll.patch[Int,Int]@v3", 3, "dc0c131003060204030400100206020402", "10", Ints(&[3, 1, 1, 2]), Some(56)), // control
+        ("Coll.patch[T,T]@v3", 3, "dc0c13950100b283000c6701540400001003060204030400950100b283000c670154040000100206020402", "0c67024956", Ints(&[3, 1, 1, 2]), Some(86)), // the base's type was 0c670154
+        ("Coll.patch[T,Int]@v3", 3, "dc0c13950100b283000c6701540400001003060204030400100206020402", "0c67024956", Ints(&[3, 1, 1, 2]), Some(71)), // the base's type was 10
+        ("Coll.updated[Int,Int]@v0", 0, "dc0c141003060204020402040e", "10", Ints(&[3, 7, 2]), Some(40)), // control
+        ("Coll.updated[T,T]@v0", 0, "dc0c14950100b283000c6701540400001003060204020402950100b28300670154040000040e", "0c67024956", Ints(&[3, 7, 2]), Some(70)), // the base's type was 0c670154
+        ("Coll.updated[T,Int]@v0", 0, "dc0c14950100b283000c6701540400001003060204020402040e", "0c67024956", Ints(&[3, 7, 2]), Some(55)), // the base's type was 10
+        ("Coll.updated[Int,Int]@v3", 3, "dc0c141003060204020402040e", "10", Ints(&[3, 7, 2]), Some(40)), // control
+        ("Coll.updated[T,T]@v3", 3, "dc0c14950100b283000c6701540400001003060204020402950100b28300670154040000040e", "0c67024956", Ints(&[3, 7, 2]), Some(70)), // the base's type was 0c670154
+        ("Coll.updated[T,Int]@v3", 3, "dc0c14950100b283000c6701540400001003060204020402040e", "0c67024956", Ints(&[3, 7, 2]), Some(55)), // the base's type was 10
+        ("Coll.updateMany[Int,Int]@v0", 0, "dc0c151003060204021002000210020602", "10", Ints(&[3, 1, 2]), Some(41)), // control
+        ("Coll.updateMany[T,T]@v0", 0, "dc0c15950100b283000c67015404000010030602040210020002950100b283000c67015404000010020602", "0c67024956", Ints(&[3, 1, 2]), Some(71)), // the base's type was 0c670154
+        ("Coll.updateMany[T,Int]@v0", 0, "dc0c15950100b283000c6701540400001003060204021002000210020602", "0c67024956", Ints(&[3, 1, 2]), Some(56)), // the base's type was 10
+        ("Coll.updateMany[Int,Int]@v3", 3, "dc0c151003060204021002000210020602", "10", Ints(&[3, 1, 2]), Some(41)), // control
+        ("Coll.updateMany[T,T]@v3", 3, "dc0c15950100b283000c67015404000010030602040210020002950100b283000c67015404000010020602", "0c67024956", Ints(&[3, 1, 2]), Some(71)), // the base's type was 0c670154
+        ("Coll.updateMany[T,Int]@v3", 3, "dc0c15950100b283000c6701540400001003060204021002000210020602", "0c67024956", Ints(&[3, 1, 2]), Some(56)), // the base's type was 10
+        ("Coll.zip[Int,Int]@v0", 0, "dc0c1d10030602040110020602", "0c58", Value, Some(25)), // control
+        ("Coll.zip[T,T]@v0", 0, "dc0c1d950100b283000c670154040000100306020401950100b283000c67015404000010020602", "0c3c6702495667024f56", Value, Some(55)), // the base's type was 0c3c67015467024956
+        ("Coll.zip[T,Int]@v0", 0, "dc0c1d950100b283000c67015404000010030602040110020602", "0c3c6702495667024f56", Value, Some(40)), // the base's type was 0c4c670154
+        ("Coll.zip[Int,Int]@v3", 3, "dc0c1d10030602040110020602", "0c58", Value, Some(25)), // control
+        ("Coll.zip[T,T]@v3", 3, "dc0c1d950100b283000c670154040000100306020401950100b283000c67015404000010020602", "0c3c6702495667024f56", Value, Some(55)), // the base's type was 0c3c67015467024956
+        ("Coll.zip[T,Int]@v3", 3, "dc0c1d950100b283000c67015404000010030602040110020602", "0c3c6702495667024f56", Value, Some(40)), // the base's type was 0c4c670154
+        ("Coll.reverse[Int]@v3", 3, "db0c1e1003060204", "10", Ints(&[2, 1, 3]), Some(31)), // control
+        ("Coll.reverse[T]@v3", 3, "db0c1e950100b283000c6701540400001003060204", "0c67024956", Ints(&[2, 1, 3]), Some(46)), // the base's type was 0c670154
+        ("Coll.get[Int]@v3", 3, "dc0c211003060204010402", "28", Value, Some(44)), // control
+        ("Coll.get[T]@v3", 3, "dc0c21950100b283000c6701540400001003060204010402", "2467024956", Value, Some(59)), // the base's type was 24670154
+        ("Option.map[Int,Int,Int]@v0", 0, "dc2407b283002804000001d9010104040e", "28", Throws, Some(55)), // control
+        ("Option.map[Int,T,T]@v0", 0, "dc2407b283002804000001d90101670154950100b28300670154040000040e", "24670152", Throws, Some(55)), // the base's type was 2467024f56
+        ("Option.map[Int,Int,Int]@v3", 3, "dc2407dc6a09dd0104020401d9010104040e", "28", Value, Some(58)), // control
+        ("Option.map[T,T,T]@v3", 3, "dc2407950100b2830024670154040000dc6a09dd0104020401d90101670154950100b28300670154040000040e", "24670152", Throws, Some(63)), // the base's type was 2467024f56
+        ("Option.map[T,Int,Int]@v3", 3, "dc2407950100b2830024670154040000dc6a09dd0104020401d9010104040e", "28", Value, Some(73)), // the base's type was 2467024f56
+        ("Option.filter[Int,Int]@v0", 0, "dc2408b283002804000001d90101040101", "28", Throws, Some(55)), // control
+        ("Option.filter[Int,T]@v0", 0, "dc2408b283002804000001d901016701540101", "28", Throws, Some(55)), // the base's type was 2467024956
+        ("Option.filter[Int,Int]@v3", 3, "dc2408dc6a09dd0104020401d90101040101", "28", Value, Some(58)), // control
+        ("Option.filter[T,T]@v3", 3, "dc2408950100b2830024670154040000dc6a09dd0104020401d901016701540101", "24670154", Throws, Some(63)), // the base's type was 2467024956
+        ("Option.filter[T,Int]@v3", 3, "dc2408950100b2830024670154040000dc6a09dd0104020401d90101040101", "28", Value, Some(73)), // the base's type was 2467024956
+        ("plus|Coll.patch[Int,Int]@v3", 3, "9ab2dc0c1310030602040304001002060204020400000402", "04", Int(4), Some(111)), // control
+        ("plus|Coll.patch[T,Int]@v3", 3, "9ab2dc0c13950100b283000c67015404000010030602040304001002060204020400000402", "67024956", Throws, Some(111)), // the JVM throws, the base gave a value
+        ("plus|Coll.patch[IV,Int]@v3", 3, "9ab2dc0c13950100b283000c6702495604000010030602040304001002060204020400000402", "04", Int(4), Some(126)), // the JVM gives a value, the base errors
+        ("plus|Coll.patch[Int,T]@v3", 3, "9ab2dc0c131003060204030400950100b283000c6701540400001002060204020400000402", "67024956", Throws, Some(111)), // the JVM throws, the base gave a value
+        ("plus|Coll.patch[Int,IV]@v3", 3, "9ab2dc0c131003060204030400950100b283000c670249560400001002060204020400000402", "04", Int(4), Some(126)), // the JVM gives a value, the base errors
+        ("ser|Coll.patch[Int,Int]@v3", 3, "dc6a03dd01dc0c131003060204030400100206020402", "0e", Bytes(&[4, 6, 2, 2, 4]), Some(90)), // control
+        ("ser|Coll.patch[T,Int]@v3", 3, "dc6a03dd01dc0c13950100b283000c6701540400001003060204030400100206020402", "0e", Throws, None), // the JVM throws, the base gave a value; the JVM stops at 93, Rust at 90
+        ("ser|Coll.patch[IV,Int]@v3", 3, "dc6a03dd01dc0c13950100b283000c670249560400001003060204030400100206020402", "0e", Bytes(&[4, 6, 2, 2, 4]), Some(105)), // the JVM gives a value, the base errors
+        ("ser|Coll.patch[Int,T]@v3", 3, "dc6a03dd01dc0c131003060204030400950100b283000c670154040000100206020402", "0e", Throws, None), // the JVM throws, the base gave a value; the JVM stops at 93, Rust at 90
+        ("ser|Coll.patch[Int,IV]@v3", 3, "dc6a03dd01dc0c131003060204030400950100b283000c67024956040000100206020402", "0e", Bytes(&[4, 6, 2, 2, 4]), Some(105)), // the JVM gives a value, the base errors
+        ("plus|Coll.updated[Int,Int]@v3", 3, "9ab2dc0c141003060204020402040e0400000402", "04", Int(4), Some(95)), // control
+        ("plus|Coll.updated[T,Int]@v3", 3, "9ab2dc0c14950100b283000c6701540400001003060204020402040e0400000402", "67024956", Throws, Some(95)), // the JVM throws, the base gave a value
+        ("plus|Coll.updated[IV,Int]@v3", 3, "9ab2dc0c14950100b283000c670249560400001003060204020402040e0400000402", "04", Int(4), Some(110)), // the JVM gives a value, the base errors
+        ("plus|Coll.updated[Int,T]@v3", 3, "9ab2dc0c141003060204020402950100b28300670154040000040e0400000402", "67024956", Throws, Some(95)), // the JVM throws, the base gave a value
+        ("plus|Coll.updated[Int,IV]@v3", 3, "9ab2dc0c141003060204020402950100b2830067024956040000040e0400000402", "04", Int(4), Some(110)), // the JVM gives a value, the base errors
+        ("ser|Coll.updated[Int,Int]@v3", 3, "dc6a03dd01dc0c141003060204020402040e", "0e", Bytes(&[3, 6, 14, 4]), Some(71)), // control
+        ("ser|Coll.updated[T,Int]@v3", 3, "dc6a03dd01dc0c14950100b283000c6701540400001003060204020402040e", "0e", Throws, None), // the JVM throws, the base gave a value; the JVM stops at 77, Rust at 74
+        ("ser|Coll.updated[IV,Int]@v3", 3, "dc6a03dd01dc0c14950100b283000c670249560400001003060204020402040e", "0e", Bytes(&[3, 6, 14, 4]), Some(86)), // the JVM gives a value, the base errors
+        ("ser|Coll.updated[Int,T]@v3", 3, "dc6a03dd01dc0c141003060204020402950100b28300670154040000040e", "0e", Throws, None), // the JVM throws, the base gave a value; the JVM stops at 77, Rust at 74
+        ("ser|Coll.updated[Int,IV]@v3", 3, "dc6a03dd01dc0c141003060204020402950100b2830067024956040000040e", "0e", Bytes(&[3, 6, 14, 4]), Some(86)), // the JVM gives a value, the base errors
+        ("plus|Coll.updateMany[Int,Int]@v3", 3, "9ab2dc0c1510030602040210020002100206020400000402", "04", Int(4), Some(96)), // control
+        ("plus|Coll.updateMany[T,Int]@v3", 3, "9ab2dc0c15950100b283000c67015404000010030602040210020002100206020400000402", "67024956", Throws, Some(96)), // the JVM throws, the base gave a value
+        ("plus|Coll.updateMany[IV,Int]@v3", 3, "9ab2dc0c15950100b283000c6702495604000010030602040210020002100206020400000402", "04", Int(4), Some(111)), // the JVM gives a value, the base errors
+        ("plus|Coll.updateMany[Int,T]@v3", 3, "9ab2dc0c1510030602040210020002950100b283000c670154040000100206020400000402", "67024956", Throws, Some(96)), // the JVM throws, the base gave a value
+        ("plus|Coll.updateMany[Int,IV]@v3", 3, "9ab2dc0c1510030602040210020002950100b283000c67024956040000100206020400000402", "04", Int(4), Some(111)), // the JVM gives a value, the base errors
+        ("ser|Coll.updateMany[Int,Int]@v3", 3, "dc6a03dd01dc0c151003060204021002000210020602", "0e", Bytes(&[3, 6, 2, 4]), Some(72)), // control
+        ("ser|Coll.updateMany[T,Int]@v3", 3, "dc6a03dd01dc0c15950100b283000c6701540400001003060204021002000210020602", "0e", Throws, None), // the JVM throws, the base gave a value; the JVM stops at 78, Rust at 75
+        ("ser|Coll.updateMany[IV,Int]@v3", 3, "dc6a03dd01dc0c15950100b283000c670249560400001003060204021002000210020602", "0e", Bytes(&[3, 6, 2, 4]), Some(87)), // the JVM gives a value, the base errors
+        ("ser|Coll.updateMany[Int,T]@v3", 3, "dc6a03dd01dc0c1510030602040210020002950100b283000c67015404000010020602", "0e", Throws, None), // the JVM throws, the base gave a value; the JVM stops at 78, Rust at 75
+        ("ser|Coll.updateMany[Int,IV]@v3", 3, "dc6a03dd01dc0c1510030602040210020002950100b283000c6702495604000010020602", "0e", Bytes(&[3, 6, 2, 4]), Some(87)), // the JVM gives a value, the base errors
+        ("plus|Coll.zip[Int,Int]@v3", 3, "9a8cb2dc0c1d10030602040110020602040000010402", "04", Int(4), Some(90)), // control
+        ("plus|Coll.zip[Int,IV]@v3", 3, "9a8cb2dc0c1d100306020401950100b283000c6702495604000010020602040000010402", "67024956", Throws, Some(90)), // the JVM throws, the base gave a value
+        ("plus|Coll.zip[Int,OV]@v3", 3, "9a8cb2dc0c1d100306020401950100b283000c67024f5604000010020602040000010402", "04", Int(4), Some(105)), // the JVM gives a value, the base errors
+        ("ser|Coll.zip[Int,Int]@v3", 3, "dc6a03dd01dc0c1d10030602040110020602", "0e", Bytes(&[2, 6, 6, 2, 2]), Some(59)), // control
+        ("plus|Coll.reverse[Int]@v3", 3, "9ab2db0c1e10030602040400000402", "04", Int(3), Some(86)), // control
+        ("ser|Coll.reverse[Int]@v3", 3, "dc6a03dd01db0c1e1003060204", "0e", Bytes(&[3, 4, 2, 6]), Some(62)), // control
+        ("plus|Coll.get[Int]@v3", 3, "9ae4dc0c2110030602040104020402", "04", Int(2), Some(79)), // control
+        ("ser|Coll.get[Int]@v3", 3, "dc6a03dd01dc0c211003060204010402", "0e", Bytes(&[1, 2]), Some(67)), // control
+        ("plus|Option.map[Int,Int,Int]@v3", 3, "9ae4dc2407dc6a09dd0104020401d9010104040e0402", "04", Int(8), Some(93)), // control
+        ("plus|Option.map[T,Int,Int]@v3", 3, "9ae4dc2407950100b2830024670154040000dc6a09dd0104020401d9010104040e0402", "04", Int(8), Some(108)), // the JVM gives a value, the base errors
+        ("plus|Option.map[IV,Int,Int]@v3", 3, "9ae4dc2407950100b283002467024956040000dc6a09dd0104020401d9010104040e0402", "670152", Throws, Some(93)), // the JVM throws, the base gave a value
+        ("ser|Option.map[Int,Int,Int]@v3", 3, "dc6a03dd01dc2407dc6a09dd0104020401d9010104040e", "0e", Bytes(&[1, 14]), Some(81)), // control
+        ("ser|Option.map[T,Int,Int]@v3", 3, "dc6a03dd01dc2407950100b2830024670154040000dc6a09dd0104020401d9010104040e", "0e", Bytes(&[1, 14]), Some(96)), // the JVM gives a value, the base errors
+        ("ser|Option.map[IV,Int,Int]@v3", 3, "dc6a03dd01dc2407950100b283002467024956040000dc6a09dd0104020401d9010104040e", "0e", Throws, None), // the JVM throws, the base gave a value; the JVM stops at 93, Rust at 92
+        ("plus|Option.filter[Int,Int]@v3", 3, "9ae4dc2408dc6a09dd0104020401d901010401010402", "04", Int(2), Some(93)), // control
+        ("plus|Option.filter[T,Int]@v3", 3, "9ae4dc2408950100b2830024670154040000dc6a09dd0104020401d901010401010402", "04", Int(2), Some(108)), // the JVM gives a value, the base errors
+        ("plus|Option.filter[IV,Int]@v3", 3, "9ae4dc2408950100b283002467024956040000dc6a09dd0104020401d901010401010402", "670154", Throws, Some(93)), // the JVM throws, the base gave a value
+        ("ser|Option.filter[Int,Int]@v3", 3, "dc6a03dd01dc2408dc6a09dd0104020401d90101040101", "0e", Bytes(&[1, 2]), Some(81)), // control
+        ("ser|Option.filter[T,Int]@v3", 3, "dc6a03dd01dc2408950100b2830024670154040000dc6a09dd0104020401d90101040101", "0e", Bytes(&[1, 2]), Some(96)), // the JVM gives a value, the base errors
+        ("ser|Option.filter[IV,Int]@v3", 3, "dc6a03dd01dc2408950100b283002467024956040000dc6a09dd0104020401d90101040101", "0e", Throws, None), // the JVM throws, the base gave a value; the JVM stops at 93, Rust at 92
+    ];
+
+    // The same rule where NO type in the tree names a variable. A call whose receiver and
+    // arguments are concrete and do not unify with its domain (an item of another type,
+    // `Coll(3,1,2).updated(0, 1L)`; a receiver of another kind, `7.reverse`; a tuple receiver;
+    // too few arguments below tree version 3) keeps the generic method, and its static type is
+    // the range with the TABLE's variable names in it: `Coll[IV]`. The next call, of any generic
+    // method, meets that name. The inner call sits in an untaken branch,
+    // `if (false) <inner> else <real value>`, or is the row itself. Rows measured on the 6.0.7
+    // jars (queue item 29's `measure/review/rows-nested.txt`, `rows-concrete.txt`); the comment
+    // of a row says what the tables' older names gave.
+    #[rustfmt::skip]
+    const UNSPECIALISED: &[Row] = &[
+        ("inner|updated(Long)", 3, "dc0c1410030602040204000502", "0c67024956", Throws, Some(40)), // the base's type was 0c670154
+        ("recv|updated(Long)|map", 3, "dc0c03950100dc0c1410030602040204000502100306020401d90101049a72010402", "10", Ints(&[4, 2, 3]), Some(140)), // the base errored
+        ("recv-eq|updated(Long)|map", 3, "93dc0c03950100dc0c1410030602040204000502100306020401d90101049a720104021003060204", "01", Bool(false), Some(163)), // the base refused it at parse
+        ("recv-plus|Int.reverse|getOrElse", 3, "9adc0c02950100db0c1e040e1003060204020400040e0402", "04", Int(4), Some(84)), // the base errored
+        ("arg-eq|Opt.getOrElse(Long)|C.updated(0,x)", 3, "93dc0c141003060204020400950100dc2404dc6a09dd01040204010502040e1003060204", "", Refused, None), // the base parsed it
+        ("recv-ser|updated(Long)|map", 3, "dc6a03dd01dc0c03950100dc0c1410030602040204000502100306020401d90101049a72010402", "0e", Bytes(&[3, 8, 4, 6]), Some(171)), // the base errored
+        ("recv-eq|updated(Long)|filter", 3, "93dc0c08950100dc0c1410030602040204000502100306020401d901010401011003060204", "01", Throws, Some(29)), // the base refused it at parse
+        ("recv-eq|updated(Long)|append", 3, "93dc0c09950100dc0c14100306020402040005021003060204011001121003060204", "01", Throws, Some(29)), // the base refused it at parse
+        ("recv-ser|updated(Long)|getOrElse", 3, "dc6a03dd01dc0c02950100dc0c14100306020402040005021003060204020400040e", "0e", Bytes(&[6]), Some(86)), // the base errored
+        ("recv-eq|updated(Long)|flatMap", 3, "93dc0c0f950100dc0c1410030602040204000502100306020401d901010483010472011003060204", "01", Bool(true), Some(212)), // the base refused it at parse
+        ("recv-eq|patch(CollLong)|map", 3, "93dc0c03950100dc0c13100306020403040011010a0402100306020401d90101049a720104021003060204", "01", Bool(false), Some(163)), // the base refused it at parse
+        ("arg-eq|Int.optGet|C.updated(0,x)", 3, "93dc0c141003060204020400950100db2403040e040e1003060204", "", Refused, None), // the base parsed it
+        ("bare|tuple.updated(0,5)", 3, "dc0c14860204020404020400040a", "0c67024956", Throws, Some(39)), // the base's type was 0c670154
+        ("map|tuple.updated(0,5)", 3, "dc0c03950100dc0c14860204020404020400040a100306020401d90101049a72010402", "10", Ints(&[4, 2, 3]), Some(140)), // the base errored
+        ("getOrElse|tuple.updated(0,5)", 3, "9adc0c02950100dc0c14860204020404020400040a1003060204020400040e0402", "04", Int(4), Some(84)), // the base errored
+        ("bare|tuple.patch", 3, "dc0c1386020402040403040010030602040402", "0c67024956", Throws, Some(44)), // the base's type was 0c670154
+        ("map|tuple.patch", 3, "dc0c03950100dc0c1386020402040403040010030602040402100306020401d90101049a72010402", "10", Ints(&[4, 2, 3]), Some(140)), // the base errored
+        ("getOrElse|tuple.patch", 3, "9adc0c02950100dc0c13860204020404030400100306020404021003060204020400040e0402", "04", Int(4), Some(84)), // the base errored
+        ("bare|Coll[Any].updated(0,5)", 3, "dc0c14950100b283000c610400001003060204020400040a", "0c67024956", Ints(&[5, 1, 2]), Some(55)), // the base's type was 0c670154
+        ("map|Coll[Any].updated(0,5)", 3, "dc0c03950100dc0c14950100b283000c610400001003060204020400040a100306020401d90101049a72010402", "10", Ints(&[4, 2, 3]), Some(140)), // the base errored
+        ("getOrElse|Coll[Any].updated(0,5)", 3, "9adc0c02950100dc0c14950100b283000c610400001003060204020400040a1003060204020400040e0402", "04", Int(4), Some(84)), // the base errored
+        ("v0|C.zip()", 0, "db0c1d1003060204", "0c4067024f56", Throws, Some(9)), // the base's type was 0c4067024956
+        ("v0|C.zip().zip(C)", 0, "dc0c1ddb0c1d1003060204011003060204", "0c4c4067024f56", Throws, Some(9)), // the base's type was 0c4c4067024956
+        ("v0|C.map().updated(0,1)", 0, "dc0c14db0c0310030602040204000402", "0c67024956", Throws, Some(9)), // the base's type was 0c670154
+    ];
+
+    fn agree_with_the_jars(rows: &[Row]) {
+        for (name, version, body, tpe, jvm, cost) in rows {
+            let version = match version {
+                0 => ErgoTreeVersion::V0,
+                _ => ErgoTreeVersion::V3,
+            };
+            let bytes = base16::decode(body.as_bytes()).unwrap();
+            let parsed = from_bytes(&bytes).with_tree_version(version, Expr::sigma_parse);
+            if matches!(jvm, Refused) {
+                assert!(parsed.is_err(), "{name}: parsed");
+                continue;
+            }
+            let expr = parsed.unwrap();
+            let written = from_bytes(&[0u8; 0])
+                .with_tree_version(version, |_| {
+                    Ok::<_, SigmaParsingError>(expr.tpe().sigma_serialize_bytes().unwrap())
+                })
+                .unwrap();
+            assert_eq!(
+                base16::encode_lower(&written),
+                *tpe,
+                "{name}: the static type"
+            );
+            let (res, at) = eval_body(body, version);
+            let agrees = match (jvm, &res) {
+                (Throws, Err(_)) | (Value, Ok(_)) => true,
+                (Int(n), Ok(v)) => *v == Value::Int(*n),
+                (Bool(b), Ok(v)) => *v == Value::Boolean(*b),
+                (Ints(items), Ok(v)) => {
+                    v.clone().try_extract_into::<Vec<i32>>().ok().as_deref() == Some(*items)
+                }
+                (Bytes(items), Ok(v)) => {
+                    v.clone().try_extract_into::<Vec<i8>>().ok().as_deref() == Some(*items)
+                }
+                _ => false,
+            };
+            assert!(agrees, "{name}: {res:?}");
+            if let Some(cost) = cost {
+                assert_eq!(at, *cost, "{name}: the cost counter");
+            }
+        }
+    }
+
+    #[test]
+    fn a_call_specialises_by_the_jvms_variable_names() {
+        agree_with_the_jars(ROWS);
+    }
+
+    #[test]
+    fn a_call_that_does_not_specialise_keeps_the_jvms_variable_names() {
+        agree_with_the_jars(UNSPECIALISED);
     }
 }

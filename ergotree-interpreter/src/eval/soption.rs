@@ -160,8 +160,8 @@ mod tests {
                 .clone()
                 .with_concrete_types(
                     &[
-                        (STypeVar::iv(), SType::SLong),
-                        (STypeVar::ov(), SType::SBoolean),
+                        (STypeVar::t(), SType::SLong),
+                        (STypeVar::r(), SType::SBoolean),
                     ]
                     .iter()
                     .cloned()
@@ -211,8 +211,8 @@ mod tests {
                 .clone()
                 .with_concrete_types(
                     &[
-                        (STypeVar::iv(), SType::SLong),
-                        (STypeVar::ov(), SType::SBoolean),
+                        (STypeVar::t(), SType::SLong),
+                        (STypeVar::r(), SType::SBoolean),
                     ]
                     .iter()
                     .cloned()
@@ -256,7 +256,7 @@ mod tests {
             opt_const.into(),
             soption::FILTER_METHOD
                 .clone()
-                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
+                .with_concrete_types(&[(STypeVar::t(), SType::SLong)].iter().cloned().collect())
                 .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
@@ -295,7 +295,7 @@ mod tests {
             opt_const.into(),
             soption::FILTER_METHOD
                 .clone()
-                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
+                .with_concrete_types(&[(STypeVar::t(), SType::SLong)].iter().cloned().collect())
                 .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
@@ -335,7 +335,7 @@ mod tests {
             opt_const.into(),
             soption::FILTER_METHOD
                 .clone()
-                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
+                .with_concrete_types(&[(STypeVar::t(), SType::SLong)].iter().cloned().collect())
                 .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
@@ -375,7 +375,7 @@ mod tests {
             opt_const.into(),
             soption::FILTER_METHOD
                 .clone()
-                .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
+                .with_concrete_types(&[(STypeVar::t(), SType::SLong)].iter().cloned().collect())
                 .unwrap(),
             vec![FuncValue::new(
                 vec![FuncArg {
@@ -424,8 +424,8 @@ mod tests {
             .clone()
             .with_concrete_types(
                 &[
-                    (STypeVar::iv(), SType::SLong),
-                    (STypeVar::ov(), SType::SBoolean),
+                    (STypeVar::t(), SType::SLong),
+                    (STypeVar::r(), SType::SBoolean),
                 ]
                 .iter()
                 .cloned()
@@ -434,7 +434,7 @@ mod tests {
             .unwrap();
         let filter = soption::FILTER_METHOD
             .clone()
-            .with_concrete_types(&[(STypeVar::iv(), SType::SLong)].iter().cloned().collect())
+            .with_concrete_types(&[(STypeVar::t(), SType::SLong)].iter().cloned().collect())
             .unwrap();
         for method in [map, filter] {
             assert_eq!(run(method.clone(), Some(1)) - run(method, None), 10);

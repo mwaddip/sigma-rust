@@ -61,6 +61,18 @@ pub const APPEND_METHOD_ID: MethodId = MethodId(9);
 /// Coll.apply
 pub const APPLY_METHOD_ID: MethodId = MethodId(10);
 
+// The type variables of this table are sigmastate's by NAME: `IV` for a collection's item type
+// and `OV` for a second type (`tIV`, `tOV`, v6.0.7 `SType.scala:88-89`; `SCollectionMethods`,
+// `methods.scala:805-`). Two type variables unify only when their names are equal
+// (`sigma/ast/package.scala:39-42`), so a method's variable matches a variable in the type of
+// a receiver or an argument by its name alone, and the name decides whether the call
+// specialises. Such a variable is one a script wrote, or one a method table left in the type
+// of a call that did not specialise: a call whose receiver and arguments do not unify with
+// its domain keeps its range as the table has it (`Coll[IV]`), and the next call meets that
+// name, in a tree that writes no type variable at all. The interpreter's
+// `a_call_specialises_by_the_jvms_variable_names` holds the rows measured on the jars.
+// A method's own type parameters are sigmastate's too (`with_tpe_params`). `size` and `indices`
+// have none there, though their signature names `IV` (read from the 6.0.7 jars).
 lazy_static! {
     /// Coll method descriptors
     pub(crate) static ref METHOD_DESC: Vec<SMethodDesc> =
@@ -95,15 +107,16 @@ lazy_static! {
         name: "indexOf",
         tpe: SFunc {
             t_dom: vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
-                STypeVar::t().into(),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
+                STypeVar::iv().into(),
                 SType::SInt],
             t_range: SType::SInt.into(),
             tpe_params: vec![],
         },
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::iv()]);
     /// Coll.indexOf
     pub static ref INDEX_OF_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, INDEX_OF_METHOD_DESC.clone());
 }
@@ -124,7 +137,8 @@ lazy_static! {
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::iv(), STypeVar::ov()]);
     /// Coll.flatMap
     pub static ref FLATMAP_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, FLATMAP_METHOD_DESC.clone());
 }
@@ -135,16 +149,17 @@ lazy_static! {
         name: "zip",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
-                SType::SColl(SType::STypeVar(STypeVar::iv()).into())
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::ov()).into())
             ],
             SType::SColl(SType::STuple(STuple::pair(
-                STypeVar::t().into(), STypeVar::iv().into()
+                STypeVar::iv().into(), STypeVar::ov().into()
             ).into()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::iv(), STypeVar::ov()]);
     /// Coll.zip
     pub static ref ZIP_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, ZIP_METHOD_DESC.clone());
 }
@@ -155,7 +170,7 @@ lazy_static! {
         name: "indices",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
             ],
             SType::SColl(SType::SInt.into())
         ),
@@ -172,16 +187,17 @@ lazy_static! {
         name: "patch",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
                 SType::SInt,
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
                 SType::SInt,
             ],
-            SType::SColl(SType::STypeVar(STypeVar::t()).into())
+            SType::SColl(SType::STypeVar(STypeVar::iv()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::iv()]);
     /// Coll.patch
     pub static ref PATCH_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, PATCH_METHOD_DESC.clone());
 }
@@ -192,16 +208,17 @@ lazy_static! {
         name: "updated",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
                 SType::SInt,
-                SType::STypeVar(STypeVar::t())
+                SType::STypeVar(STypeVar::iv())
 
             ],
-            SType::SColl(SType::STypeVar(STypeVar::t()).into())
+            SType::SColl(SType::STypeVar(STypeVar::iv()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::iv()]);
     /// Coll.updated
     pub static ref UPDATED_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, UPDATED_METHOD_DESC.clone());
 }
@@ -212,16 +229,17 @@ lazy_static! {
         name: "updateMany",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
                 SType::SColl(SType::SInt.into()),
-                SType::SColl(SType::STypeVar(STypeVar::t()).into())
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into())
 
             ],
-            SType::SColl(SType::STypeVar(STypeVar::t()).into())
+            SType::SColl(SType::STypeVar(STypeVar::iv()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::iv()]);
     /// Coll.updateMany
     pub static ref UPDATE_MANY_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, UPDATE_MANY_METHOD_DESC.clone());
 }
@@ -231,12 +249,13 @@ lazy_static! {
         method_id: REVERSE_METHOD_ID,
         name: "reverse",
         tpe: SFunc::new(
-            vec![SType::SColl(SType::STypeVar(STypeVar::t()).into())],
-            SType::SColl(SType::STypeVar(STypeVar::t()).into())
+            vec![SType::SColl(SType::STypeVar(STypeVar::iv()).into())],
+            SType::SColl(SType::STypeVar(STypeVar::iv()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+        .with_tpe_params(vec![STypeVar::iv()]);
     /// Coll.reverse
     pub static ref REVERSE_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, REVERSE_METHOD_DESC.clone());
 }
@@ -247,14 +266,15 @@ lazy_static! {
         name: "startsWith",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
-                SType::SColl(SType::STypeVar(STypeVar::t()).into())
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into())
             ],
             SType::SBoolean
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+        .with_tpe_params(vec![STypeVar::iv()]);
     /// Coll.startsWith
     pub static ref STARTS_WITH_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, STARTS_WITH_METHOD_DESC.clone());
 }
@@ -265,14 +285,15 @@ lazy_static! {
         name: "endsWith",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
-                SType::SColl(SType::STypeVar(STypeVar::t()).into())
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into())
             ],
             SType::SBoolean
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+        .with_tpe_params(vec![STypeVar::iv()]);
     /// Coll.endsWith
     pub static ref ENDS_WITH_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, ENDS_WITH_METHOD_DESC.clone());
 }
@@ -283,14 +304,15 @@ lazy_static! {
         name: "get",
         tpe: SFunc::new(
             vec![
-                SType::SColl(SType::STypeVar(STypeVar::t()).into()),
+                SType::SColl(SType::STypeVar(STypeVar::iv()).into()),
                 SType::SInt
             ],
-            SType::SOption(SType::STypeVar(STypeVar::t()).into())
+            SType::SOption(SType::STypeVar(STypeVar::iv()).into())
         ),
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+        .with_tpe_params(vec![STypeVar::iv()]);
     /// Coll.get
     pub static ref GET_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, GET_METHOD_DESC.clone());
 }
@@ -335,47 +357,56 @@ lazy_static! {
         "getOrElse",
         vec![coll_iv(), SType::SInt, iv()],
         iv()
-    );
+    )
+        .with_tpe_params(vec![STypeVar::iv()]);
     static ref MAP_METHOD_DESC: SMethodDesc = v5_desc(
         MAP_METHOD_ID,
         "map",
         vec![coll_iv(), SFunc::new(vec![iv()], ov()).into()],
         SType::SColl(ov().into())
-    );
+    )
+        .with_tpe_params(vec![STypeVar::iv(), STypeVar::ov()]);
     static ref EXISTS_METHOD_DESC: SMethodDesc = v5_desc(
         EXISTS_METHOD_ID,
         "exists",
         vec![coll_iv(), SFunc::new(vec![iv()], SType::SBoolean).into()],
         SType::SBoolean
-    );
+    )
+        .with_tpe_params(vec![STypeVar::iv()]);
     static ref FOLD_METHOD_DESC: SMethodDesc = v5_desc(
         FOLD_METHOD_ID,
         "fold",
         vec![coll_iv(), ov(), SFunc::new(vec![ov(), iv()], ov()).into()],
         ov()
-    );
+    )
+        .with_tpe_params(vec![STypeVar::iv(), STypeVar::ov()]);
     static ref FORALL_METHOD_DESC: SMethodDesc = v5_desc(
         FORALL_METHOD_ID,
         "forall",
         vec![coll_iv(), SFunc::new(vec![iv()], SType::SBoolean).into()],
         SType::SBoolean
-    );
+    )
+        .with_tpe_params(vec![STypeVar::iv()]);
     static ref SLICE_METHOD_DESC: SMethodDesc = v5_desc(
         SLICE_METHOD_ID,
         "slice",
         vec![coll_iv(), SType::SInt, SType::SInt],
         coll_iv()
-    );
+    )
+        .with_tpe_params(vec![STypeVar::iv()]);
     static ref FILTER_METHOD_DESC: SMethodDesc = v5_desc(
         FILTER_METHOD_ID,
         "filter",
         vec![coll_iv(), SFunc::new(vec![iv()], SType::SBoolean).into()],
         coll_iv()
-    );
+    )
+        .with_tpe_params(vec![STypeVar::iv()]);
     static ref APPEND_METHOD_DESC: SMethodDesc =
-        v5_desc(APPEND_METHOD_ID, "append", vec![coll_iv(), coll_iv()], coll_iv());
+        v5_desc(APPEND_METHOD_ID, "append", vec![coll_iv(), coll_iv()], coll_iv())
+        .with_tpe_params(vec![STypeVar::iv()]);
     static ref APPLY_METHOD_DESC: SMethodDesc =
-        v5_desc(APPLY_METHOD_ID, "apply", vec![coll_iv(), SType::SInt], iv());
+        v5_desc(APPLY_METHOD_ID, "apply", vec![coll_iv(), SType::SInt], iv())
+        .with_tpe_params(vec![STypeVar::iv()]);
     /// Coll.size
     pub static ref SIZE_METHOD: SMethod = SMethod::new(STypeCompanion::Coll, SIZE_METHOD_DESC.clone());
     /// Coll.getOrElse

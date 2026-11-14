@@ -94,13 +94,14 @@ lazy_static! {
         },
         explicit_type_args: vec![STypeVar::t()],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t()]);
     /// GLOBAL.fromBigEndianBytes
     pub static ref FROM_BIGENDIAN_BYTES_METHOD: SMethod = SMethod::new(STypeCompanion::Global, FROM_BIGENDIAN_BYTES_METHOD_DESC.clone(),);
 
     static ref ENCODE_NBITS_METHOD_DESC: SMethodDesc = SMethodDesc {
         method_id: ENCODE_NBITS_METHOD_ID,
-        name: "encodeNBits",
+        name: "encodeNbits",
         tpe: SFunc {
             t_dom: vec![
                 SType::SGlobal,
@@ -117,7 +118,7 @@ lazy_static! {
 
     static ref DECODE_NBITS_METHOD_DESC: SMethodDesc = SMethodDesc {
         method_id: DECODE_NBITS_METHOD_ID,
-        name: "decodeNBits",
+        name: "decodeNbits",
         tpe: SFunc {
             t_dom: vec![
                 SType::SGlobal,
@@ -134,7 +135,7 @@ lazy_static! {
 
     static ref DESERIALIZE_METHOD_DESC: SMethodDesc = SMethodDesc {
         method_id: DESERIALIZE_METHOD_ID,
-        name: "deserialize",
+        name: "deserializeTo",
         tpe: SFunc {
             t_dom: vec![
                 SType::SGlobal,
@@ -145,7 +146,8 @@ lazy_static! {
         },
         explicit_type_args: vec![STypeVar::t()],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t()]);
     /// GLOBAL.deserialize
     pub static ref DESERIALIZE_METHOD: SMethod = SMethod::new(STypeCompanion::Global, DESERIALIZE_METHOD_DESC.clone(),);
 
@@ -162,7 +164,8 @@ lazy_static! {
         },
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t()]);
     /// GLOBAL.serialize
     pub static ref SERIALIZE_METHOD: SMethod = SMethod::new(STypeCompanion::Global, SERIALIZE_METHOD_DESC.clone(),);
 
@@ -206,7 +209,8 @@ lazy_static! {
         // `Seq(tT)`: the type is written after the argument (v6.0.7 `methods.scala:1986-1987`)
         explicit_type_args: vec![STypeVar::t()],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t()]);
     /// GLOBAL.some
     pub static ref SOME_METHOD : SMethod = SMethod::new(STypeCompanion::Global, SOME_METHOD_DESC.clone(),);
 }
@@ -222,7 +226,8 @@ lazy_static! {
         },
         explicit_type_args: vec![STypeVar::t()],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t()]);
     /// GLOBAL.none
     pub static ref NONE_METHOD : SMethod = SMethod::new(STypeCompanion::Global, NONE_METHOD_DESC.clone(),);
 }

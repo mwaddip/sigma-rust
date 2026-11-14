@@ -181,7 +181,8 @@ lazy_static! {
         },
         explicit_type_args: vec![STypeVar::t()],
         min_version: ErgoTreeVersion::V3
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t()]);
     /// Box.getReg
     pub static ref GET_REG_METHOD: SMethod =
         SMethod::new(STypeCompanion::Box, GET_REG_METHOD_DESC.clone(),);
@@ -202,7 +203,8 @@ lazy_static! {
         },
         explicit_type_args: vec![],
         min_version: ErgoTreeVersion::V0
-    };
+    }
+        .with_tpe_params(vec![STypeVar::t()]);
 }
 
 /// `R0` ... `R9`, ids 9-18 at every tree version (v6.0.7 `SBoxMethods.registers(8)`,
@@ -213,16 +215,19 @@ fn register_method_descs() -> impl Iterator<Item = SMethodDesc> {
     ["R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9"]
         .into_iter()
         .zip(9u8..)
-        .map(|(name, id)| SMethodDesc {
-            method_id: MethodId(id),
-            name,
-            tpe: SFunc {
-                t_dom: vec![SType::SBox],
-                t_range: SType::SOption(Arc::new(STypeVar::t().into())).into(),
-                tpe_params: vec![],
-            },
-            explicit_type_args: vec![],
-            min_version: ErgoTreeVersion::V0,
+        .map(|(name, id)| {
+            SMethodDesc {
+                method_id: MethodId(id),
+                name,
+                tpe: SFunc {
+                    t_dom: vec![SType::SBox],
+                    t_range: SType::SOption(Arc::new(STypeVar::t().into())).into(),
+                    tpe_params: vec![],
+                },
+                explicit_type_args: vec![],
+                min_version: ErgoTreeVersion::V0,
+            }
+            .with_tpe_params(vec![STypeVar::t()])
         })
 }
 
