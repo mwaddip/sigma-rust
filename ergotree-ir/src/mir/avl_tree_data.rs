@@ -125,11 +125,13 @@ impl SigmaSerializable for AvlTreeData {
         // (`putBytes`), whatever their length. The parser always reads exactly
         // 33 bytes, so a non-33 digest (only producible in memory via
         // `updateDigest`) does not round-trip — same as the reference impl.
-        // Metered as PutChunkCost(33) under `Global.serialize`: treeFlags =
-        // PutByteCost via the virtual put; keyLength & valueLength use the no-info
-        // `putUInt` (unmetered); the option tag byte is PutByteCost.
+        // Metered under `Global.serialize`: the digest is PutChunkCost over ITS length
+        // (`putBytes` adds it over `xs.length`, `SigmaByteWriter.scala:142-145`), 33 for
+        // a tree that was parsed; treeFlags = PutByteCost via the virtual put; keyLength
+        // & valueLength use the no-info `putUInt` (unmetered); the option tag byte is
+        // PutByteCost.
         w.write_all(&self.digest)?;
-        w.add_put_chunk_cost(33);
+        w.add_put_chunk_cost(self.digest.len());
         w.put_u8(self.tree_flags.0)?;
         w.add_put_byte_cost();
         w.put_u32(self.key_length)?;
@@ -208,6 +210,7 @@ mod tests {
     use crate::mir::constant::Literal;
     use crate::mir::expr::Expr;
     use crate::reference::Ref;
+    use crate::serialization::sigma_byte_writer::SigmaByteWriter;
     use crate::serialization::sigma_serialize_roundtrip;
     use crate::types::stype::SType;
     use alloc::vec;
@@ -303,6 +306,29 @@ mod tests {
                 other => panic!("{other:?}"),
             },
             other => panic!("{other:?}"),
+        }
+    }
+
+    // sigmastate writes the digest with `putBytes`, which adds `PutChunkCost` over the array's
+    // length (`AvlTreeData.scala:75`, `SigmaByteWriter.scala:142-145`): 3 + n, then one for
+    // the flags' byte and one for the option's tag
+    #[test]
+    fn the_writer_charges_for_the_digests_length() {
+        for n in [0usize, 2, 33, 34, 200] {
+            let data = AvlTreeData {
+                digest: vec![1; n],
+                tree_flags: AvlTreeFlags::new(true, true, true),
+                key_length: 1,
+                value_length_opt: None,
+            };
+            let mut buf = vec![];
+            let cost = {
+                let mut w = SigmaByteWriter::new(&mut buf, None);
+                w.enable_serialize_cost_tracking();
+                data.sigma_serialize(&mut w).unwrap();
+                w.serialize_cost()
+            };
+            assert_eq!((cost, buf.len()), (n as u64 + 5, n + 3), "{n}");
         }
     }
 }

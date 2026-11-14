@@ -3024,4 +3024,36 @@ mod digest_collection {
             assert_eq!(value_and_cost(&body, version), expected, "{body}");
         }
     }
+
+    // the writer adds `PutChunkCost` over the digest's own length (`AvlTreeData.scala:75`,
+    // `SigmaByteWriter.scala:142-145`): a digest of n bytes costs n - 33 more than one of 33
+    #[test]
+    fn the_writer_charges_for_the_digests_length() {
+        assert_eq!(value_and_cost(&serialize(&tree()), V3).1, 62);
+        for n in [0usize, 1, 2, 32, 33, 34, 100, 200] {
+            let mut written = alloc::vec![1u8; n];
+            written.extend([7, 1, 0]);
+            assert_eq!(
+                value_and_cost(&serialize(&upd(&tree(), &bytes(n))), V3),
+                (Value::from(written), 78 + n as u64),
+                "{n}"
+            );
+        }
+        // inside a collection (alone, and after a plain tree) and a pair (first, second)
+        for (n, alone, second, in_pair) in [
+            (33usize, 134, 177, 134),
+            (2, 103, 146, 103),
+            (34, 135, 178, 135),
+        ] {
+            let t = upd(&tree(), &bytes(n));
+            for (body, cost) in [
+                (serialize(&coll_of_trees(&[&t])), alone),
+                (serialize(&coll_of_trees(&[&tree(), &t])), second),
+                (serialize(&format!("8602{t}0402")), in_pair),
+                (serialize(&format!("86020402{t}")), in_pair),
+            ] {
+                assert_eq!(value_and_cost(&body, V3).1, cost, "{body}");
+            }
+        }
+    }
 }
