@@ -747,6 +747,16 @@ mod depth_limit_tests {
     }
 
     #[test]
+    fn a_collection_value_of_no_runtime_type_rejects() {
+        // `Coll[T]()`: the JVM's `RuntimeException` in the data reader (the same reader as a
+        // register's; by reading for the extension)
+        assert!(matches!(
+            ContextExtension::sigma_parse_bytes(&extension(vec![0x0c, 0x67, 0x01, 0x54, 0x00])),
+            Err(SigmaParsingError::NoRuntimeType(_))
+        ));
+    }
+
+    #[test]
     fn extension_sigma_prop_takes_a_value_level() {
         // A value level, a data level, k CAND levels and the innermost leaf: k + 3.
         assert!(ContextExtension::sigma_parse_bytes(&extension(cand_chain(107))).is_ok());

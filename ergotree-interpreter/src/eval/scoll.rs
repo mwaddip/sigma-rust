@@ -12,7 +12,6 @@ use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
 use super::coll_by_index::item_at;
-use super::coll_map::has_runtime_type;
 use super::coll_map::map_coll;
 use super::coll_shape::unit_builder_items;
 use super::env::Env;
@@ -141,11 +140,7 @@ pub(crate) fn flatmap_eval<'ctx>(
             mc.tpe().t_range
         )));
     };
-    if !has_runtime_type(item_tpe) {
-        return Err(EvalError::Misc(format!(
-            "flatMap: the result's item type {item_tpe:?} has no runtime type"
-        )));
-    }
+    super::runtime_type::check_runtime_type(item_tpe, "flatMap")?;
     // The body evaluates in the lambda's CAPTURED environment (JVM closure
     // semantics) — not in the caller's env. ADD_TO_ENV_COST (5) per input
     // element is charged by the invoker (AddToEnvironmentDesc,

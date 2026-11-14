@@ -10,6 +10,9 @@ use crate::eval::Evaluable;
 
 impl Evaluable for GetVar {
     fn eval<'ctx>(&self, _env: &mut Env, ctx: &Context<'ctx>) -> Result<Value<'ctx>, EvalError> {
+        // the variable's runtime type is resolved first, before the node's cost
+        // (`transformers.scala:580-581`)
+        super::runtime_type::check_runtime_type(&self.var_tpe, "GetVar")?;
         ctx.add_jit_cost(10)?; // GetVar = Fixed(10)
 
         // `CContext.getVar` (v6.0.6 `CContext.scala:60-74`): the variable as the script context

@@ -239,6 +239,16 @@ pub enum SigmaParsingError {
     /// context-extension value, which no tree encloses, rejects
     #[error("collection with zero-width element type {0} cannot be deserialized (rule 1020)")]
     ZeroWidthCollection(String),
+    /// Collection data whose item type has no runtime type (a type variable, or a function type
+    /// of other than one argument or with type parameters, at any depth:
+    /// [`SType::has_runtime_type`](crate::types::stype::SType::has_runtime_type)), unless the
+    /// item type is a tuple of other than two items, which is read as `Coll[Any]` whatever
+    /// its items are. sigmastate resolves the item's runtime type after the collection's
+    /// length and before any item, also for no items (6.0.7
+    /// `CoreDataSerializer.deserializeColl`), and `stypeToRType` throws a `RuntimeException`:
+    /// no validation rule, so a size-flagged tree is refused too
+    #[error("collection data with an item type that has no runtime type: {0}")]
+    NoRuntimeType(String),
     /// ValDef type for a given index not found in ValDefTypeStore store
     #[error("ValDef type for an index {0:?} not found in ValDefTypeStore store")]
     ValDefIdNotFound(ValId),
@@ -534,6 +544,8 @@ impl SigmaParsingError {
             NotSupported(_) => Validation,
             // rule 1020 `CheckZeroWidthCollection` (`CoreDataSerializer.scala:168`)
             ZeroWidthCollection(_) => Validation,
+            // `stypeToRType`'s `sys.error` in `deserializeColl`, a `RuntimeException`
+            NoRuntimeType(_) => Other,
             // rule 1012 `CheckHeaderSizeBit` for a missing size bit. `IoError` is the end of
             // input at the header byte, a `BufferUnderflowException`; it is never the position
             // limit, as a tree's window starts at its header byte

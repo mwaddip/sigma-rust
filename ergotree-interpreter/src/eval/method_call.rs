@@ -4,6 +4,7 @@ use ergotree_ir::mir::method_call::MethodCall;
 use ergotree_ir::mir::value::Value;
 
 use super::method_cost::fixed_method_cost;
+use super::runtime_type::{check_runtime_type, descriptor_type};
 use super::smethod_eval_fn;
 use super::Context;
 use super::Env;
@@ -27,9 +28,9 @@ impl Evaluable for MethodCall {
 /// A method call, with or without arguments: sigmastate's `MethodCall.eval`
 /// (`values.scala:1361-1391`; a `PropertyCall` is the same node with no arguments, `:1351`).
 /// The receiver is evaluated first and the call's own cost is added after it (`:1362-1363`).
-/// Then the arguments, the method's cost if it is a fixed one, the refusals of a call the JVM's
-/// invoke refuses (the argument count, the receiver's class, each argument's class), and the
-/// evaluator.
+/// Then the runtime type of a fixed-cost method's type descriptor (`:1366`), the arguments,
+/// the method's cost if it is a fixed one, the refusals of a call the JVM's invoke refuses
+/// (the argument count, the receiver's class, each argument's class), and the evaluator.
 pub(crate) fn call_method<'ctx>(
     method: &SMethod,
     obj: &Expr,
@@ -39,6 +40,11 @@ pub(crate) fn call_method<'ctx>(
 ) -> Result<Value<'ctx>, EvalError> {
     let ov = obj.eval(env, ectx)?;
     ectx.add_jit_cost(4)?; // MethodCall = Fixed(4)
+                           // a fixed-cost method's type descriptors are resolved before the arguments are evaluated
+                           // (`method.extraDescriptors`, `:1366`)
+    if let Some(tpe) = descriptor_type(method) {
+        check_runtime_type(tpe, method.name())?;
+    }
     let argsv: Result<Vec<Value>, EvalError> = args.iter().map(|arg| arg.eval(env, ectx)).collect();
     let argsv = argsv?;
     // a fixed-cost method is paid for before it is invoked, so before every refusal below
@@ -292,6 +298,8 @@ mod arity_tests {
     use ergotree_ir::mir::property_call::PropertyCall;
     use ergotree_ir::mir::value::Value;
     use ergotree_ir::types::scontext::GET_VAR_FROM_INPUT_METHOD;
+    use ergotree_ir::types::stype::SType;
+    use ergotree_ir::types::stype_param::STypeVar;
     use hashbrown::HashMap;
 
     // The parser builds a call of any arity, as sigmastate's does; evaluating one whose
@@ -299,10 +307,16 @@ mod arity_tests {
 
     #[test]
     fn a_property_call_of_a_method_with_arguments_errors() {
+        // with a concrete type argument, as a parsed call has: the method's own type variable
+        // is refused before the count (`descriptor_type`)
+        let type_args: HashMap<STypeVar, SType> =
+            [(STypeVar::t(), SType::SInt)].into_iter().collect();
         let pc: Expr = PropertyCall {
             obj: Box::new(Expr::Context),
-            method: GET_VAR_FROM_INPUT_METHOD.clone(),
-            explicit_type_args: Default::default(),
+            method: GET_VAR_FROM_INPUT_METHOD
+                .clone()
+                .with_concrete_types(&type_args),
+            explicit_type_args: type_args,
         }
         .into();
         // the arity check's error, not the method's own read of a missing argument
@@ -365,7 +379,7 @@ mod arity_tests {
 /// The owners of sigmastate's methods, for the tests of this file that run over all of them
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
-mod test_owners {
+pub(crate) mod test_owners {
     use ergotree_ir::types::stype_companion::STypeCompanion;
 
     /// The names are written once and expand to the list AND to a `match` with no wildcard:
@@ -380,7 +394,7 @@ mod test_owners {
         }};
     }
 
-    pub(super) fn all() -> alloc::vec::Vec<STypeCompanion> {
+    pub(crate) fn all() -> alloc::vec::Vec<STypeCompanion> {
         owners![
             SByte,
             SShort,

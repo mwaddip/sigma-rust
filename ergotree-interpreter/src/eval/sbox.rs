@@ -7,6 +7,7 @@ use ergotree_ir::chain::ergo_box::ErgoBox;
 use ergotree_ir::chain::ergo_box::NonMandatoryRegisterId;
 use ergotree_ir::chain::ergo_box::RegisterId;
 use ergotree_ir::chain::ergo_box::RegisterValue;
+use ergotree_ir::chain::ergo_box::RegisterValueError;
 use ergotree_ir::chain::evaluated_value::ScriptValue;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::constant::TryExtractInto;
@@ -22,23 +23,29 @@ pub(crate) static VALUE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     ))
 };
 
-/// A box's register as a script reads it. sigmastate's `CBox.getReg` (v6.0.6
-/// `CBox.scala:31-45`) reads from `registers`, a lazy val that converts every register of the
-/// box on the first read (`:28`, `:77-92`), so a register that does not convert fails a read of
-/// any register of the box. A constant always converts, so only the other values are tried.
-pub(crate) fn get_register_script_value(
-    ergo_box: &ErgoBox,
-    id: RegisterId,
-) -> Result<Option<ScriptValue>, EvalError> {
-    let unreadable = |reg_id, error| {
-        EvalError::NotFound(format!(
-            "Error getting the register id {reg_id} with error {error:?}"
-        ))
-    };
+fn unreadable(reg_id: RegisterId, error: Option<RegisterValueError>) -> EvalError {
+    EvalError::NotFound(format!(
+        "Error getting the register id {reg_id} with error {error:?}"
+    ))
+}
+
+/// sigmastate's `CBox.registers`: a lazy val that converts every register of the box the
+/// first time it is read (v6.0.6 `CBox.scala:28`, `:77-92`), so a register that does not
+/// convert fails every read that goes through it. Those are `getReg` at any index that is
+/// not negative (`:33`: it reads `registers.length`), and `tokens` and `creationInfo`, which
+/// are `getReg(2)` and `getReg(3)` (`:46-58`); a read of another field of the box (its value,
+/// its bytes, its id) does not. A constant's data always converts; its type may have no
+/// runtime type, since an empty collection of tuples of other than two items is data the JVM
+/// reads whatever the items are (`Coll[(Int, Int, T)]()`), so a constant's type is tried and
+/// any other value is converted.
+pub(crate) fn convert_registers(ergo_box: &ErgoBox) -> Result<(), EvalError> {
     for reg_id in NonMandatoryRegisterId::REG_IDS {
         match ergo_box.additional_registers.get(reg_id) {
             Some(RegisterValue::ParsedExpr(e)) => {
                 e.value().to_script_value()?;
+            }
+            Some(RegisterValue::Parsed(c)) => {
+                super::runtime_type::check_runtime_type(&c.tpe, "a register")?;
             }
             Some(value @ RegisterValue::Invalid { .. }) => {
                 return Err(unreadable(
@@ -46,9 +53,19 @@ pub(crate) fn get_register_script_value(
                     value.as_constant().err(),
                 ))
             }
-            _ => {}
+            None => {}
         }
     }
+    Ok(())
+}
+
+/// A box's register as a script reads it: sigmastate's `CBox.getReg` (v6.0.6
+/// `CBox.scala:31-45`), which reads from `registers` ([`convert_registers`]).
+pub(crate) fn get_register_script_value(
+    ergo_box: &ErgoBox,
+    id: RegisterId,
+) -> Result<Option<ScriptValue>, EvalError> {
+    convert_registers(ergo_box)?;
     match id {
         RegisterId::NonMandatoryRegisterId(reg_id) => {
             match ergo_box.additional_registers.get(reg_id) {
@@ -96,6 +113,13 @@ pub(crate) static GET_REG_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
             let ergo_box = obj.try_extract_into::<Ref<'_, ErgoBox>>()?;
             get_register_script_value(&ergo_box, reg_id)?
         }
+        // an index past the last register is compared with `registers.length`, which
+        // converts the registers; a negative one answers before that (`CBox.scala:33`)
+        None if reg_idx >= 0 => {
+            let ergo_box = obj.try_extract_into::<Ref<'_, ErgoBox>>()?;
+            convert_registers(&ergo_box)?;
+            None
+        }
         None => None,
     };
     // Return type of getReg[T] is always Option[T]
@@ -115,10 +139,10 @@ pub(crate) static GET_REG_EVAL_FN: EvalFn = |mc, _env, ctx, obj, args| {
 };
 
 pub(crate) static TOKENS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
-    let res: Value = obj
-        .try_extract_into::<Ref<'_, ErgoBox>>()?
-        .tokens_raw()
-        .into();
+    let ergo_box = obj.try_extract_into::<Ref<'_, ErgoBox>>()?;
+    // `CBox.tokens` is `getReg(2)` (`CBox.scala:56-58`)
+    convert_registers(&ergo_box)?;
+    let res: Value = ergo_box.tokens_raw().into();
     Ok(res)
 };
 
@@ -157,6 +181,8 @@ pub(crate) static ID_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
 
 pub(crate) static CREATION_INFO_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let ergo_box = obj.try_extract_into::<Ref<'_, ErgoBox>>()?;
+    // `CBox.creationInfo` is `getReg(3)` (`CBox.scala:46-54`)
+    convert_registers(&ergo_box)?;
     Ok(super::extract_creation_info::creation_info_value(&ergo_box))
 };
 
