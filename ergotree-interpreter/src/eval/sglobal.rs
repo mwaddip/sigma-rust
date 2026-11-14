@@ -148,6 +148,14 @@ pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
         .first()
         .ok_or_else(|| EvalError::NotFound("deserialize: missing first arg".into()))?
         .clone();
+    // `deserializeTo_eval` resolves the runtime type of the call's type first, after the
+    // arguments and before its cost (`stypeToRType(mc.tpe)`, `methods.scala:1951`). The JVM's
+    // call type is the method's range with the type argument substituted a second time
+    // (`values.scala:1355-1358`); this reads the range. The two differ in having a runtime
+    // type for one type, a function type whose own type parameter is the method's `T`, which
+    // that substitution drops: there the JVM goes on to the data reader, which refuses a
+    // function (queue candidate 24: a type parameter's name is private to `ergotree-ir`)
+    super::runtime_type::check_runtime_type(output_type, "deserializeTo")?;
     // `deserializeTo_eval` adds its per-item cost over the collection's LENGTH and reads the
     // bytes inside that block (`methods.scala:1948-1955`): a collection of another item type
     // has paid before its array fails the cast
