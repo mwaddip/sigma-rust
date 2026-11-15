@@ -4,6 +4,7 @@ use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -15,9 +16,13 @@ impl Evaluable for XorOf {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        let input_v = self.input.eval(env, ctx)?;
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
+        // the cost is over the collection's length, whatever its items; the booleans are the body's
+        // (`trees.scala:238-243`)
+        if let Value::Coll(coll) = &input_v {
+            ctx.add_per_item_jit_cost(20, 5, 32, coll.len() as u32)?;
+        }
         let input_v_bools = input_v.try_extract_into::<Vec<bool>>()?;
-        ctx.add_per_item_jit_cost(20, 5, 32, input_v_bools.len() as u32)?;
         // JVM v4.x compatibility: pre-v2 ErgoTree scripts (V0/V1) computed
         // xorOf as `distinct.length == 2` — true iff the collection
         // contains BOTH true and false (count and order independent).

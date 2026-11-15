@@ -2,6 +2,7 @@ use ergotree_ir::mir::extract_script_bytes::ExtractScriptBytes;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -12,8 +13,8 @@ impl Evaluable for ExtractScriptBytes {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let input_v = eval_to(&self.input, OperandClass::Box, env, ctx)?;
         ctx.add_jit_cost(10)?; // ExtractScriptBytes = Fixed(10)
-        let input_v = self.input.eval(env, ctx)?;
         match input_v {
             Value::CBox(b) => Ok(b.script_bytes()?.into()),
             _ => Err(EvalError::UnexpectedValue(format!(

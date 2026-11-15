@@ -72,6 +72,7 @@ pub(crate) mod method_call;
 pub(crate) mod method_cost;
 pub(crate) mod multiply_group;
 pub(crate) mod negation;
+pub(crate) mod operand;
 pub(crate) mod option_get;
 pub(crate) mod option_get_or_else;
 pub(crate) mod option_is_defined;

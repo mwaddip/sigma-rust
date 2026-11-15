@@ -16,8 +16,11 @@ impl Evaluable for BoolToSigmaProp {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        ctx.add_jit_cost(15)?; // BoolToSigmaProp = Fixed(15)
+        // the operand is not cast where it is evaluated (`evalTo[Any]`): the cost comes between its
+        // evaluation and the cast in the body (`trees.scala:37-40`)
         let input_v = self.input.eval(env, ctx)?;
+        ctx.add_jit_cost(15)?; // BoolToSigmaProp = Fixed(15)
+
         // JVM v4.x compatibility: pre-v2 ErgoTree scripts (versions V0/V1)
         // accepted a SigmaProp input to BoolToSigmaProp and passed it
         // through unchanged. Mainnet contains historical transactions

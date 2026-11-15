@@ -3,6 +3,7 @@ use ergotree_ir::mir::extract_id::ExtractId;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -13,8 +14,8 @@ impl Evaluable for ExtractId {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let input_v = eval_to(&self.input, OperandClass::Box, env, ctx)?;
         ctx.add_jit_cost(12)?; // ExtractId = Fixed(12)
-        let input_v = self.input.eval(env, ctx)?;
         match input_v {
             Value::CBox(b) => {
                 let bytes: Vec<i8> = b.box_id().into();

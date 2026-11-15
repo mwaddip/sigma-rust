@@ -3,6 +3,7 @@ use ergotree_ir::mir::decode_point::DecodePoint;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::EvalError::Misc;
@@ -17,8 +18,9 @@ impl Evaluable for DecodePoint {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
         ctx.add_jit_cost(300)?; // DecodePoint = Fixed(300)
-        let point_bytes = self.input.eval(env, ctx)?.try_extract_into::<Vec<u8>>()?;
+        let point_bytes = input_v.try_extract_into::<Vec<u8>>()?;
         let point: EcPoint = SigmaSerializable::sigma_parse_bytes(&point_bytes).map_err(|_| {
             Misc(format!(
                 "DecodePoint: Failed to parse EC point from bytes {:?}",
