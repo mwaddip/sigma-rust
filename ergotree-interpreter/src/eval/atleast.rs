@@ -13,6 +13,7 @@ use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
 use ergotree_ir::types::stype::SType;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -44,8 +45,8 @@ impl Evaluable for Atleast {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        let bound_v = self.bound.eval(env, ctx)?;
-        let input_v = self.input.eval(env, ctx)?;
+        let bound_v = eval_to(&self.bound, OperandClass::Int, env, ctx)?;
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
 
         let coll = match input_v {
             Value::Coll(coll) => Ok(coll),

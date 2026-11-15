@@ -6,6 +6,7 @@ use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::EvalError::UnexpectedValue;
@@ -17,8 +18,9 @@ impl Evaluable for ByteArrayToBigInt {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
         ctx.add_jit_cost(30)?; // ByteArrayToBigInt = Fixed(30)
-        let input = self.input.eval(env, ctx)?.try_extract_into::<Vec<u8>>()?;
+        let input = input_v.try_extract_into::<Vec<u8>>()?;
         if input.is_empty() {
             return Err(UnexpectedValue(
                 "ByteArrayToBigInt: byte array is empty".into(),

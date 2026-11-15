@@ -5,6 +5,7 @@ use ergotree_ir::mir::value::Value;
 use ergotree_ir::mir::xor::Xor;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -51,8 +52,8 @@ impl Evaluable for Xor {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        let left_v = self.left.eval(env, ctx)?;
-        let right_v = self.right.eval(env, ctx)?;
+        let left_v = eval_to(&self.left, OperandClass::Coll, env, ctx)?;
+        let right_v = eval_to(&self.right, OperandClass::Coll, env, ctx)?;
         xor_with_costing(ctx, &left_v, &right_v)
     }
 }

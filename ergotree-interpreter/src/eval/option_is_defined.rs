@@ -2,6 +2,7 @@ use ergotree_ir::mir::option_is_defined::OptionIsDefined;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -12,8 +13,8 @@ impl Evaluable for OptionIsDefined {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let v = eval_to(&self.input, OperandClass::Option, env, ctx)?;
         ctx.add_jit_cost(10)?; // OptionIsDefined = Fixed(10)
-        let v = self.input.eval(env, ctx)?;
         match v {
             Value::Opt(opt_v) => Ok(opt_v.is_some().into()),
             _ => Err(EvalError::UnexpectedExpr(format!(

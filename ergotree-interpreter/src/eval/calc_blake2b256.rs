@@ -6,6 +6,7 @@ use sigma_util::hash::blake2b256_hash;
 use sigma_util::AsVecU8;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -16,11 +17,15 @@ impl Evaluable for CalcBlake2b256 {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        let input_v = self.input.eval(env, ctx)?;
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
+        // the cost is over the collection's length, whatever its items; the bytes are the body's
+        // (`trees.scala:548-553`)
+        if let Value::Coll(coll) = &input_v {
+            ctx.add_per_item_jit_cost(20, 7, 128, coll.len() as u32)?;
+        }
         // the bytes of any `Coll[Byte]`, specialised or generic (sigmastate reads `toArray`)
         match input_v.clone().try_extract_into::<Vec<i8>>() {
             Ok(coll_byte) => {
-                ctx.add_per_item_jit_cost(20, 7, 128, coll_byte.len() as u32)?;
                 let expected_hash: Vec<u8> =
                     blake2b256_hash(coll_byte.as_vec_u8().as_slice()).to_vec();
                 Ok(expected_hash.into())

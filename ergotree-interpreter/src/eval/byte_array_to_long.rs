@@ -3,6 +3,7 @@ use ergotree_ir::mir::byte_array_to_long::ByteArrayToLong;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::EvalError::UnexpectedValue;
@@ -15,8 +16,9 @@ impl Evaluable for ByteArrayToLong {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
         ctx.add_jit_cost(16)?; // ByteArrayToLong = Fixed(16)
-        let input = self.input.eval(env, ctx)?.try_extract_into::<Vec<u8>>()?;
+        let input = input_v.try_extract_into::<Vec<u8>>()?;
         if input.len() < 8 {
             return Err(UnexpectedValue(
                 "byteArrayToLong: array must contain at least 8 elements".into(),

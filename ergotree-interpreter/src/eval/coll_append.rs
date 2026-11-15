@@ -2,6 +2,7 @@ use ergotree_ir::mir::coll_append::Append;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -12,8 +13,8 @@ impl Evaluable for Append {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        let input_v = self.input.eval(env, ctx)?;
-        let col2_v = self.col_2.eval(env, ctx)?;
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
+        let col2_v = eval_to(&self.col_2, OperandClass::Coll, env, ctx)?;
         let (Value::Coll(left), Value::Coll(right)) = (&input_v, &col2_v) else {
             return Err(EvalError::UnexpectedValue(format!(
                 "Append: expected two collections, got: {input_v:?} and {col2_v:?}"

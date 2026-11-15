@@ -2,6 +2,7 @@ use ergotree_ir::mir::coll_size::SizeOf;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -12,8 +13,8 @@ impl Evaluable for SizeOf {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
         ctx.add_jit_cost(14)?; // SizeOf = Fixed(14)
-        let input_v = self.input.eval(env, ctx)?;
         match input_v {
             Value::Coll(coll) => Ok((coll.len() as i32).into()),
             _ => Err(EvalError::UnexpectedValue(format!(

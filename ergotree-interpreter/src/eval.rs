@@ -72,6 +72,7 @@ pub(crate) mod method_call;
 pub(crate) mod method_cost;
 pub(crate) mod multiply_group;
 pub(crate) mod negation;
+pub(crate) mod operand;
 pub(crate) mod option_get;
 pub(crate) mod option_get_or_else;
 pub(crate) mod option_is_defined;
@@ -856,12 +857,23 @@ pub mod test_util {
         body_hex: &str,
         version: ErgoTreeVersion,
     ) -> (Result<Value<'static>, EvalError>, u64) {
+        eval_body_at(body_hex, version, 3)
+    }
+
+    /// The value and JIT cost of an expression's bytes, parsed and evaluated at the given tree
+    /// version and activated version
+    #[cfg(test)]
+    pub(crate) fn eval_body_at(
+        body_hex: &str,
+        version: ErgoTreeVersion,
+        activated: i8,
+    ) -> (Result<Value<'static>, EvalError>, u64) {
         let bytes = base16::decode(body_hex.as_bytes()).unwrap();
         let expr = from_bytes(&bytes)
             .with_tree_version(version, Expr::sigma_parse)
             .unwrap();
         let mut ctx = force_any_val::<Context>();
-        ctx.activated_script_version_byte = 3;
+        ctx.activated_script_version_byte = activated;
         ctx.tree_version.set(version);
         ctx.jit_cost.set(0);
         let mut env = Env::empty();
@@ -904,6 +916,26 @@ pub mod test_util {
                 }
                 None => assert!(res.is_err(), "{tree_hex}: {res:?}"),
             }
+        }
+    }
+
+    /// A value as the table tests of the activation gates name it: a boolean, an `Int`, a
+    /// collection of bytes as hex, `<sigmaprop>` for any sigma proposition
+    #[cfg(test)]
+    pub(crate) fn shown(v: &Value<'_>) -> alloc::string::String {
+        match v {
+            Value::Boolean(b) => alloc::format!("{b}"),
+            Value::Int(n) => alloc::format!("{n}"),
+            Value::SigmaProp(_) => "<sigmaprop>".into(),
+            Value::Coll(c) if c.elem_tpe() == SType::SByte => c
+                .as_vec()
+                .iter()
+                .map(|b| match b {
+                    Value::Byte(b) => alloc::format!("{:02x}", *b as u8),
+                    other => alloc::format!("{other:?}"),
+                })
+                .collect(),
+            other => alloc::format!("{other:?}"),
         }
     }
 

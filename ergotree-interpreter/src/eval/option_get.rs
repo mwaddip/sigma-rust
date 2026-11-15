@@ -3,6 +3,7 @@ use ergotree_ir::mir::option_get::OptionGet;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -13,8 +14,8 @@ impl Evaluable for OptionGet {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let v = eval_to(&self.input, OperandClass::Option, env, ctx)?;
         ctx.add_jit_cost(15)?; // OptionGet = Fixed(15)
-        let v = self.input.eval(env, ctx)?;
         option_get(v)
     }
 }

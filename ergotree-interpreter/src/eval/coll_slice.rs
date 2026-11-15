@@ -4,6 +4,7 @@ use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -14,9 +15,9 @@ impl Evaluable for Slice {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        let input_v = self.input.eval(env, ctx)?;
-        let from_v = self.from.eval(env, ctx)?;
-        let until_v = self.until.eval(env, ctx)?;
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
+        let from_v = eval_to(&self.from, OperandClass::Int, env, ctx)?;
+        let until_v = eval_to(&self.until, OperandClass::Int, env, ctx)?;
         let (input_vec, receiver) = match input_v {
             Value::Coll(coll) => Ok((coll.as_vec(), coll)),
             _ => Err(EvalError::UnexpectedValue(format!(

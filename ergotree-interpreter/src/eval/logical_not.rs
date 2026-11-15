@@ -3,6 +3,7 @@ use ergotree_ir::mir::logical_not::LogicalNot;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -13,9 +14,9 @@ impl Evaluable for LogicalNot {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        ctx.add_jit_cost(15)?; // LogicalNot = Fixed(15)
-        let input_v = self.input.eval(env, ctx)?;
+        let input_v = eval_to(&self.input, OperandClass::Boolean, env, ctx)?;
         let input_v_bool = input_v.try_extract_into::<bool>()?;
+        ctx.add_jit_cost(15)?; // LogicalNot = Fixed(15)
         Ok((!input_v_bool).into())
     }
 }

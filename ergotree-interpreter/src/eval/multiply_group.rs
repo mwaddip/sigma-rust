@@ -2,6 +2,7 @@ use ergotree_ir::mir::multiply_group::MultiplyGroup;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -12,9 +13,9 @@ impl Evaluable for MultiplyGroup {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let left_v = eval_to(&self.left, OperandClass::GroupElement, env, ctx)?;
+        let right_v = eval_to(&self.right, OperandClass::GroupElement, env, ctx)?;
         ctx.add_jit_cost(40)?; // MultiplyGroup = Fixed(40)
-        let left_v = self.left.eval(env, ctx)?;
-        let right_v = self.right.eval(env, ctx)?;
 
         match (&left_v, &right_v) {
             (Value::GroupElement(left), Value::GroupElement(right)) => {

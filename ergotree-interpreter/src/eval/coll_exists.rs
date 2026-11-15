@@ -5,6 +5,7 @@ use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -16,8 +17,8 @@ impl Evaluable for Exists {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        let input_v = self.input.eval(env, ctx)?;
-        let condition_v = self.condition.eval(env, ctx)?;
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
+        let condition_v = eval_to(&self.condition, OperandClass::Function, env, ctx)?;
         let input_v_clone = input_v.clone();
         let mut invoker = match &condition_v {
             Value::Lambda(func_value) => {

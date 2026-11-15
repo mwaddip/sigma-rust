@@ -2,6 +2,7 @@ use ergotree_ir::mir::extract_amount::ExtractAmount;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -12,8 +13,8 @@ impl Evaluable for ExtractAmount {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let input_v = eval_to(&self.input, OperandClass::Box, env, ctx)?;
         ctx.add_jit_cost(8)?; // ExtractAmount = Fixed(8)
-        let input_v = self.input.eval(env, ctx)?;
         match input_v {
             Value::CBox(b) => Ok(Value::Long(b.value.as_i64())),
             _ => Err(EvalError::UnexpectedValue(format!(

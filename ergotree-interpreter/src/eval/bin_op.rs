@@ -9,6 +9,7 @@ use ergotree_ir::mir::bin_op::RelationOp;
 use ergotree_ir::mir::bin_op::{ArithOp, LogicalOp};
 use ergotree_ir::mir::constant::TryExtractFrom;
 use ergotree_ir::mir::constant::TryExtractInto;
+use ergotree_ir::mir::expr::Expr;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 use ergotree_ir::unsignedbigint256::UnsignedBigInt;
@@ -24,6 +25,7 @@ use num_traits::Zero;
 
 use crate::eval::env::Env;
 use crate::eval::fits_256_bits;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::unevaluated::not_evaluated;
 use crate::eval::Context;
 use crate::eval::EvalError;
@@ -266,84 +268,98 @@ fn eval_bigint_arith<'ctx>(
     Ok(Value::BigInt(result))
 }
 
+/// The three logical operations. `BinOr` and `BinAnd` (v6.0.6 `trees.scala:1246-1250`,
+/// `:1269-1273`): the left operand as a `Boolean`, the cost, then the right operand only where it
+/// decides the result. `BinXor` (`:1288-1293`): both operands, then the cost
+fn eval_logical<'ctx>(
+    node: &BinOp,
+    op: LogicalOp,
+    env: &mut Env<'ctx>,
+    ctx: &Context<'ctx>,
+) -> Result<Value<'ctx>, EvalError> {
+    let mut operand = |expr: &Expr| -> Result<bool, EvalError> {
+        Ok(eval_to(expr, OperandClass::Boolean, env, ctx)?.try_extract_into::<bool>()?)
+    };
+    let left = operand(&node.left)?;
+    Ok(Value::Boolean(match op {
+        LogicalOp::And => {
+            ctx.add_jit_cost(20)?; // BinAnd = Fixed(20)
+            left && operand(&node.right)?
+        }
+        LogicalOp::Or => {
+            ctx.add_jit_cost(20)?; // BinOr = Fixed(20)
+            left || operand(&node.right)?
+        }
+        LogicalOp::Xor => {
+            let right = operand(&node.right)?;
+            ctx.add_jit_cost(20)?; // BinXor = Fixed(20)
+            left ^ right
+        }
+    }))
+}
+
 impl Evaluable for BinOp {
     fn eval<'ctx>(
         &self,
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        // sigmastate defines no `eval` for `BitOp` (v6.0.7 `trees.scala:911-916`): it throws at
-        // the node, before its operands are evaluated
-        if let BinOpKind::Bit(_) = self.kind {
-            return Err(not_evaluated("BitOp"));
-        }
-        let lv = self.left.eval(env, ctx)?;
         match self.kind {
-            // The arithmetic cost is charged in `eval_arith`, by the left operand's static type
-            BinOpKind::Arith(_) => {}
-            // Eq/NEq cost is charged by eq_with_cost during the eval
-            // dispatch below (per-type + per-coll-element), since the cost
-            // depends on the runtime value type. LT, LE, GT, GE are charged in
-            // `eval_ordering`, once the right operand is evaluated
-            BinOpKind::Relation(_) => {}
-            BinOpKind::Logical(_) => {
-                ctx.add_jit_cost(20)?; // BinOr, BinAnd, BinXor = Fixed(20)
+            // sigmastate defines no `eval` for `BitOp` (v6.0.7 `trees.scala:911-916`): it throws at
+            // the node, before its operands are evaluated
+            BinOpKind::Bit(_) => Err(not_evaluated("BitOp")),
+            BinOpKind::Logical(op) => eval_logical(self, op, env, ctx),
+            // `EQ` and `NEQ` add their cost in `eq_with_cost` (per type and per item, by the
+            // runtime value); `LT`, `LE`, `GT`, `GE` in `eval_ordering`, once the right operand is
+            // evaluated
+            BinOpKind::Relation(op) => {
+                let lv = self.left.eval(env, ctx)?;
+                let mut rv = || self.right.eval(env, ctx);
+                match op {
+                    // `EQ`/`NEQ` check each operand's value against its type, the left one before
+                    // the right is evaluated (`trees.scala:1204-1209`, `:1224-1229`)
+                    RelationOp::Eq => {
+                        crate::eval::check_value_of_type(
+                            &self.left.tpe(),
+                            &lv,
+                            ctx.tree_version(),
+                        )?;
+                        let rv_val = rv()?;
+                        crate::eval::check_value_of_type(
+                            &self.right.tpe(),
+                            &rv_val,
+                            ctx.tree_version(),
+                        )?;
+                        Ok(Value::Boolean(
+                            crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
+                        ))
+                    }
+                    RelationOp::NEq => {
+                        crate::eval::check_value_of_type(
+                            &self.left.tpe(),
+                            &lv,
+                            ctx.tree_version(),
+                        )?;
+                        let rv_val = rv()?;
+                        crate::eval::check_value_of_type(
+                            &self.right.tpe(),
+                            &rv_val,
+                            ctx.tree_version(),
+                        )?;
+                        Ok(Value::Boolean(
+                            !crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
+                        ))
+                    }
+                    RelationOp::Gt => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_gt().into()),
+                    RelationOp::Lt => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_lt().into()),
+                    RelationOp::Ge => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_ge().into()),
+                    RelationOp::Le => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_le().into()),
+                }
             }
-            // never reached: `eval` returned for a `Bit` kind above, before its operands
-            BinOpKind::Bit(_) => return Err(not_evaluated("BitOp")),
-        }
-        // using closure to keep right value from evaluation (for lazy AND, OR, XOR)
-        let mut rv = || self.right.eval(env, ctx);
-        match self.kind {
-            BinOpKind::Logical(op) => match op {
-                LogicalOp::And => Ok(Value::Boolean(if lv.try_extract_into::<bool>()? {
-                    rv()?.try_extract_into::<bool>()?
-                } else {
-                    false
-                })),
-                LogicalOp::Or => Ok(Value::Boolean(if !lv.try_extract_into::<bool>()? {
-                    rv()?.try_extract_into::<bool>()?
-                } else {
-                    true
-                })),
-                LogicalOp::Xor => Ok(Value::Boolean(
-                    lv.try_extract_into::<bool>()? ^ rv()?.try_extract_into::<bool>()?,
-                )),
-            },
-            BinOpKind::Relation(op) => match op {
-                // `EQ`/`NEQ` check each operand's value against its type, the left one before
-                // the right is evaluated (`trees.scala:1204-1209`, `:1224-1229`)
-                RelationOp::Eq => {
-                    crate::eval::check_value_of_type(&self.left.tpe(), &lv, ctx.tree_version())?;
-                    let rv_val = rv()?;
-                    crate::eval::check_value_of_type(
-                        &self.right.tpe(),
-                        &rv_val,
-                        ctx.tree_version(),
-                    )?;
-                    Ok(Value::Boolean(
-                        crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
-                    ))
-                }
-                RelationOp::NEq => {
-                    crate::eval::check_value_of_type(&self.left.tpe(), &lv, ctx.tree_version())?;
-                    let rv_val = rv()?;
-                    crate::eval::check_value_of_type(
-                        &self.right.tpe(),
-                        &rv_val,
-                        ctx.tree_version(),
-                    )?;
-                    Ok(Value::Boolean(
-                        !crate::eval::data_value_comparer::eq_with_cost(&lv, &rv_val, ctx)?,
-                    ))
-                }
-                RelationOp::Gt => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_gt().into()),
-                RelationOp::Lt => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_lt().into()),
-                RelationOp::Ge => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_ge().into()),
-                RelationOp::Le => Ok(eval_ordering(self, lv, rv()?, ctx)?.is_le().into()),
-            },
+            // the arithmetic cost is added in `eval_arith`, by the left operand's static type
             BinOpKind::Arith(op) => {
-                let rv = rv()?;
+                let lv = self.left.eval(env, ctx)?;
+                let rv = self.right.eval(env, ctx)?;
                 // sigmastate looks the operation up by the LEFT operand's static type, once both
                 // operands are evaluated (`ArithOp.impls(tpe.typeCode)`, `tpe = left.tpe`, v6.0.6
                 // `trees.scala:703-739`, the table `:861-869`): a type with no arithmetic, such as
@@ -364,8 +380,6 @@ impl Evaluable for BinOp {
                     ))),
                 }
             }
-            // never reached: `eval` returned for a `Bit` kind above, before its operands
-            BinOpKind::Bit(_) => Err(not_evaluated("BitOp")),
         }
     }
 }
