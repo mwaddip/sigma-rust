@@ -1,5 +1,4 @@
 use alloc::string::ToString;
-use alloc::vec::Vec;
 use ergotree_ir::mir::coll_forall::ForAll;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
@@ -41,16 +40,17 @@ impl Evaluable for ForAll {
         let mut condition_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
         // sigmastate reads no element type here: the lambda checks each element against its
         // argument's type (v6.0.7 `transformers.scala:182-192`, `values.scala:1074`)
-        let normalized_input_vals: Vec<Value> = match input_v {
-            Value::Coll(coll) => Ok(coll.as_vec()),
+        let coll = match input_v {
+            Value::Coll(coll) => Ok(coll),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected Map input to be Value::Coll, got: {0:?}",
                 input_v
             ))),
         }?;
-        ctx.add_per_item_jit_cost(3, 1, 10, normalized_input_vals.len() as u32)?;
+        ctx.add_per_item_jit_cost(3, 1, 10, coll.len() as u32)?;
 
-        for item in normalized_input_vals {
+        for i in 0..super::coll_shape::walked_len(&coll) {
+            let item = super::coll_shape::walked_item(&coll, i)?;
             let res = condition_call(item)?.try_extract_into::<bool>()?;
             if !res {
                 return Ok(false.into());

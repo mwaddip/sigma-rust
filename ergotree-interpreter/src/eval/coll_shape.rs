@@ -251,6 +251,85 @@ pub(crate) fn patch<'ctx>(
     }
 }
 
+/// How many items `map`, `exists`, `forall` and `filter` walk: a `PairOfCols` walks its LEFT side's
+/// length (`CollsOverArrays.scala:317-364`), any other collection its own. The two differ only
+/// for sides of unequal length, which `zip` keeps below an activated script version of 2
+pub(crate) fn walked_len(coll: &CollValue<'_>) -> usize {
+    match coll {
+        CollValue::Pairs { ls, .. } => ls.len(),
+        _ => coll.len(),
+    }
+}
+
+/// The item such a walk reads at `i`: a `PairOfCols` reads both sides there, so the walk fails
+/// where the right side ends
+pub(crate) fn walked_item<'ctx>(
+    coll: &CollValue<'ctx>,
+    i: usize,
+) -> Result<Value<'ctx>, EvalError> {
+    coll.get_val(i).ok_or_else(|| {
+        EvalError::Misc(format!(
+            "a side of a collection of pairs ends before index {i}"
+        ))
+    })
+}
+
+/// `Coll.slice` as the receiver's JVM class runs it: a `PairOfCols` slices each side
+/// (`CollsOverArrays.scala:377`), so sides of unequal length stay unequal; any other collection
+/// keeps the intersection of the range with its bounds, in its own class (`builder.fromArray`
+/// inside the receiver, `:41`), and gives an empty collection for a range outside them
+pub(crate) fn slice<'ctx>(
+    coll: &CollValue<'ctx>,
+    from: i32,
+    until: i32,
+) -> Result<CollValue<'ctx>, EvalError> {
+    match coll {
+        CollValue::Pairs { ls, rs } => Ok(CollValue::pairs(
+            slice(ls, from, until)?,
+            slice(rs, from, until)?,
+        )),
+        _ => {
+            let items = coll.as_vec();
+            let range = from.max(0) as usize..until.min(items.len() as i32) as usize;
+            Ok(coll.rebuild_like(items.get(range).map(|s| s.to_vec()).unwrap_or_default())?)
+        }
+    }
+}
+
+/// `Coll.updated` as the receiver's JVM class runs it: a `PairOfCols` updates each side with its
+/// half of the pair (`CollsOverArrays.scala:430-434`), each side checking the index against its
+/// own length; any other collection stores the value into a copy of its own array
+/// (`builder.fromArray` inside the receiver)
+pub(crate) fn updated<'ctx>(
+    coll: &CollValue<'ctx>,
+    index: i32,
+    elem: Value<'ctx>,
+) -> Result<CollValue<'ctx>, EvalError> {
+    match (coll, elem) {
+        (CollValue::Pairs { ls, rs }, Value::Pair(p)) => {
+            let (l, r) = *p;
+            Ok(CollValue::pairs(
+                updated(ls, index, l)?,
+                updated(rs, index, r)?,
+            ))
+        }
+        (_, elem) => {
+            let mut items = coll.as_vec();
+            // a negative index is out of bounds, as any index past the end
+            match items.get_mut(index as usize) {
+                Some(item) => {
+                    *item = elem;
+                    Ok(coll.rebuild_like(items)?)
+                }
+                None => Err(EvalError::UnexpectedValue(format!(
+                    "updated: target index out of bounds, got: {:?}",
+                    Value::Int(index)
+                ))),
+            }
+        }
+    }
+}
+
 /// The items a Scala array builder of `elem_tpe` keeps of the `items` it is handed with `++=`,
 /// as `patch` hands it the patch and `flatMap` each part. `ArrayBuilder.ofUnit` only counts them
 /// and stores `()` for each, so a `Coll[Unit]` takes items of any class that way and holds units
