@@ -7,6 +7,7 @@ use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
 use crate::serialization::SigmaParsingError;
 use crate::serialization::SigmaSerializable;
+use crate::serialization::SigmaSerializationError;
 use crate::serialization::SigmaSerializeResult;
 use crate::traversable::Traversable;
 use crate::types::stype::SType;
@@ -105,18 +106,29 @@ impl Traversable for Collection {
     }
 }
 
+/// A collection node's item count as it is written. sigmastate writes it with `putUShort`,
+/// which refuses one above 65535 (v6.0.6 `ConcreteCollectionSerializer.scala:21`,
+/// `ConcreteCollectionBooleanConstantSerializer.scala:19`)
+fn item_count(len: usize) -> Result<u16, SigmaSerializationError> {
+    u16::try_from(len).map_err(|_| {
+        SigmaSerializationError::NotSupported(format!(
+            "a collection node of {len} items is out of unsigned short range"
+        ))
+    })
+}
+
 pub(crate) fn coll_sigma_serialize<W: SigmaByteWrite>(
     coll: &Collection,
     w: &mut W,
 ) -> SigmaSerializeResult {
     match coll {
         Collection::BoolConstants(bools) => {
-            w.put_u16(bools.len() as u16)?;
+            w.put_u16(item_count(bools.len())?)?;
             w.put_bits(bools.as_slice())?;
             Ok(())
         }
         Collection::Exprs { elem_tpe, items } => {
-            w.put_u16(items.len() as u16)?;
+            w.put_u16(item_count(items.len())?)?;
             elem_tpe.sigma_serialize(w)?;
             items.iter().try_for_each(|i| i.sigma_serialize(w))
         }
@@ -235,6 +247,51 @@ mod bool_constants_write_back_tests {
                 written_back,
                 "{hex}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod item_count_tests {
+    //! sigmastate writes a collection node's item count with `putUShort`, which throws `Value N
+    //! is out of unsigned short range` above 65535 (v6.0.6 `ConcreteCollectionSerializer.scala:21`,
+    //! `ConcreteCollectionBooleanConstantSerializer.scala:19`; measured on the sigma-state 6.0.7
+    //! jars, the round's `measure/out/mem-jvm.txt`). The reader takes the count as an unsigned
+    //! short, so only code builds more.
+    use super::*;
+    use crate::serialization::SigmaSerializationError;
+    use alloc::vec;
+
+    fn ints(n: usize) -> Expr {
+        Collection::Exprs {
+            elem_tpe: SType::SInt,
+            items: vec![Expr::Const(1i32.into()); n],
+        }
+        .into()
+    }
+    fn bool_constants(n: usize) -> Expr {
+        Collection::BoolConstants(vec![true; n]).into()
+    }
+
+    #[test]
+    fn a_collection_node_of_65535_items_is_written() {
+        // the opcode, the count `ff ff 03`, the item type, the items
+        let bytes = ints(65535).sigma_serialize_bytes().unwrap();
+        assert_eq!(
+            (bytes.len(), &bytes[1..4]),
+            (131075, &[0xff, 0xff, 0x03][..])
+        );
+        // the opcode, the count, the bits
+        let bytes = bool_constants(65535).sigma_serialize_bytes().unwrap();
+        assert_eq!((bytes.len(), &bytes[1..4]), (8196, &[0xff, 0xff, 0x03][..]));
+    }
+
+    #[test]
+    fn a_collection_node_of_65536_items_is_refused() {
+        for expr in [ints(65536), bool_constants(65536)] {
+            let res = expr.sigma_serialize_bytes();
+            assert!(matches!(res, Err(SigmaSerializationError::NotSupported(_))));
         }
     }
 }

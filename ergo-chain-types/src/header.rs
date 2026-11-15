@@ -311,7 +311,9 @@ impl AutolykosSolution {
             } else {
                 pow_distance.to_bytes_be()
             };
-            w.put_u8(d_bytes.len() as u8)?;
+            // sigmastate writes the length with `putUByte`, which refuses one above 255 (v6.0.6
+            // `ErgoHeader.scala:67-68`)
+            w.put_u8(u8::try_from(d_bytes.len())?)?;
             w.write_all(&d_bytes)?;
         } else {
             // Autolykos v2
@@ -752,5 +754,42 @@ mod version_signedness_tests {
             miner_pk_hex(&header_v7f),
             "03bedaee069ff4829500b3c07c4d5fe6b3ea3d3bf76c5c28c1d4dcdb1bed0ade0c"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod pow_distance_length_tests {
+    //! sigmastate writes the length of an Autolykos version 1 solution's `d` with `putUByte`,
+    //! which throws `N is out of unsigned byte range` above 255 (v6.0.6
+    //! `ErgoHeader.scala:67-68`; measured on the sigma-state 6.0.7 jars, the round's
+    //! `measure/out/mem-jvm.txt`). The reader takes the length as one byte, so only code (or
+    //! JSON) gives a wider `d`.
+    use super::*;
+    use crate::ec_point::generator;
+
+    fn solution(d_bytes: usize) -> AutolykosSolution {
+        AutolykosSolution {
+            miner_pk: Box::new(generator()),
+            pow_onetime_pk: Some(Box::new(generator())),
+            nonce: vec![0; 8],
+            // the highest bit of the widest byte: exactly `d_bytes` bytes
+            pow_distance: Some(BigUint::from(1u8) << (8 * d_bytes - 1)),
+        }
+    }
+
+    #[test]
+    fn a_d_of_255_bytes_is_written() {
+        let mut bytes = Vec::new();
+        solution(255).serialize_bytes(1, &mut bytes).unwrap();
+        // two points, the nonce, the length, `d`
+        assert_eq!(bytes.len(), 33 + 33 + 8 + 1 + 255);
+        assert_eq!(bytes[33 + 33 + 8], 255);
+    }
+
+    #[test]
+    fn a_d_of_256_bytes_is_refused() {
+        let res = solution(256).serialize_bytes(1, &mut Vec::new());
+        assert!(matches!(res, Err(ScorexSerializationError::TryFrom(_))));
     }
 }
