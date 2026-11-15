@@ -6,6 +6,7 @@ use ergotree_ir::mir::value::Value;
 
 use super::coll_shape::get_or_else;
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -22,9 +23,8 @@ impl Evaluable for ByIndex {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        ctx.add_jit_cost(30)?; // ByIndex = Fixed(30)
-        let input_v = self.input.eval(env, ctx)?;
-        let index_v = self.index.eval(env, ctx)?;
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
+        let index_v = eval_to(&self.index, OperandClass::Int, env, ctx)?;
         let normalized_input_vals: &CollValue<'ctx> = match &input_v {
             Value::Coll(coll) => Ok(coll),
             _ => Err(EvalError::UnexpectedValue(format!(
@@ -47,18 +47,24 @@ impl Evaluable for ByIndex {
                 // specialised receiver with a default of another type fails below version 3
                 let index = index_v.try_extract_into::<i32>()?;
                 if ctx.tree_version() >= ErgoTreeVersion::V3 {
+                    ctx.add_jit_cost(30)?; // ByIndex = Fixed(30)
                     match item_at(normalized_input_vals, index) {
                         Some(v) => Ok(v),
                         None => get_or_else(normalized_input_vals, index, default_v()?),
                     }
                 } else {
-                    get_or_else(normalized_input_vals, index, default_v()?)
+                    let d = default_v()?;
+                    ctx.add_jit_cost(30)?; // ByIndex = Fixed(30)
+                    get_or_else(normalized_input_vals, index, d)
                 }
             }
-            None => item_at(
-                normalized_input_vals,
-                index_v.clone().try_extract_into::<i32>()?,
-            )
+            None => {
+                ctx.add_jit_cost(30)?; // ByIndex = Fixed(30)
+                item_at(
+                    normalized_input_vals,
+                    index_v.clone().try_extract_into::<i32>()?,
+                )
+            }
             .ok_or_else(|| {
                 EvalError::Misc(format!(
                     "ByIndex: index {0:?} out of bounds for collection size {1:?}",

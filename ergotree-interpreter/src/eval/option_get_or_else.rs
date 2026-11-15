@@ -3,6 +3,7 @@ use ergotree_ir::mir::option_get_or_else::OptionGetOrElse;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -13,8 +14,7 @@ impl Evaluable for OptionGetOrElse {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        ctx.add_jit_cost(20)?; // OptionGetOrElse = Fixed(20)
-        let v = self.input.eval(env, ctx)?;
+        let v = eval_to(&self.input, OperandClass::Option, env, ctx)?;
         // `OptionGetOrElse.eval` checks the default's value against its type wherever it
         // evaluates it: lazily from tree version 3, eagerly below (`transformers.scala:627-643`)
         let mut default_v = || -> Result<Value<'ctx>, EvalError> {
@@ -24,9 +24,14 @@ impl Evaluable for OptionGetOrElse {
         };
         match v {
             Value::Opt(opt_v) if ctx.tree_version() >= ErgoTreeVersion::V3 => {
+                ctx.add_jit_cost(20)?; // OptionGetOrElse = Fixed(20)
                 opt_v.as_deref().cloned().map(Ok).unwrap_or_else(default_v)
             }
-            Value::Opt(opt_v) => Ok(opt_v.as_deref().cloned().unwrap_or(default_v()?)),
+            Value::Opt(opt_v) => {
+                let d = default_v()?;
+                ctx.add_jit_cost(20)?; // OptionGetOrElse = Fixed(20)
+                Ok(opt_v.as_deref().cloned().unwrap_or(d))
+            }
             _ => Err(EvalError::UnexpectedExpr(format!(
                 "Don't know how to eval OptM: {0:?}",
                 self

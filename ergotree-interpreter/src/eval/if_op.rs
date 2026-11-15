@@ -3,6 +3,7 @@ use ergotree_ir::mir::if_op::If;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -13,9 +14,10 @@ impl Evaluable for If {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let condition = eval_to(&self.condition, OperandClass::Boolean, env, ctx)?
+            .try_extract_into::<bool>()?;
         ctx.add_jit_cost(10)?; // If = Fixed(10)
-        let condition_v = self.condition.eval(env, ctx)?;
-        let branch = if condition_v.try_extract_into::<bool>()? {
+        let branch = if condition {
             &self.true_branch
         } else {
             &self.false_branch

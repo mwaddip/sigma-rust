@@ -1,5 +1,6 @@
 use crate::eval::env::Env;
 use crate::eval::fits_256_bits;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -26,9 +27,9 @@ impl Evaluable for SubstConstants {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        let script_bytes_v = self.script_bytes.eval(env, ctx)?;
-        let positions_v = self.positions.eval(env, ctx)?;
-        let new_values_v = self.new_values.eval(env, ctx)?;
+        let script_bytes_v = eval_to(&self.script_bytes, OperandClass::Coll, env, ctx)?;
+        let positions_v = eval_to(&self.positions, OperandClass::Coll, env, ctx)?;
+        let new_values_v = eval_to(&self.new_values, OperandClass::Coll, env, ctx)?;
 
         // sigmastate hands `positionsV.toArray` to a parameter of type `Array[Int]` (v6.0.6
         // `trees.scala:641-644`, `:674`): the cast needs an `int[]`, which only a collection

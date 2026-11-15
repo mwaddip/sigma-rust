@@ -7,6 +7,7 @@ use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -18,8 +19,8 @@ impl Evaluable for Map {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        let input_v = self.input.eval(env, ctx)?;
-        let mapper_v = self.mapper.eval(env, ctx)?;
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
+        let mapper_v = eval_to(&self.mapper, OperandClass::Function, env, ctx)?;
         map_coll(ctx, input_v, &mapper_v, self.out_elem_tpe())
     }
 }

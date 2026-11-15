@@ -3,6 +3,7 @@ use ergotree_ir::mir::coll_fold::Fold;
 use ergotree_ir::mir::value::Value;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -14,12 +15,12 @@ impl Evaluable for Fold {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        let input_v = self.input.eval(env, ctx)?;
+        let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
         let zero_v = self.zero.eval(env, ctx)?;
         // `Fold.eval` checks the zero's value against its type before it evaluates the
         // operator (`transformers.scala:224-228`)
         crate::eval::check_value_of_type(&self.zero.tpe(), &zero_v, ctx.tree_version())?;
-        let fold_op_v = self.fold_op.eval(env, ctx)?;
+        let fold_op_v = eval_to(&self.fold_op, OperandClass::Function, env, ctx)?;
         let input_v_clone = input_v.clone();
         let mut invoker = match &fold_op_v {
             Value::Lambda(func_value) => {

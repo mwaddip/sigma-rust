@@ -5,6 +5,7 @@ use ergotree_ir::mir::value::Value;
 use ergotree_ir::sigma_protocol::sigma_boolean::ProveDhTuple;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -15,11 +16,17 @@ impl Evaluable for CreateProveDhTuple {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let g = eval_to(&self.g, OperandClass::GroupElement, env, ctx)?;
+        let h = eval_to(&self.h, OperandClass::GroupElement, env, ctx)?;
+        let u = eval_to(&self.u, OperandClass::GroupElement, env, ctx)?;
+        let v = eval_to(&self.v, OperandClass::GroupElement, env, ctx)?;
         ctx.add_jit_cost(20)?; // CreateProveDHTuple = Fixed(20)
-        let g = self.g.eval(env, ctx)?.try_extract_into::<EcPoint>()?;
-        let h = self.h.eval(env, ctx)?.try_extract_into::<EcPoint>()?;
-        let u = self.u.eval(env, ctx)?.try_extract_into::<EcPoint>()?;
-        let v = self.v.eval(env, ctx)?.try_extract_into::<EcPoint>()?;
-        Ok(ProveDhTuple::new(g, h, u, v).into())
+        Ok(ProveDhTuple::new(
+            g.try_extract_into::<EcPoint>()?,
+            h.try_extract_into::<EcPoint>()?,
+            u.try_extract_into::<EcPoint>()?,
+            v.try_extract_into::<EcPoint>()?,
+        )
+        .into())
     }
 }

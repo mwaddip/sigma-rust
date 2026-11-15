@@ -8,6 +8,7 @@ use ergotree_ir::sigma_protocol::sigma_boolean::cor::Cor;
 use ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -18,13 +19,16 @@ impl Evaluable for SigmaOr {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
-        ctx.add_per_item_jit_cost(10, 2, 1, self.items.len() as u32)?;
         // sigmastate's `anyZK` requires its items to be non-empty
         let items_v: NonEmptyVec<_> = self
             .items
             .iter()
-            .map(|it| it.eval(env, ctx))
-            .collect::<Result<Vec<_>, _>>()?
+            .map(|it| eval_to(it, OperandClass::SigmaProp, env, ctx))
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|items| {
+                ctx.add_per_item_jit_cost(10, 2, 1, self.items.len() as u32)?;
+                Ok(items)
+            })?
             .try_into()?;
         let items_sigmabool = items_v
             .try_mapped(|it| it.try_extract_into::<SigmaProp>())?

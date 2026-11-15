@@ -4,6 +4,7 @@ use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -24,7 +25,7 @@ impl Evaluable for Apply {
                 "Function application must have 1 argument, but was: {self:?}"
             )));
         }
-        let func_v: Value<'ctx> = self.func.eval(env, ctx)?;
+        let func_v: Value<'ctx> = eval_to(&self.func, OperandClass::Function, env, ctx)?;
         let args_v: Vec<Value> = self
             .args
             .iter()

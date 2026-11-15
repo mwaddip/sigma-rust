@@ -10,6 +10,7 @@ use num_bigint::Sign;
 use num_traits::Signed;
 
 use crate::eval::env::Env;
+use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
@@ -20,11 +21,14 @@ impl Evaluable for Exponentiate {
         env: &mut Env<'ctx>,
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
+        let left_v = eval_to(&self.left, OperandClass::GroupElement, env, ctx)?;
+        let right_v = eval_to(&self.right, OperandClass::BigInt, env, ctx)?;
         ctx.add_jit_cost(900)?; // Exponentiate = Fixed(900)
-        let left_v = self.left.eval(env, ctx)?.try_extract_into()?;
-        let right_v = self.right.eval(env, ctx)?.try_extract_into::<BigInt>()?;
 
-        exponentiate(left_v, &right_v)
+        exponentiate(
+            left_v.try_extract_into()?,
+            &right_v.try_extract_into::<BigInt>()?,
+        )
     }
 }
 
