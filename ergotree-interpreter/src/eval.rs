@@ -77,6 +77,9 @@ pub(crate) mod option_get;
 pub(crate) mod option_get_or_else;
 pub(crate) mod option_is_defined;
 pub(crate) mod or;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod pre_activation_rows;
 pub(crate) mod property_call;
 pub(crate) mod runtime_type;
 pub(crate) mod savltree;
@@ -936,6 +939,41 @@ pub mod test_util {
                 })
                 .collect(),
             other => alloc::format!("{other:?}"),
+        }
+    }
+
+    /// A value in the text sigmastate's `toString` reduces to: numbers in decimal, `Coll(a,b)`, a
+    /// pair as `(a,b)`, `Some(a)` / `None`, `()` for `Unit`, and a marker for what has no such text
+    /// (a sigma proposition, a group element, a box, a tree, a lambda)
+    #[cfg(test)]
+    pub(crate) fn jvm_text(v: &Value<'_>) -> alloc::string::String {
+        use alloc::format;
+        match v {
+            Value::Boolean(b) => format!("{b}"),
+            Value::Byte(n) => format!("{n}"),
+            Value::Short(n) => format!("{n}"),
+            Value::Int(n) => format!("{n}"),
+            Value::Long(n) => format!("{n}"),
+            Value::BigInt(n) => format!("{n}"),
+            Value::UnsignedBigInt(n) => format!("{n:?}"),
+            Value::Unit => "()".into(),
+            Value::GroupElement(_) => "<point>".into(),
+            Value::SigmaProp(_) => "<sigmaprop>".into(),
+            Value::CBox(_) => "<box>".into(),
+            Value::AvlTree(_) => "<tree>".into(),
+            Value::Lambda(_) => "<lambda>".into(),
+            Value::Coll(c) => {
+                let items: alloc::vec::Vec<_> = c.as_vec().iter().map(jvm_text).collect();
+                format!("Coll({})", items.join(","))
+            }
+            Value::Pair(p) => format!("({},{})", jvm_text(&p.0), jvm_text(&p.1)),
+            Value::Opt(Some(x)) => format!("Some({})", jvm_text(x)),
+            Value::Opt(None) => "None".into(),
+            Value::String(s) => format!("{s}"),
+            Value::Context => "<context>".into(),
+            Value::Global => "<global>".into(),
+            Value::Header(_) => "<header>".into(),
+            Value::PreHeader(_) => "<preheader>".into(),
         }
     }
 

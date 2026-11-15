@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 
+use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::mir::xor::Xor;
@@ -14,15 +15,27 @@ use crate::eval::Evaluable;
 /// `CollsOverArrays.scala:261-262`). It reads both operands through the `Coll` interface, so any
 /// collection passes, a tuple of bytes (a `Coll[Any]`) included, where the hashes need a
 /// `byte[]`; `zip` cuts both to the shorter length, and each paired item is unboxed as a `Byte`,
-/// so another item among those is an error (SANTA `Tuple.non_pair_value_ops` #36-#39)
-fn xor_colls(left: &CollValue<'_>, right: &CollValue<'_>) -> Result<Arc<[i8]>, EvalError> {
+/// so another item among those is an error (SANTA `Tuple.non_pair_value_ops` #36-#39). Below an
+/// activated script version of 2 `zip` keeps both sides (`pairColl`, `:196-202`) and `map` walks
+/// the LEFT one (`:317-324`): with `walk_left` a longer left operand fails where the right one
+/// ends, and a longer right one gives the left's length
+fn xor_colls(
+    left: &CollValue<'_>,
+    right: &CollValue<'_>,
+    walk_left: bool,
+) -> Result<Arc<[i8]>, EvalError> {
     let byte = |coll: &CollValue<'_>, i: usize| match coll.get_val(i) {
         Some(Value::Byte(b)) => Ok(b),
         other => Err(EvalError::UnexpectedValue(format!(
             "Xor: expected a Byte item, got: {other:?}"
         ))),
     };
-    (0..left.len().min(right.len()))
+    let walked = if walk_left {
+        left.len()
+    } else {
+        left.len().min(right.len())
+    };
+    (0..walked)
         .map(|i| Ok(byte(left, i)? ^ byte(right, i)?))
         .collect()
 }
@@ -30,8 +43,9 @@ fn xor_colls(left: &CollValue<'_>, right: &CollValue<'_>) -> Result<Arc<[i8]>, E
 /// sigmastate's `Xor.xorWithCosting` (v6.0.6 `trees.scala:1021-1025`), which the `Xor` node and
 /// the `Global.xor` method share (`xorMethod`'s cost kind is `Xor.costKind`,
 /// `methods.scala:1876-1877`, and `xor_eval` calls it, `:1917-1920`): the per-item cost
-/// `PerItemCost(10, 2, 128)` on the SHORTER operand's length, then [`xor_colls`]. SANTA
-/// `Xor.per_item_cost_base`: 129 bytes against 1 costs what 1 against 129 does
+/// `PerItemCost(10, 2, 128)` on the SHORTER operand's length at every activated version, then
+/// [`xor_colls`]. SANTA `Xor.per_item_cost_base`: 129 bytes against 1 costs what 1 against 129
+/// does
 pub(crate) fn xor_with_costing<'ctx>(
     ctx: &Context<'ctx>,
     left: &Value<'ctx>,
@@ -43,7 +57,8 @@ pub(crate) fn xor_with_costing<'ctx>(
         )));
     };
     ctx.add_per_item_jit_cost(10, 2, 128, left.len().min(right.len()) as u32)?;
-    Ok(CollValue::Bytes(xor_colls(left, right)?).into())
+    let below_activation = ctx.activated_script_version() < ErgoTreeVersion::V2;
+    Ok(CollValue::Bytes(xor_colls(left, right, below_activation)?).into())
 }
 
 impl Evaluable for Xor {
@@ -67,7 +82,10 @@ mod interface_rows {
     use ergotree_ir::mir::coll_value::CollValue;
     use ergotree_ir::mir::value::Value;
 
-    use crate::eval::test_util::{assert_accepts, eval_v3_body};
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+
+    use crate::eval::test_util::{assert_accepts, eval_body_at, eval_v3_body, innermost};
+    use crate::eval::EvalError;
 
     fn bytes(b: &[i8]) -> Value<'static> {
         Value::Coll(CollValue::Bytes(b.into()))
@@ -95,6 +113,46 @@ mod interface_rows {
             "0b11dc6a02dd020e0309090948020202010203",
         ] {
             assert_accepts(tree_hex, bytes(&[8, 11, 10]), 31);
+        }
+    }
+
+    #[test]
+    fn below_the_activation_xor_walks_the_left_operand() {
+        // sigma-state 6.0.7 at tree version 0, the node and `Global.xor`. `Xor(Coll(1,2,3),
+        // Coll(1,2))`: below an activated version of 2 the walk over the left operand fails
+        // where the right one ends, after the cost of the shorter length; from 2 on `Coll(0,0)`
+        for (body, cost) in [
+            ("9b0e030102030e020102", 22),
+            ("dc6a02dd020e030102030e020102", 31),
+        ] {
+            for activated in [0, 1] {
+                let (res, stopped_at) = eval_body_at(body, ErgoTreeVersion::V0, activated);
+                assert!(
+                    matches!(
+                        res.as_ref().map_err(innermost),
+                        Err(EvalError::UnexpectedValue(_))
+                    ),
+                    "{body} at {activated}: {res:?}"
+                );
+                assert_eq!(stopped_at, cost, "{body} at {activated}");
+            }
+            for activated in [2, 3] {
+                let (res, stopped_at) = eval_body_at(body, ErgoTreeVersion::V0, activated);
+                assert_eq!(res.unwrap(), bytes(&[0, 0]), "{body} at {activated}");
+                assert_eq!(stopped_at, cost, "{body} at {activated}");
+            }
+        }
+        // `Xor(Coll(1,2), Coll(1,2,3))`: a longer right operand gives the left's length at
+        // every activated version
+        for (body, cost) in [
+            ("9b0e0201020e03010203", 22),
+            ("dc6a02dd020e0201020e03010203", 31),
+        ] {
+            for activated in [0, 1, 2, 3] {
+                let (res, stopped_at) = eval_body_at(body, ErgoTreeVersion::V0, activated);
+                assert_eq!(res.unwrap(), bytes(&[0, 0]), "{body} at {activated}");
+                assert_eq!(stopped_at, cost, "{body} at {activated}");
+            }
         }
     }
 
@@ -145,7 +203,7 @@ mod interface_rows {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval::test_util::{eval_out, eval_out_wo_ctx};
+    use crate::eval::test_util::{eval_out, eval_out_wo_ctx, innermost, try_eval_out};
     use alloc::boxed::Box;
     use alloc::vec::Vec;
     use ergotree_ir::chain::context::Context;
@@ -246,7 +304,42 @@ mod tests {
             }
             .into();
 
-            assert_eq!(&eval_out_wo_ctx::<Vec<i8>>(&expr)[..], &expected_xor[..]);
+            // from the activation on: `zip` cuts both operands to the shorter length
+            let mut ctx = force_any_val::<Context>();
+            ctx.activated_script_version_byte = 3;
+            assert_eq!(&eval_out::<Vec<i8>>(&expr, &ctx)[..], &expected_xor[..]);
+        }
+
+        #[test]
+        fn eval_any_below_the_activation(left_bytes in any::<Vec<i8>>(), right_bytes in any::<Vec<i8>>()) {
+
+            let expected_xor: Vec<i8> = left_bytes
+                .iter()
+                .zip(right_bytes.iter())
+                .map(|(l, r)| l ^ r)
+                .collect();
+            let left_is_longer = left_bytes.len() > right_bytes.len();
+
+            let expr: Expr = Xor {
+                left: Box::new(Expr::Const(left_bytes.into())),
+                right: Box::new(Expr::Const(right_bytes.into())),
+            }
+            .into();
+
+            // below it `zip` keeps both and the walk is over the left operand: a longer left
+            // one fails where the right one ends, a longer right one gives the left's length
+            let mut ctx = force_any_val::<Context>();
+            ctx.activated_script_version_byte = 1;
+            match try_eval_out::<Vec<i8>>(&expr, &ctx) {
+                Ok(xor) => {
+                    prop_assert!(!left_is_longer);
+                    prop_assert_eq!(xor, expected_xor);
+                }
+                Err(e) => {
+                    prop_assert!(left_is_longer);
+                    prop_assert!(matches!(innermost(&e), EvalError::UnexpectedValue(_)), "{:?}", e);
+                }
+            }
         }
     }
 }

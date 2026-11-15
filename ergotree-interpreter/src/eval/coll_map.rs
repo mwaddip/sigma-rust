@@ -54,8 +54,8 @@ pub(crate) fn map_coll<'ctx>(
     let mut mapper_call = |arg: Value<'ctx>| invoker.invoke(ctx, vec![arg]);
     // sigmastate reads no element type here: the mapper checks each element against its
     // argument's type (v6.0.7 `transformers.scala:33-46`, `values.scala:1074`)
-    let (normalized_input_vals, over_pairs) = match input_v {
-        Value::Coll(coll) => Ok((coll.as_vec(), matches!(coll, CollValue::Pairs { .. }))),
+    let coll = match input_v {
+        Value::Coll(coll) => Ok(coll),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected Map input to be Value::Coll, got: {0:?}",
             input_v
@@ -63,10 +63,10 @@ pub(crate) fn map_coll<'ctx>(
     }?;
     // `stypeToRType(tRange)` before the charge, in `MapCollection.eval` and `map_eval` alike
     super::runtime_type::check_runtime_type(&out_elem_tpe, "map")?;
-    ctx.add_per_item_jit_cost(20, 1, 10, normalized_input_vals.len() as u32)?;
-    normalized_input_vals
-        .iter()
-        .map(|item| mapper_call(item.clone()))
+    let over_pairs = matches!(coll, CollValue::Pairs { .. });
+    ctx.add_per_item_jit_cost(20, 1, 10, coll.len() as u32)?;
+    (0..super::coll_shape::walked_len(&coll))
+        .map(|i| mapper_call(super::coll_shape::walked_item(&coll, i)?))
         .collect::<Result<Arc<[Value]>, EvalError>>()
         .map(|values| {
             // `PairOfCols.map` builds a generic collection directly (v6.0.7

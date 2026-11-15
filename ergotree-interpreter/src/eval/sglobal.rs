@@ -26,17 +26,18 @@ pub(crate) static GROUP_GENERATOR_EVAL_FN: EvalFn =
     |_mc, _env, _ctx, _obj, _args| Ok(Value::from(generator()));
 
 pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
-    let right_v = args
+    let left_v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::NotFound("xor: missing right arg".to_string()))?;
-    let left_v = args
+        .ok_or_else(|| EvalError::NotFound("xor: missing left arg".to_string()))?;
+    let right_v = args
         .get(1)
         .cloned()
-        .ok_or_else(|| EvalError::NotFound("xor: missing left arg".to_string()))?;
+        .ok_or_else(|| EvalError::NotFound("xor: missing right arg".to_string()))?;
 
-    // `xor_eval` is `Xor.xorWithCosting` (v6.0.6 `methods.scala:1917-1920`): the node's cost
-    // and its reading of its operands
+    // `xor_eval` is `Xor.xorWithCosting(ls, rs)` on its two arguments in their order (v6.0.6
+    // `methods.scala:1917-1920`): the node's cost and its reading of its operands. The order
+    // shows below an activated script version of 2, where the walk is over the left operand
     super::xor::xor_with_costing(ctx, &left_v, &right_v)
 };
 
