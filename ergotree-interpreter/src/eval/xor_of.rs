@@ -23,13 +23,12 @@ impl Evaluable for XorOf {
             ctx.add_per_item_jit_cost(20, 5, 32, coll.len() as u32)?;
         }
         let input_v_bools = input_v.try_extract_into::<Vec<bool>>()?;
-        // JVM v4.x compatibility: pre-v2 ErgoTree scripts (V0/V1) computed
-        // xorOf as `distinct.length == 2` — true iff the collection
-        // contains BOTH true and false (count and order independent).
-        // V2+ uses the correct left-fold XOR (true iff odd number of trues).
-        // See: data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala
-        // (xorOf method, comment "This is buggy version used in v4.x interpreter").
-        if ctx.tree_version() < ErgoTreeVersion::V2 {
+        // sigmastate's `xorOf` (`sigma/data/CSigmaDslBuilder.scala:116-132`) takes its 4.x reading
+        // while `VersionContext.isJitActivated` is false: below an ACTIVATED version of 2,
+        // whatever the tree's version, it is `distinct.length == 2`, true when the collection
+        // holds both a `true` and a `false`. From the activation on it is the exclusive or of
+        // the items, also for a tree of version 0 or 1
+        if ctx.activated_script_version() < ErgoTreeVersion::V2 {
             let mut has_true = false;
             let mut has_false = false;
             for b in input_v_bools {
@@ -60,10 +59,11 @@ mod tests {
     use proptest::prelude::*;
     use sigma_test_util::force_any_val;
 
-    fn ctx_with_tree_version(v: ErgoTreeVersion) -> Context<'static> {
+    fn ctx_at(activated: i8, tree: ErgoTreeVersion) -> Context<'static> {
         let ctx = force_any_val::<Context>();
         Context {
-            tree_version: Cell::new(v),
+            activated_script_version_byte: activated,
+            tree_version: Cell::new(tree),
             ..ctx
         }
     }
@@ -71,21 +71,22 @@ mod tests {
     proptest! {
 
         #[test]
-        fn eval_v2_tree_left_fold(bools in collection::vec(any::<bool>(), 0..=10)) {
-            // V2+ ErgoTree: proper XOR (true iff odd number of trues).
+        fn eval_from_the_activation_left_fold(bools in collection::vec(any::<bool>(), 0..=10)) {
+            // from the activation on: the exclusive or (true iff an odd number of trues), also
+            // for a tree of version 0
             let expr: Expr = XorOf {input: Expr::Const(bools.clone().into()).into()}.into();
-            let ctx = ctx_with_tree_version(ErgoTreeVersion::V2);
+            let ctx = ctx_at(3, ErgoTreeVersion::V0);
             let res = eval_out::<bool>(&expr, &ctx);
             let expected = bools.into_iter().filter(|x| *x).count() & 1 == 1;
             prop_assert_eq!(res, expected);
         }
 
         #[test]
-        fn eval_v0_tree_distinct_length(bools in collection::vec(any::<bool>(), 0..=10)) {
-            // Pre-v2 ErgoTree: JVM v4.x bug — true iff coll contains
-            // BOTH true and false (count/order independent).
+        fn eval_below_the_activation_distinct_length(bools in collection::vec(any::<bool>(), 0..=10)) {
+            // below the activation: the 4.x reading, true iff the collection holds BOTH true
+            // and false (count and order independent)
             let expr: Expr = XorOf {input: Expr::Const(bools.clone().into()).into()}.into();
-            let ctx = ctx_with_tree_version(ErgoTreeVersion::V0);
+            let ctx = ctx_at(1, ErgoTreeVersion::V0);
             let res = eval_out::<bool>(&expr, &ctx);
             let has_true = bools.iter().any(|x| *x);
             let has_false = bools.iter().any(|x| !*x);
@@ -93,27 +94,169 @@ mod tests {
         }
     }
 
-    /// Concrete v4.x bug case: [true, true, false] is true under
-    /// v4.x bug (both present) but false under v5+ XOR (even count of trues).
+    /// `[true, true, false]` is true under the 4.x reading (both values present) and false as
+    /// an exclusive or (an even number of trues): the activated version decides, not the tree's
     #[test]
-    fn eval_v0_tree_two_trues_one_false_is_true() {
+    fn eval_below_the_activation_two_trues_one_false_is_true() {
         let bools = vec![true, true, false];
         let expr: Expr = XorOf {
             input: Expr::Const(bools.into()).into(),
         }
         .into();
-        let ctx = ctx_with_tree_version(ErgoTreeVersion::V0);
+        let ctx = ctx_at(1, ErgoTreeVersion::V1);
         assert!(eval_out::<bool>(&expr, &ctx));
     }
 
     #[test]
-    fn eval_v2_tree_two_trues_one_false_is_false() {
+    fn eval_from_the_activation_two_trues_one_false_is_false() {
         let bools = vec![true, true, false];
         let expr: Expr = XorOf {
             input: Expr::Const(bools.into()).into(),
         }
         .into();
-        let ctx = ctx_with_tree_version(ErgoTreeVersion::V2);
+        let ctx = ctx_at(2, ErgoTreeVersion::V0);
         assert!(!eval_out::<bool>(&expr, &ctx));
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod activation_rows {
+    use crate::eval::test_util::{eval_body_at, shown};
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+
+    /// A row: its name in the round's row set, the expression's bytes, the tree version, the activated
+    /// version, the value as `shown` prints it or `ERR`, and the cost counter
+    type Row = (&'static str, &'static str, u8, i8, &'static str, u64);
+
+    /// `xorOf` on sigma-state 6.0.7 at every pair of activated and tree version sigmastate can hold: below an
+    /// activated version of 2 it is "the collection holds both values", from 2 on the exclusive or, whatever
+    /// the tree's version (the round's `measure/jvm-act*.txt`, rows `gate|XorOf|*`)
+    #[rustfmt::skip]
+    const ROWS: &[Row] = &[
+        ("gate|XorOf|tft|v0", "ff0d0305", 0, 0, "true", 30),
+        ("gate|XorOf|tft|v1", "ff0d0305", 1, 0, "true", 30),
+        ("gate|XorOf|tt|v0", "ff0d0203", 0, 0, "false", 30),
+        ("gate|XorOf|tt|v1", "ff0d0203", 1, 0, "false", 30),
+        ("gate|XorOf|tf|v0", "ff0d0201", 0, 0, "true", 30),
+        ("gate|XorOf|tf|v1", "ff0d0201", 1, 0, "true", 30),
+        ("gate|XorOf|ttf|v0", "ff0d0303", 0, 0, "true", 30),
+        ("gate|XorOf|ttf|v1", "ff0d0303", 1, 0, "true", 30),
+        ("gate|XorOf|ttt|v0", "ff0d0307", 0, 0, "false", 30),
+        ("gate|XorOf|ttt|v1", "ff0d0307", 1, 0, "false", 30),
+        ("gate|XorOf|ff|v0", "ff0d0200", 0, 0, "false", 30),
+        ("gate|XorOf|ff|v1", "ff0d0200", 1, 0, "false", 30),
+        ("gate|XorOf|t|v0", "ff0d0101", 0, 0, "false", 30),
+        ("gate|XorOf|t|v1", "ff0d0101", 1, 0, "false", 30),
+        ("gate|XorOf|f|v0", "ff0d0100", 0, 0, "false", 30),
+        ("gate|XorOf|f|v1", "ff0d0100", 1, 0, "false", 30),
+        ("gate|XorOf|empty|v0", "ff0d00", 0, 0, "false", 30),
+        ("gate|XorOf|empty|v1", "ff0d00", 1, 0, "false", 30),
+        ("gate|XorOf|tft|v0", "ff0d0305", 0, 1, "true", 30),
+        ("gate|XorOf|tft|v1", "ff0d0305", 1, 1, "true", 30),
+        ("gate|XorOf|tt|v0", "ff0d0203", 0, 1, "false", 30),
+        ("gate|XorOf|tt|v1", "ff0d0203", 1, 1, "false", 30),
+        ("gate|XorOf|tf|v0", "ff0d0201", 0, 1, "true", 30),
+        ("gate|XorOf|tf|v1", "ff0d0201", 1, 1, "true", 30),
+        ("gate|XorOf|ttf|v0", "ff0d0303", 0, 1, "true", 30),
+        ("gate|XorOf|ttf|v1", "ff0d0303", 1, 1, "true", 30),
+        ("gate|XorOf|ttt|v0", "ff0d0307", 0, 1, "false", 30),
+        ("gate|XorOf|ttt|v1", "ff0d0307", 1, 1, "false", 30),
+        ("gate|XorOf|ff|v0", "ff0d0200", 0, 1, "false", 30),
+        ("gate|XorOf|ff|v1", "ff0d0200", 1, 1, "false", 30),
+        ("gate|XorOf|t|v0", "ff0d0101", 0, 1, "false", 30),
+        ("gate|XorOf|t|v1", "ff0d0101", 1, 1, "false", 30),
+        ("gate|XorOf|f|v0", "ff0d0100", 0, 1, "false", 30),
+        ("gate|XorOf|f|v1", "ff0d0100", 1, 1, "false", 30),
+        ("gate|XorOf|empty|v0", "ff0d00", 0, 1, "false", 30),
+        ("gate|XorOf|empty|v1", "ff0d00", 1, 1, "false", 30),
+        ("gate|XorOf|tft|v0", "ff0d0305", 0, 2, "false", 30),
+        ("gate|XorOf|tft|v1", "ff0d0305", 1, 2, "false", 30),
+        ("gate|XorOf|tft|v2", "ff0d0305", 2, 2, "false", 30),
+        ("gate|XorOf|tt|v0", "ff0d0203", 0, 2, "false", 30),
+        ("gate|XorOf|tt|v1", "ff0d0203", 1, 2, "false", 30),
+        ("gate|XorOf|tt|v2", "ff0d0203", 2, 2, "false", 30),
+        ("gate|XorOf|tf|v0", "ff0d0201", 0, 2, "true", 30),
+        ("gate|XorOf|tf|v1", "ff0d0201", 1, 2, "true", 30),
+        ("gate|XorOf|tf|v2", "ff0d0201", 2, 2, "true", 30),
+        ("gate|XorOf|ttf|v0", "ff0d0303", 0, 2, "false", 30),
+        ("gate|XorOf|ttf|v1", "ff0d0303", 1, 2, "false", 30),
+        ("gate|XorOf|ttf|v2", "ff0d0303", 2, 2, "false", 30),
+        ("gate|XorOf|ttt|v0", "ff0d0307", 0, 2, "true", 30),
+        ("gate|XorOf|ttt|v1", "ff0d0307", 1, 2, "true", 30),
+        ("gate|XorOf|ttt|v2", "ff0d0307", 2, 2, "true", 30),
+        ("gate|XorOf|ff|v0", "ff0d0200", 0, 2, "false", 30),
+        ("gate|XorOf|ff|v1", "ff0d0200", 1, 2, "false", 30),
+        ("gate|XorOf|ff|v2", "ff0d0200", 2, 2, "false", 30),
+        ("gate|XorOf|t|v0", "ff0d0101", 0, 2, "true", 30),
+        ("gate|XorOf|t|v1", "ff0d0101", 1, 2, "true", 30),
+        ("gate|XorOf|t|v2", "ff0d0101", 2, 2, "true", 30),
+        ("gate|XorOf|f|v0", "ff0d0100", 0, 2, "false", 30),
+        ("gate|XorOf|f|v1", "ff0d0100", 1, 2, "false", 30),
+        ("gate|XorOf|f|v2", "ff0d0100", 2, 2, "false", 30),
+        ("gate|XorOf|empty|v0", "ff0d00", 0, 2, "false", 30),
+        ("gate|XorOf|empty|v1", "ff0d00", 1, 2, "false", 30),
+        ("gate|XorOf|empty|v2", "ff0d00", 2, 2, "false", 30),
+        ("gate|XorOf|tft|v0", "ff0d0305", 0, 3, "false", 30),
+        ("gate|XorOf|tft|v1", "ff0d0305", 1, 3, "false", 30),
+        ("gate|XorOf|tft|v2", "ff0d0305", 2, 3, "false", 30),
+        ("gate|XorOf|tft|v3", "ff0d0305", 3, 3, "false", 30),
+        ("gate|XorOf|tt|v0", "ff0d0203", 0, 3, "false", 30),
+        ("gate|XorOf|tt|v1", "ff0d0203", 1, 3, "false", 30),
+        ("gate|XorOf|tt|v2", "ff0d0203", 2, 3, "false", 30),
+        ("gate|XorOf|tt|v3", "ff0d0203", 3, 3, "false", 30),
+        ("gate|XorOf|tf|v0", "ff0d0201", 0, 3, "true", 30),
+        ("gate|XorOf|tf|v1", "ff0d0201", 1, 3, "true", 30),
+        ("gate|XorOf|tf|v2", "ff0d0201", 2, 3, "true", 30),
+        ("gate|XorOf|tf|v3", "ff0d0201", 3, 3, "true", 30),
+        ("gate|XorOf|ttf|v0", "ff0d0303", 0, 3, "false", 30),
+        ("gate|XorOf|ttf|v1", "ff0d0303", 1, 3, "false", 30),
+        ("gate|XorOf|ttf|v2", "ff0d0303", 2, 3, "false", 30),
+        ("gate|XorOf|ttf|v3", "ff0d0303", 3, 3, "false", 30),
+        ("gate|XorOf|ttt|v0", "ff0d0307", 0, 3, "true", 30),
+        ("gate|XorOf|ttt|v1", "ff0d0307", 1, 3, "true", 30),
+        ("gate|XorOf|ttt|v2", "ff0d0307", 2, 3, "true", 30),
+        ("gate|XorOf|ttt|v3", "ff0d0307", 3, 3, "true", 30),
+        ("gate|XorOf|ff|v0", "ff0d0200", 0, 3, "false", 30),
+        ("gate|XorOf|ff|v1", "ff0d0200", 1, 3, "false", 30),
+        ("gate|XorOf|ff|v2", "ff0d0200", 2, 3, "false", 30),
+        ("gate|XorOf|ff|v3", "ff0d0200", 3, 3, "false", 30),
+        ("gate|XorOf|t|v0", "ff0d0101", 0, 3, "true", 30),
+        ("gate|XorOf|t|v1", "ff0d0101", 1, 3, "true", 30),
+        ("gate|XorOf|t|v2", "ff0d0101", 2, 3, "true", 30),
+        ("gate|XorOf|t|v3", "ff0d0101", 3, 3, "true", 30),
+        ("gate|XorOf|f|v0", "ff0d0100", 0, 3, "false", 30),
+        ("gate|XorOf|f|v1", "ff0d0100", 1, 3, "false", 30),
+        ("gate|XorOf|f|v2", "ff0d0100", 2, 3, "false", 30),
+        ("gate|XorOf|f|v3", "ff0d0100", 3, 3, "false", 30),
+        ("gate|XorOf|empty|v0", "ff0d00", 0, 3, "false", 30),
+        ("gate|XorOf|empty|v1", "ff0d00", 1, 3, "false", 30),
+        ("gate|XorOf|empty|v2", "ff0d00", 2, 3, "false", 30),
+        ("gate|XorOf|empty|v3", "ff0d00", 3, 3, "false", 30),
+    ];
+
+    #[test]
+    fn each_row_is_sigmastates() {
+        let mut wrong = alloc::vec::Vec::new();
+        for (name, body, version, activated, expected, cost) in ROWS {
+            let (res, stopped_at) = eval_body_at(body, ErgoTreeVersion::from(*version), *activated);
+            let got = match &res {
+                Ok(v) => shown(v),
+                Err(_) => "ERR".into(),
+            };
+            if got != *expected || stopped_at != *cost {
+                wrong.push(alloc::format!(
+                    "{name} at activated {activated}: expected {expected} at {cost}, got {got} at {stopped_at} ({res:?})"
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} of {} rows:\n{}",
+            wrong.len(),
+            ROWS.len(),
+            wrong.join("\n")
+        );
     }
 }
