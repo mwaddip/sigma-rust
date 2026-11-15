@@ -17,7 +17,18 @@ use crate::types::stype::SType;
 /// A collection as sigmastate's evaluator holds it: one form per JVM collection class (v6.0.7
 /// `CollsOverArrays.scala`). The class decides how some operations answer (`getOrElse`,
 /// `startsWith`, `append`), so a value keeps the class its producer built. Equality looks
-/// through the forms, as the JVM's comparer does: it compares the item types, then the items
+/// through the forms, as the JVM's comparer does: it compares the item types, then the items.
+///
+/// Two forms are a generic `CollOverArray` and differ in its ARRAY. [`CollValue::Generic`]'s is
+/// of its item type's class and takes only items of that class ([`CollValue::from_array`]).
+/// [`CollValue::Objects`]'s is of objects and takes anything. An operation that keeps its
+/// receiver's array keeps the form ([`CollValue::rebuild_like`]: `slice`, `filter`,
+/// `updateMany`, also on a side of a collection of pairs); one that allocates an array by the
+/// item type gives a `Generic` (`from_array`: `map`, `flatMap`, `updated`, `patch`). What reads
+/// the ITEMS takes the two alike (`len`, `get_val`, `as_vec`, equality). What casts the ARRAY
+/// tells them apart: `atLeast` refuses an `Objects`, and so does an `append` to a specialised
+/// collection. What casts each item to the item type refuses an `Objects` holding an item of
+/// another class: the data writer (`TryFrom<CollValue> for CollKind<Literal>`)
 #[derive(Debug, Clone)]
 pub enum CollValue<'ctx> {
     /// `CollOverArray$mcB$sp`: a `Coll[Byte]` specialised over `byte[]`
@@ -33,6 +44,17 @@ pub enum CollValue<'ctx> {
         /// The items
         items: Arc<[Value<'ctx>]>,
     },
+    /// A generic `CollOverArray` over an array of OBJECTS, whatever its item type: what
+    /// sigmastate's 4.x array concat makes of a left array of references (`concatArrays_v4`,
+    /// v6.0.7 `core/.../sigma/util/CollectionUtil.scala:11-26`: `new Array[AnyRef]`). Its items
+    /// can be of any class. It begins with an `Append` below an activated script version of 2,
+    /// and the operations that keep their receiver's array hand it on
+    Objects {
+        /// The item type (the JVM's `tItem`), which the items need not be of
+        elem_tpe: SType,
+        /// The items, of any class
+        items: Arc<[Value<'ctx>]>,
+    },
     /// `PairOfCols`: a collection of pairs held as its two sides
     Pairs {
         /// The pairs' first items
@@ -46,6 +68,15 @@ impl<'ctx> CollValue<'ctx> {
     /// A generic collection (`CollOverArray`) of `items`, whose item type is `elem_tpe`
     pub fn generic(elem_tpe: SType, items: impl Into<Arc<[Value<'ctx>]>>) -> Self {
         CollValue::Generic {
+            elem_tpe,
+            items: items.into(),
+        }
+    }
+
+    /// A generic collection over an array of objects ([`CollValue::Objects`]): `items` of any
+    /// class under the item type `elem_tpe`
+    pub fn objects(elem_tpe: SType, items: impl Into<Arc<[Value<'ctx>]>>) -> Self {
+        CollValue::Objects {
             elem_tpe,
             items: items.into(),
         }
@@ -122,7 +153,8 @@ impl<'ctx> CollValue<'ctx> {
     /// `builder.fromArray` inside the receiver (v6.0.7 `CollsOverArrays.scala:31-111`), so a
     /// specialised receiver gives the same specialised form (an item of another kind is an error, as
     /// the store into its primitive array throws), a generic one goes through
-    /// [`CollValue::from_array`], and a `PairOfCols` rebuilds each side the same way
+    /// [`CollValue::from_array`], one over an array of objects takes any item and stays one, and
+    /// a `PairOfCols` rebuilds each side the same way
     pub fn rebuild_like(&self, items: Vec<Value<'ctx>>) -> Result<Self, TryExtractFromError> {
         match self {
             CollValue::Bytes(_) => items
@@ -141,6 +173,7 @@ impl<'ctx> CollValue<'ctx> {
                 .collect::<Result<Arc<[_]>, _>>()
                 .map(CollValue::Ints),
             CollValue::Generic { elem_tpe, .. } => CollValue::from_array(elem_tpe.clone(), items),
+            CollValue::Objects { elem_tpe, .. } => Ok(CollValue::objects(elem_tpe.clone(), items)),
             CollValue::Pairs { ls, rs } => match split_pairs(&self.elem_tpe(), items) {
                 Ok((_, _, l, r)) => Ok(CollValue::pairs(ls.rebuild_like(l)?, rs.rebuild_like(r)?)),
                 Err(_) => Err(TryExtractFromError(format!(
@@ -159,7 +192,7 @@ impl<'ctx> CollValue<'ctx> {
             CollValue::Bytes(items) => items.len(),
             CollValue::Booleans(items) => items.len(),
             CollValue::Ints(items) => items.len(),
-            CollValue::Generic { items, .. } => items.len(),
+            CollValue::Generic { items, .. } | CollValue::Objects { items, .. } => items.len(),
             CollValue::Pairs { ls, rs } => ls.len().min(rs.len()),
         }
     }
@@ -175,7 +208,9 @@ impl<'ctx> CollValue<'ctx> {
             CollValue::Bytes(_) => SType::SByte,
             CollValue::Booleans(_) => SType::SBoolean,
             CollValue::Ints(_) => SType::SInt,
-            CollValue::Generic { elem_tpe, .. } => elem_tpe.clone(),
+            CollValue::Generic { elem_tpe, .. } | CollValue::Objects { elem_tpe, .. } => {
+                elem_tpe.clone()
+            }
             CollValue::Pairs { ls, rs } => {
                 SType::STuple(STuple::pair(ls.elem_tpe(), rs.elem_tpe()).into())
             }
@@ -188,7 +223,9 @@ impl<'ctx> CollValue<'ctx> {
             CollValue::Bytes(items) => items.get(index).map(|&b| Value::Byte(b)),
             CollValue::Booleans(items) => items.get(index).map(|&b| Value::Boolean(b)),
             CollValue::Ints(items) => items.get(index).map(|&i| Value::Int(i)),
-            CollValue::Generic { items, .. } => items.get(index).cloned(),
+            CollValue::Generic { items, .. } | CollValue::Objects { items, .. } => {
+                items.get(index).cloned()
+            }
             CollValue::Pairs { ls, rs } => {
                 Some(Value::pair(ls.get_val(index)?, rs.get_val(index)?))
             }
@@ -201,7 +238,7 @@ impl<'ctx> CollValue<'ctx> {
             CollValue::Bytes(items) => items.iter().map(|&b| Value::Byte(b)).collect(),
             CollValue::Booleans(items) => items.iter().map(|&b| Value::Boolean(b)).collect(),
             CollValue::Ints(items) => items.iter().map(|&i| Value::Int(i)).collect(),
-            CollValue::Generic { items, .. } => items.to_vec(),
+            CollValue::Generic { items, .. } | CollValue::Objects { items, .. } => items.to_vec(),
             CollValue::Pairs { ls, rs } => ls
                 .as_vec()
                 .into_iter()
@@ -385,6 +422,16 @@ impl<'ctx> TryFrom<CollValue<'ctx>> for CollKind<Literal> {
                 })
                 .collect::<Result<Arc<[i8]>, String>>()
                 .map(|bytes| CollKind::NativeColl(NativeColl::CollByte(bytes))),
+            // sigmastate's data writer casts each item to the item type as it writes it
+            // (`CoreDataSerializer.serialize`), so an array of objects holding an item of
+            // another class has no data form
+            CollValue::Objects {
+                ref elem_tpe,
+                ref items,
+            } if items.iter().any(|v| !fits_array(elem_tpe, v)) => Err(format!(
+                "a collection of {elem_tpe:?} over an array of objects holds an item of \
+                     another class"
+            )),
             other => Ok(CollKind::WrappedColl {
                 elem_tpe: other.elem_tpe(),
                 items: other
@@ -578,6 +625,89 @@ mod tests {
 
     fn pair(a: i32, b: i32) -> Value<'static> {
         Value::pair(Value::Int(a), Value::Int(b))
+    }
+
+    #[test]
+    fn an_objects_collection_keeps_any_item() {
+        // an operation that keeps its receiver's array stores into the array of objects
+        // unchecked: an `Int` goes into a collection of `SigmaProp`
+        let objects = CollValue::objects(SType::SSigmaProp, vec![Value::Boolean(true)]);
+        let rebuilt = objects.rebuild_like(ints(&[7, 8])).unwrap();
+        match &rebuilt {
+            CollValue::Objects { elem_tpe, items } => {
+                assert_eq!(*elem_tpe, SType::SSigmaProp);
+                assert_eq!(items[..], ints(&[7, 8])[..]);
+            }
+            other => panic!("{other:?}"),
+        }
+        // an array of the item type's class refuses the same items
+        assert!(CollValue::from_array(SType::SSigmaProp, ints(&[7, 8])).is_err());
+        assert!(generic(SType::SSigmaProp, vec![])
+            .rebuild_like(ints(&[7, 8]))
+            .is_err());
+    }
+
+    #[test]
+    fn an_objects_collection_reads_as_generic() {
+        let items = vec![Value::Int(7), Value::Boolean(true), Value::Long(9)];
+        let objects = CollValue::objects(SType::SSigmaProp, items.clone());
+        let same = generic(SType::SSigmaProp, items.clone());
+        assert_eq!(objects.len(), 3);
+        assert!(!objects.is_empty());
+        assert_eq!(objects.elem_tpe(), SType::SSigmaProp);
+        assert_eq!(objects.get_val(1), Some(Value::Boolean(true)));
+        assert_eq!(objects.get_val(3), None);
+        assert_eq!(objects.as_vec(), items);
+        // equality looks through the form, both ways, and still reads the item type and the items
+        assert_eq!(objects, same);
+        assert_eq!(same, objects);
+        assert_ne!(objects, generic(SType::SBox, items.clone()));
+        assert_ne!(objects, CollValue::objects(SType::SSigmaProp, ints(&[7])));
+        // `to_static` keeps the form
+        let v = Value::Coll(objects.clone());
+        assert!(matches!(
+            v.to_static(),
+            Value::Coll(CollValue::Objects { .. })
+        ));
+        assert_eq!(v.to_static(), Value::Coll(objects));
+    }
+
+    #[test]
+    fn an_objects_collection_with_a_foreign_item_is_no_data() {
+        use core::convert::TryFrom;
+        // only items of the item type's class: data, as the generic collection of the same items
+        let own = CollValue::objects(SType::SLong, vec![Value::Long(1), Value::Long(2)]);
+        assert_eq!(
+            CollKind::<Literal>::try_from(own).unwrap(),
+            CollKind::<Literal>::try_from(generic(
+                SType::SLong,
+                vec![Value::Long(1), Value::Long(2)]
+            ))
+            .unwrap()
+        );
+        // an item of another class: the writer's cast to the item type throws
+        let mixed = CollValue::objects(SType::SLong, vec![Value::Long(1), Value::Int(2)]);
+        assert!(CollKind::<Literal>::try_from(mixed).is_err());
+    }
+
+    #[test]
+    fn to_static_converts_a_shared_array_of_objects_once() {
+        use alloc::sync::Arc;
+        let shared = CollValue::objects(SType::SSigmaProp, ints(&[1, 2]));
+        let outer = Value::Coll(generic(
+            SType::SColl(SType::SSigmaProp.into()),
+            vec![Value::Coll(shared.clone()), Value::Coll(shared)],
+        ));
+        let Value::Coll(converted) = outer.to_static() else {
+            panic!("not a collection");
+        };
+        match (converted.get_val(0), converted.get_val(1)) {
+            (
+                Some(Value::Coll(CollValue::Objects { items: a, .. })),
+                Some(Value::Coll(CollValue::Objects { items: b, .. })),
+            ) => assert!(Arc::ptr_eq(&a, &b)),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

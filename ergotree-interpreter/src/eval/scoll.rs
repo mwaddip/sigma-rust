@@ -352,9 +352,9 @@ pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
         // `Coll.reference_store_ops`)
         Ok(Value::Coll(match &receiver {
             // a `PairOfCols` clones each side's WHOLE array, checks an index against the shorter
-            // side, stores each value's halves and rebuilds each side with `fromArray` at an
-            // abstract type (v6.0.7 `CollsOverArrays.scala:436-448`; SANTA
-            // `Coll.pair_shape_restored` Y8): sides of unequal length stay as long as they were
+            // side, stores each value's halves and rebuilds each side over its clone
+            // (`coll_shape::rebuild_pair_side`; v6.0.7 `CollsOverArrays.scala:436-448`): sides of
+            // unequal length stay as long as they were
             CollValue::Pairs { ls, rs } => {
                 let (mut l_items, mut r_items) = (ls.as_vec(), rs.as_vec());
                 for (pos, update) in indexes_usize.iter().zip(updates_val) {
@@ -375,8 +375,8 @@ pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
                     }
                 }
                 CollValue::pairs(
-                    CollValue::from_array(ls.elem_tpe(), l_items)?,
-                    CollValue::from_array(rs.elem_tpe(), r_items)?,
+                    super::coll_shape::rebuild_pair_side(ls, l_items)?,
+                    super::coll_shape::rebuild_pair_side(rs, r_items)?,
                 )
             }
             // any other collection: its own class (`builder.fromArray` inside the receiver)

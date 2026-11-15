@@ -57,6 +57,7 @@ impl Evaluable for Filter {
         for i in 0..super::coll_shape::walked_len(&receiver) {
             let item = super::coll_shape::walked_item(&receiver, i)?;
             if condition_call(item.clone())?.try_extract_into::<bool>()? {
+                super::coll_shape::check_kept_pair(&receiver, &item)?;
                 filtered_items.push(item);
             }
         }
