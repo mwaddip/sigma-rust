@@ -1246,3 +1246,177 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod unwritable_name_tests {
+    //! A transaction that holds a type variable name whose text is longer than 255 bytes has
+    //! no id: sigmastate's type writer throws (v6.0.6 `TypeSerializer.scala:122-126`), and
+    //! ergo computes the id as it constructs the transaction (ergo v6.0.6
+    //! `ErgoTransaction.scala:68`), inside `ErgoTransactionSerializer.parse` (`:497-503`). The
+    //! ids and the throws are the sigma-state 6.0.7 jars' (the round's `measure/rows/tx.txt`
+    //! and `tx2.txt`, `out/tx-jvm.txt`, `out/tx2-jvm.txt`).
+    use super::Transaction;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::serialization::sigma_byte_reader::from_bytes;
+    use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
+    use ergotree_ir::serialization::SigmaParsingError;
+    use ergotree_ir::serialization::SigmaSerializable;
+
+    /// Where the name is, and the jars' ids for the names `a255`, `ff85` and `mix255`
+    type Form = (&'static str, fn(&[u8]) -> Vec<u8>, [&'static str; 3]);
+
+    fn h(hex: &str) -> Vec<u8> {
+        base16::decode(hex.as_bytes()).unwrap()
+    }
+    /// `sigmaProp(Coll[T]().size == 0)` with the name as `T`
+    fn body(name: &[u8]) -> Vec<u8> {
+        [
+            h("d193b1830067"),
+            vec![name.len() as u8],
+            name.to_vec(),
+            h("0400"),
+        ]
+        .concat()
+    }
+    fn tree_unsized(name: &[u8]) -> Vec<u8> {
+        [h("00"), body(name)].concat()
+    }
+    fn tree_sized(header: u8, name: &[u8]) -> Vec<u8> {
+        let body = body(name);
+        // a body of 128 to 16,383 bytes: a two-byte length
+        let len = [(body.len() & 0x7f) as u8 | 0x80, (body.len() >> 7) as u8];
+        [vec![header], len.to_vec(), body].concat()
+    }
+    /// A box of that tree, as a Box constant's data
+    fn boxed(name: &[u8]) -> Vec<u8> {
+        [
+            h("c0843d"),
+            tree_unsized(name),
+            h("010000"),
+            vec![0x11; 32],
+            h("00"),
+        ]
+        .concat()
+    }
+    /// One input, one output of `tree` with `registers`; `extension` is the input's
+    fn tx(tree: &[u8], registers: &[u8], extension: &[u8]) -> Vec<u8> {
+        [
+            h("01a05d90c50251aea28100ccaa1da38004fb5a04154bfa300a600f3c10d130816a00"),
+            extension.to_vec(),
+            h("0000018094ebdc03"),
+            tree.to_vec(),
+            h("0100"),
+            registers.to_vec(),
+        ]
+        .concat()
+    }
+    /// A v0 tree of a `SigmaProp` constant
+    const TRIVIAL: &str = "0008d3";
+
+    fn in_an_unsized_tree(name: &[u8]) -> Vec<u8> {
+        tx(&tree_unsized(name), &h("00"), &h("00"))
+    }
+    fn in_a_sized_tree_of_version_3(name: &[u8]) -> Vec<u8> {
+        tx(&tree_sized(0x0b, name), &h("00"), &h("00"))
+    }
+    fn in_a_sized_tree_of_version_0(name: &[u8]) -> Vec<u8> {
+        tx(&tree_sized(0x08, name), &h("00"), &h("00"))
+    }
+    fn in_a_box_in_a_register(name: &[u8]) -> Vec<u8> {
+        tx(&h(TRIVIAL), &[h("0163"), boxed(name)].concat(), &h("00"))
+    }
+    fn in_a_box_in_a_collection_in_a_register(name: &[u8]) -> Vec<u8> {
+        tx(
+            &h(TRIVIAL),
+            &[h("010c6301"), boxed(name)].concat(),
+            &h("00"),
+        )
+    }
+    fn in_a_box_in_a_context_extension(name: &[u8]) -> Vec<u8> {
+        tx(&h(TRIVIAL), &h("00"), &[h("010163"), boxed(name)].concat())
+    }
+
+    fn read(bytes: &[u8]) -> Result<Transaction, SigmaParsingError> {
+        from_bytes(bytes).with_tree_version(ErgoTreeVersion::V3, Transaction::sigma_parse)
+    }
+
+    #[test]
+    fn a_transaction_with_a_name_the_writer_refuses_is_not_read() {
+        let forms: [Form; 6] = [
+            (
+                "an unsized tree",
+                in_an_unsized_tree,
+                [
+                    "36fb578df910b7bd32dfaabe8f31f3d91f2fbcb76a3ceaaf91e2b61d6f658fe9",
+                    "3ec2f2e1a9f8037227e644c147f89b4de0939245dc8abd6b19da8be14eb08c94",
+                    "31fce9db68dfe7e1ac96c68eb630f9c6db273ff94c93d464d165d1a3d8aec31f",
+                ],
+            ),
+            (
+                "a sized tree of version 3",
+                in_a_sized_tree_of_version_3,
+                [
+                    "d35a7470b47cb6ecd1a4e089f6bc03540c537c5ac4a64f7ada4a68b0445f24e6",
+                    "cddcc8ffb82f038f012dd02f511861113e5d87b369d0a3ac36b6c30c9fb387e3",
+                    "831e21638493f2a5552c2e6d1f4c43e996686b07790778396a7d8ffabbc6f100",
+                ],
+            ),
+            (
+                "a sized tree of version 0",
+                in_a_sized_tree_of_version_0,
+                [
+                    "305b64a1f0eff45495a80ca450ba07d6bb10545d22c14c874e92dce415fd6965",
+                    "14e575e4c9fa0abc1e63b81e723540c90346da8a1e430d7cbf676d1117ea5c84",
+                    "5e062480b0768d6adb25b9dafd71d9f5b993f135409c3ebf3a22a2cf10abd571",
+                ],
+            ),
+            (
+                "a Box constant in a register",
+                in_a_box_in_a_register,
+                [
+                    "de45d3b74b1dbb9df9b360ec312fba2ff041d32cdb3205fd5f3f5526cb443c67",
+                    "b37ca0dab86ba7a9388968bd1f054922228f1e76112f6f3871676dc996546d4f",
+                    "1c74b2509828031bc2f371e4b4fbebc6d0ab33fa7c3fdc24ea56cdeee4bbb1bc",
+                ],
+            ),
+            (
+                "a Box constant in a collection in a register",
+                in_a_box_in_a_collection_in_a_register,
+                [
+                    "f02fa5e80218bfb288a495c3164124856a6a64a479589186da7feb3fdc44ea96",
+                    "bb08dd923ffbbe487bd94e35d02ba33473e7b8eb742b4ffae27c613f71345df9",
+                    "ffce2a4ae89ca4afbe8ee9f81b9ae7c3769fac9f74b41a3ff31e28d1c2f610ca",
+                ],
+            ),
+            (
+                "a Box constant in a context extension value",
+                in_a_box_in_a_context_extension,
+                [
+                    "fdedcd64ad96547a667a4d2de29dc0afeee229887ce13c671cd1df3e96c6abe5",
+                    "1bd2d08dd7d62299d6b117a3cd1ebfe2c9d9b85f88cfff3f3e27d000aacd8831",
+                    "5cc4bee4a12983ffeb0956ccd5db5c71f7f5a276d9d48668ca9c72dcdbd64fc2",
+                ],
+            ),
+        ];
+        let with_ff = |a: usize| [vec![b'a'; a], vec![0xff]].concat();
+        // a text of 255 bytes: the jars' id
+        let written = [vec![b'a'; 255], vec![0xff; 85], with_ff(252)];
+        // a text of 256, 258 and 765 bytes: `ID-THROWS` on the jars
+        let refused = [with_ff(253), vec![0xff; 86], vec![0xff; 255]];
+        for (form, build, ids) in forms {
+            for (name, id) in written.iter().zip(ids) {
+                let tx = read(&build(name)).unwrap();
+                assert_eq!(base16::encode_lower(tx.id().as_ref()), id, "{form}");
+            }
+            for name in &refused {
+                let res = read(&build(name));
+                // the reader hands the id's failure on as text: the type writer's refusal
+                assert!(
+                    matches!(&res, Err(SigmaParsingError::Misc(text)) if text.contains("out of unsigned byte range")),
+                    "{form}: {res:?}"
+                );
+            }
+        }
+    }
+}

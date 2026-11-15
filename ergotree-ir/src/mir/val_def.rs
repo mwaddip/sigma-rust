@@ -3,6 +3,7 @@ use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
 use crate::serialization::SigmaParsingError;
 use crate::serialization::SigmaSerializable;
+use crate::serialization::SigmaSerializationError;
 use crate::serialization::SigmaSerializeResult;
 use crate::traversable::impl_traversable_expr;
 use crate::types::stype::SType;
@@ -142,7 +143,15 @@ impl SigmaSerializable for ValDef {
             // `ValDefSerializer` "type arguments" section; the count is a
             // single byte and each parameter uses the full type encoding —
             // `w.putType(arg)`).
-            w.put_u8(self.tpe_args.len() as u8)?;
+            // sigmastate writes the count with `toByteExact`, which refuses one above 127
+            // (v6.0.6 `ValDefSerializer.scala:20`)
+            let count = i8::try_from(self.tpe_args.len()).map_err(|_| {
+                SigmaSerializationError::NotSupported(format!(
+                    "a FunDef of {} type arguments: Byte overflow",
+                    self.tpe_args.len()
+                ))
+            })?;
+            w.put_i8(count)?;
             for tpe_arg in &self.tpe_args {
                 SType::STypeVar(tpe_arg.clone()).sigma_serialize(w)?;
             }
@@ -204,5 +213,48 @@ mod tests {
             ValId::sigma_parse(&mut from_bytes(&reject[..])).unwrap(),
             ValId(0x8000_0000)
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod type_argument_count_tests {
+    //! sigmastate writes a `FunDef`'s type argument count with `toByteExact`, which throws
+    //! `Byte overflow` above 127 (v6.0.6 `ValDefSerializer.scala:20`; measured on the
+    //! sigma-state 6.0.7 jars, the round's `measure/out/fundef-jvm.txt`). The reader takes the
+    //! count as a signed byte and refuses a negative one, so only code builds more.
+    use super::*;
+    use crate::serialization::SigmaSerializationError;
+    use alloc::vec;
+
+    fn fun_def(type_arguments: usize) -> Expr {
+        Expr::ValDef(
+            ValDef {
+                id: ValId(1),
+                tpe_args: vec![STypeVar::t(); type_arguments],
+                rhs: Box::new(Expr::Const(1i32.into())),
+            }
+            .into(),
+        )
+    }
+
+    #[test]
+    fn a_fun_def_of_127_type_arguments_is_written() {
+        let bytes = fun_def(127).sigma_serialize_bytes().unwrap();
+        // the opcode, the id, the count, 127 times `67 01 54`, the constant
+        assert_eq!(bytes.len(), 386);
+        assert_eq!(bytes[..4], [0xd7, 0x01, 0x7f, 0x67]);
+        assert_eq!(Expr::sigma_parse_bytes(&bytes).unwrap(), fun_def(127));
+    }
+
+    #[test]
+    fn a_fun_def_of_more_than_127_type_arguments_is_refused() {
+        for n in [128, 255, 256, 300] {
+            let res = fun_def(n).sigma_serialize_bytes();
+            assert!(
+                matches!(res, Err(SigmaSerializationError::NotSupported(_))),
+                "{n}: {res:?}"
+            );
+        }
     }
 }

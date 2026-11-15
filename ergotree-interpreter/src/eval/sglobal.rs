@@ -1449,3 +1449,248 @@ mod charge_order {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod long_collection_rows {
+    //! A collection of more than 65,535 items at the data writer. sigmastate writes a
+    //! collection's length with `putUShort`, which throws `Value N is out of unsigned short
+    //! range` (v6.0.6 `CoreDataSerializer.scala:51-52`). A constant cannot hold that many items;
+    //! a collection built at evaluation can. Each row is a block that doubles a constant of
+    //! 1,024 items five times (ids 1 to 6 hold 1,024 to 32,768 items) and then builds 65,535 or
+    //! 65,536: by `Append` in most rows, by `patch`, `flatMap`, `Global.serialize` and
+    //! `propBytes` in `the_other_producers_reach_the_writer_too`. The outcomes and costs are the
+    //! sigma-state 6.0.7 jars' (the round's `measure/rows/eval2.txt`, rows `serc|*`, `sizec|*`,
+    //! `sercn|*`, `substc|*`; `measure/review/rows/rv-eval3.txt`, rows `prod|*`).
+    use crate::eval::test_util::{eval_body, eval_body_at, innermost};
+    use crate::eval::EvalError;
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::constant::TryExtractInto;
+    use ergotree_ir::mir::value::Value;
+    use ergotree_ir::serialization::SigmaSerializationError;
+
+    /// A collection constant of the given number of items, as hex
+    type CollConst = fn(usize) -> String;
+
+    const V0: ErgoTreeVersion = ErgoTreeVersion::V0;
+    const V3: ErgoTreeVersion = ErgoTreeVersion::V3;
+
+    fn vlq(mut n: usize) -> String {
+        let mut out = String::new();
+        loop {
+            let b = n & 0x7f;
+            n >>= 7;
+            if n == 0 {
+                out.push_str(&format!("{b:02x}"));
+                return out;
+            }
+            out.push_str(&format!("{:02x}", b | 0x80));
+        }
+    }
+    /// A `Coll[Byte]` constant of `n` items
+    fn bytes(n: usize) -> String {
+        format!("0e{}{}", vlq(n), "01".repeat(n))
+    }
+    /// A `Coll[Boolean]` constant of `n` items, all true: packed low bit first, the last byte's
+    /// unused bits zero
+    fn bools(n: usize) -> String {
+        let last = match n % 8 {
+            0 => String::new(),
+            bits => format!("{:02x}", (1u8 << bits) - 1),
+        };
+        format!("0d{}{}{last}", vlq(n), "ff".repeat(n / 8))
+    }
+    /// A `Coll[Int]` constant of `n` items
+    fn ints(n: usize) -> String {
+        format!("10{}{}", vlq(n), "02".repeat(n))
+    }
+    /// `{ val v1 = <1,024 items>; val v2 = v1 ++ v1; ... val v6 = v5 ++ v5; result }`
+    fn block(constant: CollConst, result: &str) -> String {
+        let mut items = format!("d601{}", constant(1024));
+        for i in 2..=6 {
+            items.push_str(&format!("d6{i:02x}b372{:02x}72{:02x}", i - 1, i - 1));
+        }
+        format!("d806{items}{result}")
+    }
+    /// `v6 ++ v6`
+    fn of_65536() -> String {
+        "b372067206".into()
+    }
+    /// `v6 ++ (v5 ++ (v4 ++ (v3 ++ (v2 ++ (v1 ++ <1,023 items>)))))`
+    fn of_65535(constant: CollConst) -> String {
+        let mut e = format!("b37201{}", constant(1023));
+        for i in 2..=6 {
+            e = format!("b372{i:02x}{e}");
+        }
+        e
+    }
+    /// `Global.serialize(arg)`
+    fn serialize(arg: &str) -> String {
+        format!("dc6a03dd01{arg}")
+    }
+    /// `substConstants(tree, Coll(0), Coll(arg))` over a tree whose one constant is a
+    /// `Coll[Byte]`
+    fn subst(arg: &str) -> String {
+        format!("740e0b10010e00d193b17300040010010083010e{arg}")
+    }
+    fn written(body: &str, version: ErgoTreeVersion) -> (Vec<i8>, u64) {
+        let (res, cost) = eval_body(body, version);
+        (res.unwrap().try_extract_into::<Vec<i8>>().unwrap(), cost)
+    }
+    /// The writer's refusal of a collection's length, at tree version 3
+    fn refused(body: &str) -> bool {
+        let (res, _) = eval_body(body, V3);
+        matches!(
+            res.as_ref().map_err(innermost),
+            Err(EvalError::SigmaSerializationError(
+                SigmaSerializationError::NotSupported(text)
+            )) if text.contains("out of unsigned short range")
+        )
+    }
+
+    #[test]
+    fn the_collection_exists() {
+        for constant in [bytes, bools, ints] {
+            let (res, cost) = eval_body(&block(constant, &format!("b1{}", of_65536())), V3);
+            assert_eq!((res.unwrap(), cost), (Value::Int(65536), 2815));
+            let (res, cost) = eval_body(&block(constant, &format!("b1{}", of_65535(constant))), V3);
+            assert_eq!((res.unwrap(), cost), (Value::Int(65535), 4212));
+        }
+    }
+
+    #[test]
+    fn serialize_writes_65535_items() {
+        // the length is `ff ff 03`; the rows are 2,115 bytes (324 for the booleans)
+        let rows: [(CollConst, usize, usize, u64); 3] = [
+            (bytes, 2115, 3 + 65535, 69758),
+            (bools, 324, 3 + 8192, 69758),
+            (ints, 2115, 3 + 65535, 200825),
+        ];
+        for (constant, row_len, len, cost) in rows {
+            let body = block(constant, &serialize(&of_65535(constant)));
+            assert_eq!(body.len() / 2, row_len);
+            let (out, c) = written(&body, V3);
+            assert_eq!((out.len(), &out[..3], c), (len, &[-1i8, -1, 3][..], cost));
+        }
+    }
+
+    // the jars stop at 2,823: sigmastate adds each put's cost before the put, the refused one's
+    // included. Here the writer's costs reach the counter only when the write succeeded, so the
+    // cost of a `Global.serialize` refusal is not asserted in this module
+    #[test]
+    fn serialize_refuses_65536_items() {
+        for (constant, row_len) in [(bytes as CollConst, 1076), (bools, 180), (ints, 1076)] {
+            let body = block(constant, &serialize(&of_65536()));
+            assert_eq!(body.len() / 2, row_len);
+            assert!(refused(&body), "{body}");
+        }
+    }
+
+    // `Global.serialize(Coll(c)).size`: the inner length is written by the same arm
+    #[test]
+    fn an_inner_collections_length_is_refused_too() {
+        let rows: [(CollConst, &str, i32, u64); 3] = [
+            (bytes, "0e", 1 + 3 + 65535, 69795),
+            (bools, "0d", 1 + 3 + 8192, 69795),
+            (ints, "10", 1 + 3 + 65535, 200862),
+        ];
+        for (constant, item_type, len, cost) in rows {
+            let nested = |inner: &str| serialize(&format!("8301{item_type}{inner}"));
+            let body = block(constant, &format!("b1{}", nested(&of_65535(constant))));
+            let (res, c) = eval_body(&body, V3);
+            assert_eq!((res.unwrap(), c), (Value::Int(len), cost), "{item_type}");
+            assert!(refused(&block(
+                constant,
+                &format!("b1{}", nested(&of_65536()))
+            )));
+        }
+    }
+
+    // `Append` is one producer of such a collection. Each row here: the collection's size (it
+    // exists), and its refusal at `Global.serialize`
+    #[test]
+    fn the_other_producers_reach_the_writer_too() {
+        // v6.patch(0, v6, 0): 65,536 bytes
+        let patch = "dc0c13720603040072060400";
+        // v6.flatMap(x => Coll(x, x)): 65,536 bytes
+        let flat_map = "dc0c0f720601d901100283020272107210";
+        // Global.serialize of 65,535 ints: 65,538 bytes
+        let serialized = serialize(&of_65535(ints));
+        // the propBytes of 2,000 proveDlog under `&&`: 68,005 bytes
+        let prop_bytes = format!("d0ea{}{}", vlq(2000), "7201".repeat(2000));
+        let rows: [(String, String, usize, i32, u64); 4] = [
+            (
+                block(bytes, &format!("b1{patch}")),
+                block(bytes, &serialize(patch)),
+                1079,
+                65536,
+                14635,
+            ),
+            (
+                block(bytes, &format!("b1{flat_map}")),
+                block(bytes, &serialize(flat_map)),
+                1084,
+                65536,
+                1230347,
+            ),
+            (
+                block(ints, &format!("b1{serialized}")),
+                block(ints, &serialize(&serialized)),
+                2116,
+                65538,
+                200839,
+            ),
+            (
+                format!("d801d601cd82b1{prop_bytes}"),
+                format!("d801d601cd82{}", serialize(&prop_bytes)),
+                4011,
+                68005,
+                26092,
+            ),
+        ];
+        for (size, write, row_len, len, cost) in rows {
+            assert_eq!((size.len() / 2, write.len() / 2), (row_len, row_len + 4));
+            let (res, c) = eval_body(&size, V3);
+            assert_eq!((res.unwrap(), c), (Value::Int(len), cost), "{row_len}");
+            assert!(refused(&write), "{row_len}");
+        }
+    }
+
+    #[test]
+    fn subst_constants_writes_a_new_value_of_65535_items() {
+        for version in [V0, V3] {
+            let body = block(bytes, &subst(&of_65535(bytes)));
+            assert_eq!(body.len() / 2, 2130);
+            let (out, cost) = written(&body, version);
+            // the header, one constant, its type, `ff ff 03`, the items, the body
+            assert_eq!(
+                (out.len(), &out[..6], cost),
+                (3 + 3 + 65535 + 7, &[16i8, 1, 14, -1, -1, 3][..], 4428)
+            );
+        }
+    }
+
+    // the constant writer adds no cost, so the counter is the jars' at every activated version
+    #[test]
+    fn subst_constants_refuses_a_new_value_of_65536_items() {
+        let body = block(bytes, &subst(&of_65536()));
+        assert_eq!(body.len() / 2, 1091);
+        for (version, activated) in [(V0, 0), (V0, 1), (V0, 2), (V0, 3), (V3, 3)] {
+            let (res, cost) = eval_body_at(&body, version, activated);
+            let e = res.unwrap_err();
+            // `substConstants`' evaluator hands the tree's error on as text
+            assert!(
+                matches!(innermost(&e), EvalError::Misc(text) if text.contains("out of unsigned short range")),
+                "{e:?}"
+            );
+            assert_eq!(
+                cost, 2831,
+                "tree version {version:?}, activated {activated}"
+            );
+        }
+    }
+}

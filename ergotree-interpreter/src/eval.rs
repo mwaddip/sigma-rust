@@ -100,6 +100,9 @@ pub(crate) mod subst_const;
 pub(crate) mod tree_lookup;
 pub(crate) mod tuple;
 pub(crate) mod unevaluated;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod unwritable_name_rows;
 pub(crate) mod upcast;
 pub(crate) mod val_use;
 pub(crate) mod xor;

@@ -7,6 +7,7 @@ use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
 use ergotree_ir::serialization::SigmaParsingError;
 use ergotree_ir::serialization::SigmaSerializable;
+use ergotree_ir::serialization::SigmaSerializationError;
 use ergotree_ir::serialization::SigmaSerializeResult;
 
 use core::convert::TryFrom;
@@ -82,7 +83,15 @@ impl SigmaSerializable for ProofBytes {
         match self {
             ProofBytes::Empty => w.put_u16(0)?,
             ProofBytes::Some(bytes) => {
-                w.put_u16(bytes.len() as u16)?;
+                // sigmastate writes the length with `putUShort`, which refuses one above 65535
+                // (v6.0.6 `ProverResult.scala:34`)
+                let len = u16::try_from(bytes.len()).map_err(|_| {
+                    SigmaSerializationError::NotSupported(format!(
+                        "a proof of {} bytes is out of unsigned short range",
+                        bytes.len()
+                    ))
+                })?;
+                w.put_u16(len)?;
                 w.write_all(bytes)?;
             }
         }
@@ -129,5 +138,33 @@ mod arbitrary {
             ]
             .boxed()
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod proof_length_tests {
+    //! sigmastate writes a proof's length with `putUShort`, which throws `Value N is out of
+    //! unsigned short range` above 65535 (v6.0.6 `ProverResult.scala:34`; measured on the
+    //! sigma-state 6.0.7 jars, the round's `measure/out/mem-jvm.txt`). The reader takes the
+    //! length as an unsigned short, so only code (or JSON) gives a longer proof.
+    use super::*;
+    use ergotree_ir::serialization::SigmaSerializationError;
+
+    #[test]
+    fn a_proof_of_65535_bytes_is_written() {
+        let bytes = ProofBytes::Some(vec![0; 65535])
+            .sigma_serialize_bytes()
+            .unwrap();
+        // the length `ff ff 03`, the proof; the jars' `ProverResult` is one byte more, the count
+        // of an empty context extension
+        assert_eq!(bytes.len(), 3 + 65535);
+        assert_eq!(bytes[..3], [0xff, 0xff, 0x03]);
+    }
+
+    #[test]
+    fn a_proof_of_65536_bytes_is_refused() {
+        let res = ProofBytes::Some(vec![0; 65536]).sigma_serialize_bytes();
+        assert!(matches!(res, Err(SigmaSerializationError::NotSupported(_))));
     }
 }

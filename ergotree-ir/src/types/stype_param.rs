@@ -1,6 +1,7 @@
 use core::fmt::Formatter;
 use core::hash::Hash;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
@@ -12,6 +13,7 @@ use crate::serialization::sigma_byte_reader::SigmaByteRead;
 use crate::serialization::sigma_byte_writer::SigmaByteWrite;
 use crate::serialization::SigmaParsingError;
 use crate::serialization::SigmaSerializable;
+use crate::serialization::SigmaSerializationError;
 use crate::serialization::SigmaSerializeResult;
 
 /// Type variable for generic signatures
@@ -28,14 +30,16 @@ impl core::fmt::Debug for STypeVar {
 }
 
 impl STypeVar {
-    /// Creates a type variable from a UTF8 text string (name length is a `u8`, so 0..=255 bytes)
+    /// Creates a type variable from a UTF8 text string. A name of any length is taken, as
+    /// sigmastate's `STypeVar(name)` takes it; one longer than 255 bytes cannot be written
     pub fn new_from_str(name: &'static str) -> Result<Self, InvalidArgumentError> {
         Ok(Self {
             name_bytes: name.to_string().into_bytes(),
         })
     }
 
-    /// Creates a type variable from bytes of a UTF8 text string (name length 0..=255).
+    /// Creates a type variable from bytes of a UTF8 text string. A name of any length is
+    /// taken; one whose text is longer than 255 bytes cannot be written.
     ///
     /// Mirrors the JVM `TypeSerializer` (`new String(bytes, UTF_8)`): a non-UTF8 name is
     /// decoded as the JVM decodes it -- malformed bytes become U+FFFD by the JDK's rule
@@ -84,7 +88,16 @@ impl STypeVar {
 
 impl SigmaSerializable for STypeVar {
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
-        w.put_u8(self.name_bytes.len() as u8)?;
+        // sigmastate writes the length with `putUByte`, which refuses one above 255 (v6.0.6
+        // `TypeSerializer.scala:122-126`). The text of a name read from bytes can be longer
+        // than the bytes were: a malformed byte becomes three
+        let len = u8::try_from(self.name_bytes.len()).map_err(|_| {
+            SigmaSerializationError::NotSupported(format!(
+                "a type variable name of {} bytes is out of unsigned byte range",
+                self.name_bytes.len()
+            ))
+        })?;
+        w.put_u8(len)?;
         // name length is one byte (PutByteCost) -- Scala `TypeSerializer`'s `putUByte`
         w.add_put_byte_cost();
         w.write_all(self.name_bytes.as_slice())?;
@@ -249,5 +262,131 @@ mod tests {
             tv.sigma_serialize_bytes().unwrap(),
             vec![0x03, 0xe2, 0x82, 0xac]
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod name_length_tests {
+    //! sigmastate writes a name as `putUByte(bytes.length)` and the bytes of its TEXT, and
+    //! `putUByte` throws `N is out of unsigned byte range` above 255 (v6.0.6
+    //! `TypeSerializer.scala:122-126`). A text decoded from 255 bytes can be 765 bytes long.
+    //! Measured on the sigma-state 6.0.7 jars (the round's `measure/rows/rt.txt`): at every type
+    //! position that parses, a text of 255 bytes is written and a longer one throws.
+    use super::*;
+    use crate::ergo_tree::ErgoTreeVersion;
+    use crate::mir::expr::Expr;
+    use crate::serialization::sigma_byte_reader::{from_bytes, SigmaByteRead};
+    use crate::serialization::SigmaSerializationError;
+
+    /// A name of the rows: its bytes on the wire and the length of its text
+    type Name = (&'static str, Vec<u8>, usize);
+    /// A type position: the bytes before the type variable, those after it, the tree versions
+    /// it parses at
+    type Position = (&'static str, &'static str, &'static str, &'static [u8]);
+
+    fn names() -> [Name; 6] {
+        let with_ff = |a: usize| [vec![b'a'; a], vec![0xff]].concat();
+        [
+            ("a255", vec![b'a'; 255], 255),
+            ("ff85", vec![0xff; 85], 255),
+            ("mix255", with_ff(252), 255),
+            ("mix256", with_ff(253), 256),
+            ("ff86", vec![0xff; 86], 258),
+            ("ff255", vec![0xff; 255], 765),
+        ]
+    }
+
+    fn refused(res: &Result<Vec<u8>, SigmaSerializationError>) -> bool {
+        matches!(res, Err(SigmaSerializationError::NotSupported(_)))
+    }
+
+    #[test]
+    fn a_text_of_255_bytes_is_written_and_a_longer_one_refused() {
+        for (name, wire, text_len) in names() {
+            let tv = STypeVar::new_from_bytes(wire).unwrap();
+            let text = tv.as_string();
+            assert_eq!(text.len(), text_len, "{name}");
+            let written = tv.sigma_serialize_bytes();
+            if text_len <= 255 {
+                let bytes = written.unwrap();
+                assert_eq!(bytes[0] as usize, text_len, "{name}");
+                assert_eq!(&bytes[1..], text.as_bytes(), "{name}");
+            } else {
+                assert!(refused(&written), "{name}: {written:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_constructor_takes_a_name_its_writer_refuses() {
+        let tv = STypeVar::new_from_bytes(vec![b'a'; 256]).unwrap();
+        assert_eq!(tv.as_string().len(), 256);
+        assert!(refused(&tv.sigma_serialize_bytes()));
+        // `new_from_str` takes a `&'static str`
+        let long: &'static str = alloc::boxed::Box::leak("a".repeat(256).into_boxed_str());
+        assert!(refused(
+            &STypeVar::new_from_str(long)
+                .unwrap()
+                .sigma_serialize_bytes()
+        ));
+    }
+
+    #[test]
+    fn every_type_position_writes_the_text_or_refuses() {
+        const BOTH: &[u8] = &[0, 3];
+        const V3: &[u8] = &[3];
+        let positions: [Position; 14] = [
+            ("a collection node's item type", "8300", "", BOTH),
+            ("its item type Coll[T]", "83000c", "", BOTH),
+            ("its item type Option[T]", "830024", "", BOTH),
+            ("its item type (T, Int)", "83004c", "", BOTH),
+            ("a function type's type parameter", "83007001040401", "", V3),
+            ("a function type's domain", "83007001", "0400", V3),
+            ("getVar's type", "e301", "", BOTH),
+            ("ExtractRegisterAs' type", "c6a704", "", BOTH),
+            ("a lambda's argument", "d90101", "7201", BOTH),
+            ("a FunDef's type argument", "d801d70101", "04020402", BOTH),
+            ("executeFromVar's type", "d4", "01", BOTH),
+            ("a method call's type argument", "dc6a04dd010e0100", "", V3),
+            (
+                "a method call's type argument Coll[T]",
+                "dc6a04dd010e01000c",
+                "",
+                V3,
+            ),
+            ("a None constant of Option[T]", "24", "00", V3),
+        ];
+        let mut rows = 0;
+        for (position, before, after, versions) in positions {
+            for version in versions {
+                for (name, wire, text_len) in names() {
+                    let text = STypeVar::new_from_bytes(wire.clone()).unwrap().as_string();
+                    let row = |name_len: usize, name_bytes: &[u8]| {
+                        let hex = format!(
+                            "{before}67{name_len:02x}{}{after}",
+                            base16::encode_lower(name_bytes)
+                        );
+                        base16::decode(hex.as_bytes()).unwrap()
+                    };
+                    let expr = from_bytes(&row(wire.len(), &wire))
+                        .with_tree_version(ErgoTreeVersion::from(*version), Expr::sigma_parse)
+                        .unwrap();
+                    let written = expr.sigma_serialize_bytes();
+                    if text_len <= 255 {
+                        // the bytes read, with the name's text in the name's place
+                        assert_eq!(
+                            written.unwrap(),
+                            row(text_len, text.as_bytes()),
+                            "{position}, v{version}, {name}"
+                        );
+                    } else {
+                        assert!(refused(&written), "{position}, v{version}, {name}");
+                    }
+                    rows += 1;
+                }
+            }
+        }
+        assert_eq!(rows, 23 * 6);
     }
 }
