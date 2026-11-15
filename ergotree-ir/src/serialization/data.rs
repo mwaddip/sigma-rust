@@ -36,6 +36,22 @@ use alloc::sync::Arc;
 /// Used to serialize and parse `Literal` and `Value`.
 pub struct DataSerializer {}
 
+/// Writes a collection's length. sigmastate writes it with `putUShort`, which refuses a count
+/// above 65535 (v6.0.6 `CoreDataSerializer.scala:51-52`). A constant read from bytes cannot
+/// hold more; a collection built at evaluation can (by `Append`, `patch`, `flatMap`, or as the
+/// bytes `Global.serialize` and `propBytes` return), and a script hands it to this writer
+/// through `Global.serialize` and through the new values of `substConstants`.
+fn put_coll_len<W: SigmaByteWrite>(w: &mut W, len: usize) -> SigmaSerializeResult {
+    let count = u16::try_from(len).map_err(|_| {
+        SigmaSerializationError::NotSupported(format!(
+            "a collection of {len} items is out of unsigned short range"
+        ))
+    })?;
+    w.put_u16(count)?;
+    w.add_put_numeric_cost();
+    Ok(())
+}
+
 /// A type whose data takes no bytes: `SUnit`, a collection of such elements, or a tuple of
 /// such items (sigmastate 6.0.7 `CoreDataSerializer.isZeroWidth`, `CoreDataSerializer.scala:159-163`)
 fn is_zero_width(tpe: &SType) -> bool {
@@ -104,8 +120,7 @@ impl DataSerializer {
             Literal::CBox(b) => b.sigma_serialize(w)?,
             Literal::Coll(ct) => match ct {
                 CollKind::NativeColl(NativeColl::CollByte(b)) => {
-                    w.put_usize_as_u16_unwrapped(b.len())?;
-                    w.add_put_numeric_cost();
+                    put_coll_len(w, b.len())?;
                     w.write_all(b.clone().as_vec_u8().as_slice())?;
                     w.add_put_chunk_cost(b.len());
                 }
@@ -113,8 +128,7 @@ impl DataSerializer {
                     elem_tpe: SType::SBoolean,
                     items: v,
                 } => {
-                    w.put_usize_as_u16_unwrapped(v.len())?;
-                    w.add_put_numeric_cost();
+                    put_coll_len(w, v.len())?;
                     let maybe_bools: Result<Vec<bool>, TryExtractFromError> = v
                         .clone()
                         .iter()
@@ -135,8 +149,7 @@ impl DataSerializer {
                     elem_tpe: _,
                     items: v,
                 } => {
-                    w.put_usize_as_u16_unwrapped(v.len())?;
-                    w.add_put_numeric_cost();
+                    put_coll_len(w, v.len())?;
                     v.iter()
                         .try_for_each(|e| DataSerializer::sigma_serialize(e, w))?
                 }
@@ -610,5 +623,58 @@ mod small_tuple_constant_tests {
             Constant::sigma_parse_bytes(&[0x0c, 0x60, 0x00, 0x05]),
             Err(SigmaParsingError::ZeroWidthCollection(_))
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod collection_length_tests {
+    //! A collection's length is an unsigned short: sigmastate's `putUShort` throws `Value N is
+    //! out of unsigned short range` above 65535 (v6.0.6 `CoreDataSerializer.scala:51-52`;
+    //! measured on the sigma-state 6.0.7 jars, the round's `measure/rows/eval2.txt`). No reader
+    //! gives such a collection; a script builds one.
+    use crate::mir::constant::Constant;
+    use crate::serialization::SigmaSerializable;
+    use crate::serialization::SigmaSerializationError;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn refused(c: &Constant) -> bool {
+        matches!(
+            c.sigma_serialize_bytes(),
+            Err(SigmaSerializationError::NotSupported(_))
+        )
+    }
+
+    #[test]
+    fn a_collection_of_65535_items_is_written() {
+        // the type, the length `ff ff 03`, the items
+        let rows: [(Constant, usize); 3] = [
+            (vec![1i8; 65535].into(), 65535),
+            (vec![true; 65535].into(), 8192),
+            (vec![1i32; 65535].into(), 65535),
+        ];
+        for (constant, items_len) in rows {
+            let bytes = constant.sigma_serialize_bytes().unwrap();
+            assert_eq!(bytes.len(), 1 + 3 + items_len, "{:?}", constant.tpe);
+            assert_eq!(bytes[1..4], [0xff, 0xff, 0x03], "{:?}", constant.tpe);
+        }
+    }
+
+    #[test]
+    fn a_collection_of_more_than_65535_items_is_refused() {
+        for n in [65536usize, 70000] {
+            // each of the writer's three collection arms
+            assert!(refused(&vec![1i8; n].into()), "bytes {n}");
+            assert!(refused(&vec![true; n].into()), "booleans {n}");
+            assert!(refused(&vec![1i32; n].into()), "ints {n}");
+        }
+        // an inner collection's length is written the same way, in each arm
+        let bytes: Vec<Vec<i8>> = vec![vec![1i8; 65536]];
+        assert!(refused(&bytes.into()), "inner bytes");
+        let bools: Vec<Vec<bool>> = vec![vec![true; 65536]];
+        assert!(refused(&bools.into()), "inner booleans");
+        let ints: Vec<Vec<i32>> = vec![vec![1i32; 65536]];
+        assert!(refused(&ints.into()), "inner ints");
     }
 }
