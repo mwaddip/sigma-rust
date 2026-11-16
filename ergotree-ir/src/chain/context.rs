@@ -88,6 +88,17 @@ impl<'ctx> Context<'ctx> {
     /// `activated_script_version_byte` field, with a negative value read as 0. sigmastate's
     /// gates compare signed bytes (`VersionContext.scala:20-33`), so a negative activated
     /// version is below every one of them.
+    ///
+    /// sigmastate's 4.x behaviours run while `VersionContext.isJitActivated` is false, below an
+    /// activated version of 2: on mainnet in blocks up to 889,855, which a node meets only
+    /// when it validates history again. Of the seven, this library holds two:
+    /// `BoolToSigmaProp` passes a `SigmaProp` through, which that history needs (trees of
+    /// those blocks do it), and `selfBoxIndex` is -1, which that history has not been shown
+    /// to do without. It does not hold the other five, which no block made now can run and
+    /// without which that history validates: `xorOf` as `distinct.length == 2`, the 4.x bytes of
+    /// `substConstants`, its box that is not lifted to a constant, `Append`'s 4.x array
+    /// concat, and `zip` keeping sides of unequal length. Below an activated version of 2
+    /// those five are what they are from 2 on.
     pub fn activated_script_version(&self) -> ErgoTreeVersion {
         ErgoTreeVersion::from(self.activated_script_version_byte.max(0) as u8)
     }

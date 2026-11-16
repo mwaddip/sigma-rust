@@ -44,23 +44,31 @@ impl Evaluable for Filter {
         // sigmastate reads no element type here: the condition checks each element against its
         // argument's type, and the result is `inputV.filter(...)`, with the input's item type
         // (v6.0.7 `transformers.scala:117-128`, `values.scala:1074`)
-        let receiver = match input_v {
-            Value::Coll(coll) => Ok(coll),
+        let (normalized_input_vals, receiver) = match input_v {
+            Value::Coll(coll) => Ok((coll.as_vec(), coll)),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected Map input to be Value::Coll, got: {0:?}",
                 input_v
             ))),
         }?;
-        ctx.add_per_item_jit_cost(20, 1, 10, receiver.len() as u32)?;
+        ctx.add_per_item_jit_cost(20, 1, 10, normalized_input_vals.len() as u32)?;
 
-        let mut filtered_items = Vec::new();
-        for i in 0..super::coll_shape::walked_len(&receiver) {
-            let item = super::coll_shape::walked_item(&receiver, i)?;
-            if condition_call(item.clone())?.try_extract_into::<bool>()? {
-                super::coll_shape::check_kept_pair(&receiver, &item)?;
-                filtered_items.push(item);
-            }
-        }
+        let items_conditions: Vec<bool> = normalized_input_vals
+            .clone()
+            .into_iter()
+            .map(|item| {
+                condition_call(item).and_then(|res| {
+                    res.try_extract_into::<bool>()
+                        .map_err(EvalError::TryExtractFrom)
+                })
+            })
+            .collect::<Result<Vec<bool>, EvalError>>()?;
+        let filtered_items = normalized_input_vals
+            .into_iter()
+            .zip(items_conditions)
+            .filter(|(_, condition)| *condition)
+            .map(|(item, _)| item)
+            .collect::<Vec<_>>();
         // the receiver's class (`builder.fromArray` inside the receiver), but a `PairOfCols`
         // rebuilds its sides with `pairCollFromArrays` at an abstract type (v6.0.7
         // `CollsOverArrays.scala:348-370`; SANTA `Coll.pair_shape_restored` Y11)

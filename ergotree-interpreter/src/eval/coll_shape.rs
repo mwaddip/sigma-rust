@@ -6,7 +6,6 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use ergotree_ir::mir::coll_value::CollValue;
-use ergotree_ir::mir::constant::TryExtractFromError;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
@@ -28,7 +27,7 @@ pub(crate) fn get_or_else<'ctx>(
         CollValue::Booleans(_) => matches!(default, Value::Boolean(_)),
         CollValue::Ints(_) => matches!(default, Value::Int(_)),
         CollValue::Pairs { .. } => matches!(&default, Value::Pair(_)),
-        CollValue::Generic { .. } | CollValue::Objects { .. } => true,
+        CollValue::Generic { .. } => true,
     };
     if !takes_default {
         return Err(EvalError::UnexpectedValue(format!(
@@ -167,29 +166,14 @@ fn matches_at<'ctx>(
 /// items whose class fits it (none to check when empty; [`CollValue::from_array`] refuses the
 /// others), and the result keeps the LEFT's item type. A `PairOfCols` unzips the right side and
 /// appends side by side. SANTA `Coll.append_runtime_item_type`, `Append.reference_array_store`,
-/// `Coll.append_node_array_class`.
+/// `Coll.append_node_array_class`
 ///
-/// `below_activation`, an activated script version below 2, is sigmastate's 4.x concat instead
-/// (`concatArrays_v4`, `core/.../sigma/util/CollectionUtil.scala:11-26`), which allocates by the
-/// LEFT array's class and copies both in with `Array.copy`, item by item between arrays of
-/// different classes. By the left side's CLASS:
-/// - specialised ([`CollValue::Bytes`], `Booleans`, `Ints`): it casts the right side's array to
-///   its own first, as above, so nothing changes;
-/// - generic over an array of a primitive (a `Coll[Short]`, `Coll[Int]` or `Coll[Long]`
-///   constant, any such collection `map` built, a `Coll[Byte]` or `Coll[Boolean]` too): each
-///   item of the right side is unboxed into it, so it takes the items of its own class from
-///   any array, an array of objects included, and all of an empty one;
-/// - generic over an array of references: the result is an array of OBJECTS, which takes the
-///   right side's items whatever they are: [`CollValue::Objects`], under the left's item type.
-///   For an item type of pairs `fromArray` then casts that array to one of pairs
-///   (`fromBoxedPairs`, `CollsOverArrays.scala:205-215`) and throws, whatever the right side;
-/// - already over an array of objects: it stays one.
-///
-/// Sigma-state 6.0.7, the rows of `eval/pre_activation_rows.rs`
+/// sigmastate's 4.x concat below an activated version of 2 (`concatArrays_v4`,
+/// `core/.../sigma/util/CollectionUtil.scala:11-26`) is not held: see
+/// `Context::activated_script_version`
 pub(crate) fn append<'ctx>(
     left: &CollValue<'ctx>,
     right: &CollValue<'ctx>,
-    below_activation: bool,
 ) -> Result<CollValue<'ctx>, EvalError> {
     let refuse = || {
         EvalError::UnexpectedValue(format!(
@@ -201,27 +185,9 @@ pub(crate) fn append<'ctx>(
     match left {
         CollValue::Pairs { ls, rs } => {
             let (rls, rrs) = unzip(right).ok_or_else(refuse)?;
-            Ok(CollValue::pairs(
-                append(ls, &rls, below_activation)?,
-                append(rs, &rrs, below_activation)?,
-            ))
+            Ok(CollValue::pairs(append(ls, &rls)?, append(rs, &rrs)?))
         }
         _ if left.is_empty() => Ok(right.clone()),
-        CollValue::Objects { elem_tpe, items } => {
-            let all: Vec<_> = items.iter().cloned().chain(right.as_vec()).collect();
-            Ok(CollValue::objects(elem_tpe.clone(), all))
-        }
-        CollValue::Generic { elem_tpe, items } if below_activation => {
-            let all: Vec<_> = items.iter().cloned().chain(right.as_vec()).collect();
-            match primitive_array(left) {
-                // each item is unboxed into the array of the primitive, which refuses the ones
-                // of another class
-                Some(_) => Ok(CollValue::from_array(elem_tpe.clone(), all)?),
-                // an `Object[]` is no array of pairs
-                None if matches!(elem_tpe, SType::STuple(t) if t.items.len() == 2) => Err(refuse()),
-                None => Ok(CollValue::objects(elem_tpe.clone(), all)),
-            }
-        }
         CollValue::Bytes(_) | CollValue::Booleans(_) | CollValue::Ints(_) => {
             if !same_primitive_array(left, right) {
                 return Err(refuse());
@@ -284,133 +250,8 @@ pub(crate) fn patch<'ctx>(
                 .chain(unit_builder_items(&coll.elem_tpe(), other.as_vec()))
                 .chain(items.iter().skip(kept_from).cloned())
                 .collect();
-            Ok(rebuild_typed(coll, patched)?)
+            Ok(coll.rebuild_like(patched)?)
         }
-    }
-}
-
-/// How many items `map`, `exists`, `forall` and `filter` walk: a `PairOfCols` walks its LEFT side's
-/// length (`CollsOverArrays.scala:317-364`), any other collection its own. The two differ only
-/// for sides of unequal length, which `zip` keeps below an activated script version of 2
-pub(crate) fn walked_len(coll: &CollValue<'_>) -> usize {
-    match coll {
-        CollValue::Pairs { ls, .. } => ls.len(),
-        _ => coll.len(),
-    }
-}
-
-/// The item such a walk reads at `i`: a `PairOfCols` reads both sides there, so the walk fails
-/// where the right side ends
-pub(crate) fn walked_item<'ctx>(
-    coll: &CollValue<'ctx>,
-    i: usize,
-) -> Result<Value<'ctx>, EvalError> {
-    coll.get_val(i).ok_or_else(|| {
-        EvalError::Misc(format!(
-            "a side of a collection of pairs ends before index {i}"
-        ))
-    })
-}
-
-/// `Coll.slice` as the receiver's JVM class runs it: a `PairOfCols` slices each side
-/// (`CollsOverArrays.scala:377`), so sides of unequal length stay unequal; any other collection
-/// keeps the intersection of the range with its bounds, in its own class (`builder.fromArray`
-/// inside the receiver, `:41`), and gives an empty collection for a range outside them
-pub(crate) fn slice<'ctx>(
-    coll: &CollValue<'ctx>,
-    from: i32,
-    until: i32,
-) -> Result<CollValue<'ctx>, EvalError> {
-    match coll {
-        CollValue::Pairs { ls, rs } => Ok(CollValue::pairs(
-            slice(ls, from, until)?,
-            slice(rs, from, until)?,
-        )),
-        _ => {
-            let items = coll.as_vec();
-            let range = from.max(0) as usize..until.min(items.len() as i32) as usize;
-            Ok(coll.rebuild_like(items.get(range).map(|s| s.to_vec()).unwrap_or_default())?)
-        }
-    }
-}
-
-/// `Coll.updated` as the receiver's JVM class runs it: a `PairOfCols` updates each side with its
-/// half of the pair (`CollsOverArrays.scala:430-434`), each side checking the index against its
-/// own length; any other collection stores the value into a new array of its item type
-/// (`toArray.updated`, `:100-104`; [`rebuild_typed`])
-pub(crate) fn updated<'ctx>(
-    coll: &CollValue<'ctx>,
-    index: i32,
-    elem: Value<'ctx>,
-) -> Result<CollValue<'ctx>, EvalError> {
-    match (coll, elem) {
-        (CollValue::Pairs { ls, rs }, Value::Pair(p)) => {
-            let (l, r) = *p;
-            Ok(CollValue::pairs(
-                updated(ls, index, l)?,
-                updated(rs, index, r)?,
-            ))
-        }
-        (_, elem) => {
-            let mut items = coll.as_vec();
-            // a negative index is out of bounds, as any index past the end
-            match items.get_mut(index as usize) {
-                Some(item) => {
-                    *item = elem;
-                    Ok(rebuild_typed(coll, items)?)
-                }
-                None => Err(EvalError::UnexpectedValue(format!(
-                    "updated: target index out of bounds, got: {:?}",
-                    Value::Int(index)
-                ))),
-            }
-        }
-    }
-}
-
-/// A side of a collection of pairs rebuilt from a clone of its own array, as
-/// `PairOfCols.updateMany` rebuilds it (`builder.fromArray(resL)`, `CollsOverArrays.scala:436-448`):
-/// an array of objects stays one and takes any item; any other is of the side's item type, at
-/// an abstract type ([`CollValue::from_array`]; SANTA `Coll.pair_shape_restored` Y8)
-pub(crate) fn rebuild_pair_side<'ctx>(
-    side: &CollValue<'ctx>,
-    items: Vec<Value<'ctx>>,
-) -> Result<CollValue<'ctx>, TryExtractFromError> {
-    match side {
-        CollValue::Objects { elem_tpe, .. } => Ok(CollValue::objects(elem_tpe.clone(), items)),
-        _ => CollValue::from_array(side.elem_tpe(), items),
-    }
-}
-
-/// `PairOfCols.filter` stores each half of an item it keeps into a buffer of that side's item
-/// type, inside the walk (`CollsOverArrays.scala:350-366`). Only a side over an array of objects
-/// can hold a half its buffer refuses, and the walk fails there, before the next condition
-pub(crate) fn check_kept_pair<'ctx>(
-    coll: &CollValue<'ctx>,
-    item: &Value<'ctx>,
-) -> Result<(), EvalError> {
-    if let (CollValue::Pairs { ls, rs }, Value::Pair(halves)) = (coll, item) {
-        for (side, half) in [(ls, &halves.0), (rs, &halves.1)] {
-            if let CollValue::Objects { elem_tpe, .. } = &**side {
-                CollValue::from_array(elem_tpe.clone(), alloc::vec![half.clone()])?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// The result of an operation that allocates a new array by its receiver's item type and hands
-/// it to `builder.fromArray` (`patch`, `updated`: `CollsOverArrays.scala:94-104`). A collection
-/// over an array of objects gives a typed one ([`CollValue::from_array`]), which refuses an item
-/// of another class; any other receiver's array already is of its item type's class
-/// ([`CollValue::rebuild_like`])
-fn rebuild_typed<'ctx>(
-    coll: &CollValue<'ctx>,
-    items: Vec<Value<'ctx>>,
-) -> Result<CollValue<'ctx>, TryExtractFromError> {
-    match coll {
-        CollValue::Objects { elem_tpe, .. } => CollValue::from_array(elem_tpe.clone(), items),
-        _ => coll.rebuild_like(items),
     }
 }
 
@@ -1585,7 +1426,7 @@ mod append_tests {
         use ergotree_ir::types::sfunc::SFunc;
         let twice = |t: SType, v: Value<'static>| {
             let one = CollValue::generic(t, vec![v]);
-            append(&one, &one, false).map(|c| c.len())
+            append(&one, &one).map(|c| c.len())
         };
         assert_eq!(twice(SType::SContext, Value::Context).unwrap(), 2);
         assert_eq!(twice(SType::SGlobal, Value::Global).unwrap(), 2);
@@ -1605,18 +1446,12 @@ mod append_tests {
         let r = append(
             &bytes(&[1]),
             &CollValue::generic(SType::SByte, vec![Value::Byte(2)]),
-            false,
         )
         .unwrap();
         assert!(matches!(r, CollValue::Bytes(_)), "{r:?}");
         assert_eq!(r, bytes(&[1, 2]));
         // but not another primitive array, even an empty one: the array cast comes first
-        assert!(append(
-            &bytes(&[1]),
-            &CollValue::generic(SType::SLong, vec![]),
-            false
-        )
-        .is_err());
+        assert!(append(&bytes(&[1]), &CollValue::generic(SType::SLong, vec![])).is_err());
     }
 }
 

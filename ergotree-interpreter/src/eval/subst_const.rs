@@ -61,15 +61,8 @@ impl Evaluable for SubstConstants {
                 // sigmastate's lift is a table of classes with no arm for a pair, an option
                 // or `Unit` (`Platform.liftToConstant`, v6.0.6 `Platform.scala:16-63`): such
                 // a new value throws here, whatever its position (`Extensions.scala:60`).
-                // Inside a collection they are lifted with it (the `Coll` arm).
-                // A box VALUE has an arm only from the activation on: below an activated
-                // version of 2 the arm answers "not lifted", as 4.x had none
-                // (`Platform.scala:50-54`, `VersionContext.isJitActivated`)
-                let box_below_the_activation = matches!(v, Value::CBox(_))
-                    && ctx.activated_script_version() < ErgoTreeVersion::V2;
-                if box_below_the_activation
-                    || matches!(v, Value::Pair(_) | Value::Opt(_) | Value::Unit)
-                {
+                // Inside a collection they are lifted with it (the `Coll` arm)
+                if matches!(v, Value::Pair(_) | Value::Opt(_) | Value::Unit) {
                     return Err(EvalError::Misc(format!(
                         "SubstConstants: a new value of this kind is not lifted to a constant: \
                          {v:?}"
@@ -150,9 +143,8 @@ fn to_misc_err<T: core::fmt::Debug>(e: T) -> EvalError {
 enum NewValue {
     /// A constant
     Constant(Constant),
-    /// A constant on the JVM that its writer refuses: it holds a `BigInt` outside 256 bits, an
-    /// `AvlTree` whose digest is not of bytes, or an array of objects with an item of another
-    /// class than its item type. The text is the refusal
+    /// A constant on the JVM that its writer refuses: it holds a `BigInt` outside 256 bits or
+    /// an `AvlTree` whose digest is not of bytes. The text is the refusal
     Unwritable(String),
 }
 
@@ -205,8 +197,7 @@ fn written_values(
 
 /// The value with every part that only sigmastate's WRITER refuses replaced by a stand-in the
 /// lift accepts: a `BigInt` outside the 256-bit range by zero, an `AvlTree` whose digest is not
-/// of bytes by the same tree with an empty digest of bytes, a collection over an array of
-/// objects by the same one without its items of another class. What the conversion to a constant
+/// of bytes by the same tree with an empty digest of bytes. What the conversion to a constant
 /// still refuses then, the writer was not the one to refuse. The stand-in is never written:
 /// such a value is [`NewValue::Unwritable`] either way
 fn with_writable_parts(v: Value<'static>) -> Value<'static> {
@@ -233,17 +224,6 @@ fn coll_with_writable_parts(coll: CollValue<'static>) -> CollValue<'static> {
             elem_tpe,
             items: items.iter().cloned().map(with_writable_parts).collect(),
         },
-        // an array of objects holds its items as a generic collection does; an item of
-        // another class than the item type is what the writer's cast refuses, and is left out
-        CollValue::Objects { elem_tpe, items } => {
-            let items: Vec<_> = items
-                .iter()
-                .filter(|v| CollValue::from_array(elem_tpe.clone(), vec![(*v).clone()]).is_ok())
-                .cloned()
-                .map(with_writable_parts)
-                .collect();
-            CollValue::objects(elem_tpe, items)
-        }
         CollValue::Pairs { ls, rs } => CollValue::Pairs {
             ls: Arc::new(coll_with_writable_parts((*ls).clone())),
             rs: Arc::new(coll_with_writable_parts((*rs).clone())),
@@ -468,46 +448,10 @@ mod tests {
             "{refused}"
         );
         assert_eq!(subst(0x0b, 3).unwrap(), template(0x0b));
-        // below the activation the Box constant's tree version is not compared, and the bytes
-        // are the 4.x branch's: the template without its size (sigma-state 6.0.7 at activated
-        // version 1)
-        let mut without_size = template(0x0c);
-        without_size.remove(1);
-        assert_eq!(subst(0x0c, 1).unwrap(), without_size);
-    }
-
-    #[test]
-    fn an_array_of_objects_with_a_foreign_item_is_only_the_writers_to_refuse() {
-        // `Coll[BigInt]` over an array of objects holding an `Int`: no constant as it is, a
-        // constant once the foreign item is left out, so the lift takes it and the writer
-        // refuses it where it is written
-        let mixed = Value::Coll(CollValue::objects(
-            SType::SBigInt,
-            vec![Value::BigInt(num_bigint::BigInt::from(7)), Value::Int(1)],
-        ));
-        assert!(Constant::try_from(mixed.clone()).is_err());
-        match with_writable_parts(mixed) {
-            Value::Coll(CollValue::Objects { elem_tpe, items }) => {
-                assert_eq!(elem_tpe, SType::SBigInt);
-                assert_eq!(items[..], [Value::BigInt(num_bigint::BigInt::from(7))]);
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_collection_over_an_array_of_objects_gets_its_stand_ins() {
-        // the 4.x `append`'s result holds its items as a generic collection does, so a `BigInt`
-        // outside 256 bits inside one is replaced for the lift's test like any other
-        let wide = Value::BigInt(num_bigint::BigInt::from(1) << 300);
-        let coll = CollValue::objects(SType::SBigInt, vec![wide]);
-        match with_writable_parts(Value::Coll(coll)) {
-            Value::Coll(CollValue::Objects { elem_tpe, items }) => {
-                assert_eq!(elem_tpe, SType::SBigInt);
-                assert_eq!(items[..], [Value::BigInt(num_bigint::BigInt::from(0))]);
-            }
-            other => panic!("{other:?}"),
-        }
+        // below the activation the Box constant's tree version is not compared: the substitution
+        // goes through. Its bytes there are not asserted: sigmastate's are its 4.x branch's, which
+        // the library does not hold
+        assert!(subst(0x0c, 1).is_ok());
     }
 
     #[test]
@@ -759,54 +703,11 @@ mod activation_rows {
     /// version, the value as `shown` prints it or `ERR`, and the cost counter
     type Row = (&'static str, &'static str, u8, i8, &'static str, u64);
 
-    /// `substConstants` on sigma-state 6.0.7 at activated versions 1 and 3 (the round's
-    /// `measure/pre/jvm-pre-act*.txt`, rows `subst|*`, and `jvm-pre5-act*.txt`): below the activation the
-    /// number of constants is written also for a tree without segregation, no size is written, and a box
-    /// is not lifted
+    /// `substConstants` on sigma-state 6.0.7 at activated version 3 (fork PR 97's
+    /// `measure/pre/jvm-pre-act3.txt`, rows `subst|*`, and `jvm-pre5-act3.txt`). sigmastate's 4.x branch
+    /// below the activation is not held, and its rows are not here
     #[rustfmt::skip]
     const ROWS: &[Row] = &[
-        ("subst|valid|v0", "740e0a10010402d19373000402100100100106", 0, 1, "10010406d19373000402", 215),
-        ("subst|valid|v1", "740e0a10010402d19373000402100100100106", 1, 1, "10010406d19373000402", 215),
-        ("subst|no-positions|v0", "740e0a10010402d1937300040210001000", 0, 1, "10010402d19373000402", 215),
-        ("subst|no-positions|v1", "740e0a10010402d1937300040210001000", 1, 1, "10010402d19373000402", 215),
-        ("subst|duplicate-positions|v0", "740e0a10010402d193730004021002000010020608", 0, 1, "10010406d19373000402", 215),
-        ("subst|duplicate-positions|v1", "740e0a10010402d193730004021002000010020608", 1, 1, "10010406d19373000402", 215),
-        ("subst|position-out-of-range|v0", "740e0a10010402d19373000402100110100106", 0, 1, "10010402d19373000402", 215),
-        ("subst|position-out-of-range|v1", "740e0a10010402d19373000402100110100106", 1, 1, "10010402d19373000402", 215),
-        ("subst|position-negative|v0", "740e0a10010402d19373000402100101100106", 0, 1, "10010402d19373000402", 215),
-        ("subst|position-negative|v1", "740e0a10010402d19373000402100101100106", 1, 1, "10010402d19373000402", 215),
-        ("subst|no-segregation|v0", "740e0400d1010110001000", 0, 1, "0000d10101", 115),
-        ("subst|no-segregation|v1", "740e0400d1010110001000", 1, 1, "0000d10101", 115),
-        ("subst|no-segregation|position-0|v0", "740e0400d10101100100100106", 0, 1, "0000d10101", 115),
-        ("subst|no-segregation|position-0|v1", "740e0400d10101100100100106", 1, 1, "0000d10101", 115),
-        ("subst|no-segregation|sized-v1|v0", "740e050903d1010110001000", 0, 1, "0900d10101", 115),
-        ("subst|no-segregation|sized-v1|v1", "740e050903d1010110001000", 1, 1, "0900d10101", 115),
-        ("subst|segregation|no-constants|v0", "740e051000d1010110001000", 0, 1, "1000d10101", 115),
-        ("subst|segregation|no-constants|v1", "740e051000d1010110001000", 1, 1, "1000d10101", 115),
-        ("subst|segregation|sized-v1|v0", "740e081906010402d10101100100100106", 0, 1, "19010406d10101", 215),
-        ("subst|segregation|sized-v1|v1", "740e081906010402d10101100100100106", 1, 1, "19010406d10101", 215),
-        ("subst|two-constants|second|v0", "740e0c100204020404d19373007301100102100106", 0, 1, "100204020406d19373007301", 315),
-        ("subst|two-constants|second|v1", "740e0c100204020404d19373007301100102100106", 1, 1, "100204020406d19373007301", 315),
-        ("subst|type-mismatch|v0", "740e0a10010402d19373000402100100110106", 0, 1, "ERR", 15),
-        ("subst|type-mismatch|v1", "740e0a10010402d19373000402100100110106", 1, 1, "ERR", 15),
-        ("subst|bad-bytes|v0", "740e02010210001000", 0, 1, "ERR", 15),
-        ("subst|bad-bytes|v1", "740e02010210001000", 1, 1, "ERR", 15),
-        ("subst|box|coll-constant|v0", "740e57100163c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000d193c1730005021001000c6301c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000", 0, 1, "ERR", 15),
-        ("subst|box|coll-constant|v1", "740e57100163c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000d193c1730005021001000c6301c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000", 1, 1, "ERR", 15),
-        ("subst|box|concrete-collection|v0", "740e57100163c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000d193c17300050210010083016363c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000", 0, 1, "ERR", 35),
-        ("subst|box|concrete-collection|v1", "740e57100163c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000d193c17300050210010083016363c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000", 1, 1, "ERR", 35),
-        ("subst|box|unwritten-position|v0", "740e0a10010402d1937300040210011083016363c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000", 0, 1, "ERR", 35),
-        ("subst|box|unwritten-position|v1", "740e0a10010402d1937300040210011083016363c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000", 1, 1, "ERR", 35),
-        ("subst|box|no-positions|v0", "740e0a10010402d1937300040210000c6300", 0, 1, "10010402d19373000402", 215),
-        ("subst|box|no-positions|v1", "740e0a10010402d1937300040210000c6300", 1, 1, "10010402d19373000402", 215),
-        ("subst|box|in-coll-of-coll|v0", "740e0a10010402d1937300040210010083010c630c6301c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000", 0, 1, "ERR", 35),
-        ("subst|box|in-coll-of-coll|v1", "740e0a10010402d1937300040210010083010c630c6301c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980000010402000000000000000000000000000000000000000000000000000000000000000000", 1, 1, "ERR", 35),
-        ("subst|tree|coll-constant|v0", "740e0a10010402d193730004021001000c6401000000000000000000000000000000000000000000000000000000000000000000072000", 0, 1, "ERR", 15),
-        ("subst|tree|coll-constant|v1", "740e0a10010402d193730004021001000c6401000000000000000000000000000000000000000000000000000000000000000000072000", 1, 1, "ERR", 15),
-        ("subst|sigmaprop|v0", "740e27100108cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179873001001001401cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", 0, 1, "100108cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817987300", 215),
-        ("subst|sigmaprop|v1", "740e27100108cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179873001001001401cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", 1, 1, "100108cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817987300", 215),
-        ("subst|group-element|v0", "740e2a1001070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798d1937300730010010013010279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", 0, 1, "1001070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798d19373007300", 215),
-        ("subst|group-element|v1", "740e2a1001070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798d1937300730010010013010279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", 1, 1, "1001070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798d19373007300", 215),
         ("subst|valid|v0", "740e0a10010402d19373000402100100100106", 0, 3, "10010406d19373000402", 215),
         ("subst|valid|v1", "740e0a10010402d19373000402100100100106", 1, 3, "10010406d19373000402", 215),
         ("subst|no-positions|v0", "740e0a10010402d1937300040210001000", 0, 3, "10010402d19373000402", 215),
@@ -849,30 +750,6 @@ mod activation_rows {
         ("subst|sigmaprop|v1", "740e27100108cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179873001001001401cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", 1, 3, "100108cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817987300", 215),
         ("subst|group-element|v0", "740e2a1001070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798d1937300730010010013010279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", 0, 3, "1001070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798d19373007300", 215),
         ("subst|group-element|v1", "740e2a1001070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798d1937300730010010013010279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", 1, 3, "1001070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798d19373007300", 215),
-        ("tests|template-0b|v0", "740e331b310263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 0, 1, "1b0263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),
-        ("tests|template-0b|v1", "740e331b310263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 1, 1, "1b0263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),
-        ("tests|template-0b|v2", "740e331b310263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 2, 1, "1b0263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),
-        ("tests|template-0b|v3", "740e331b310263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 3, 1, "1b0263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),
-        ("tests|template-0c|v0", "740e331b310263c0843d0c0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 0, 1, "1b0263c0843d0c0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),
-        ("tests|template-0c|v1", "740e331b310263c0843d0c0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 1, 1, "1b0263c0843d0c0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),
-        ("tests|template-0c|v2", "740e331b310263c0843d0c0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 2, 1, "1b0263c0843d0c0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),
-        ("tests|template-0c|v3", "740e331b310263c0843d0c0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 3, 1, "1b0263c0843d0c0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),
-        ("tests|oob-0-nonseg|v0", "740e030008d3100100100100", 0, 1, "000008d3", 115),
-        ("tests|oob-0-nonseg|v1", "740e030008d3100100100100", 1, 1, "000008d3", 115),
-        ("tests|oob-0-nonseg|v2", "740e030008d3100100100100", 2, 1, "000008d3", 115),
-        ("tests|oob-0-nonseg|v3", "740e030008d3100100100100", 3, 1, "000008d3", 115),
-        ("tests|size-slot-v3|v0", "740e071905010100730010001000", 0, 1, "190101007300", 215),
-        ("tests|size-slot-v3|v1", "740e071905010100730010001000", 1, 1, "190101007300", 215),
-        ("tests|size-slot-v3|v2", "740e071905010100730010001000", 2, 1, "190101007300", 215),
-        ("tests|size-slot-v3|v3", "740e071905010100730010001000", 3, 1, "190101007300", 215),
-        ("tests|header-bits|v0", "740e0738050108d3730010010083010808d2", 0, 1, "380108d27300", 235),
-        ("tests|header-bits|v1", "740e0738050108d3730010010083010808d2", 1, 1, "380108d27300", 235),
-        ("tests|header-bits|v2", "740e0738050108d3730010010083010808d2", 2, 1, "380108d27300", 235),
-        ("tests|header-bits|v3", "740e0738050108d3730010010083010808d2", 3, 1, "380108d27300", 235),
-        ("tests|count-wraps|v0", "740e091807ffffffff0f08d310001000", 0, 1, "180008d3", 115),
-        ("tests|count-wraps|v1", "740e091807ffffffff0f08d310001000", 1, 1, "180008d3", 115),
-        ("tests|count-wraps|v2", "740e091807ffffffff0f08d310001000", 2, 1, "180008d3", 115),
-        ("tests|count-wraps|v3", "740e091807ffffffff0f08d310001000", 3, 1, "180008d3", 115),
         ("tests|template-0b|v0", "740e331b310263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 0, 3, "1b0263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),
         ("tests|template-0b|v1", "740e331b310263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 1, 3, "1b0263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),
         ("tests|template-0b|v2", "740e331b310263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d3730110001000", 2, 3, "1b0263c0843d0b0208d301000000000000000000000000000000000000000000000000000000000000000000000008d37301", 315),

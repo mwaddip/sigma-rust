@@ -1,4 +1,3 @@
-use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::coll_append::Append;
 use ergotree_ir::mir::value::Value;
 
@@ -24,14 +23,7 @@ impl Evaluable for Append {
         // charged before the append, as `Append.eval`'s `addSeqCost` does (v6.0.7
         // `transformers.scala:67-68`)
         ctx.add_per_item_jit_cost(20, 2, 100, (left.len() + right.len()) as u32)?;
-        // the 4.x concat below an activated version of 2 (`VersionContext.isJitActivated`,
-        // v6.0.7 `CollsOverArrays.scala:48-57`)
-        let below_activation = ctx.activated_script_version() < ErgoTreeVersion::V2;
-        Ok(Value::Coll(super::coll_shape::append(
-            left,
-            right,
-            below_activation,
-        )?))
+        Ok(Value::Coll(super::coll_shape::append(left, right)?))
     }
 }
 

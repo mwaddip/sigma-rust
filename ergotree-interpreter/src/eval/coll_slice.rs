@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use ergotree_ir::mir::coll_slice::Slice;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
@@ -17,8 +18,8 @@ impl Evaluable for Slice {
         let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
         let from_v = eval_to(&self.from, OperandClass::Int, env, ctx)?;
         let until_v = eval_to(&self.until, OperandClass::Int, env, ctx)?;
-        let receiver = match input_v {
-            Value::Coll(coll) => Ok(coll),
+        let (input_vec, receiver) = match input_v {
+            Value::Coll(coll) => Ok((coll.as_vec(), coll)),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "Slice: expected input to be Value::Coll, got: {0:?}",
                 input_v
@@ -33,9 +34,14 @@ impl Evaluable for Slice {
         // intersection of the range with collection bounds
         // to preserve the Scala version semantics of slice op
         // see https://github.com/ergoplatform/sigma-rust/issues/724
-        Ok(Value::Coll(super::coll_shape::slice(
-            &receiver, from, until,
-        )?))
+        let range = from.max(0) as usize..until.min(input_vec.len() as i32) as usize;
+        // the receiver's class (`builder.fromArray` inside the receiver, v6.0.7
+        // `CollsOverArrays.scala:41`)
+        match input_vec.get(range) {
+            Some(slice) => Ok(Value::Coll(receiver.rebuild_like(slice.to_vec())?)),
+            // Scala version returns empty collection if the range is out of bounds
+            None => Ok(Value::Coll(receiver.rebuild_like(Vec::new())?)),
+        }
     }
 }
 

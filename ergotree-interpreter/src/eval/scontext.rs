@@ -219,6 +219,21 @@ mod tests {
         assert_eq!(eval_out::<i32>(&expr, &context), -1);
     }
 
+    /// The gate is the activation itself: sigmastate answers -1 while
+    /// `VersionContext.isJitActivated` is false (`CContext.scala:50-58`), so at an activated
+    /// version of 1 too (mainnet blocks 417,792 to 889,855), whatever the tree's version
+    #[test]
+    fn eval_self_box_index_at_activated_1() {
+        let expr: Expr =
+            PropertyCall::new(Expr::Context, scontext::SELF_BOX_INDEX_PROPERTY.clone())
+                .unwrap()
+                .into();
+        for tree_version in [ErgoTreeVersion::V0, ErgoTreeVersion::V1] {
+            let context = make_ctx_inputs_includes_self_box(tree_version, 1);
+            assert_eq!(eval_out::<i32>(&expr, &context), -1);
+        }
+    }
+
     #[test]
     fn eval_self_box_index_v0_tree_v5_context() {
         let expr: Expr =

@@ -639,11 +639,9 @@ impl ErgoTree {
     /// though the header's `has_size` bit stays set, a JVM quirk we mirror
     /// byte-for-byte.
     ///
-    /// Below an activated version of 2 (`VersionContext.isJitActivated` false) sigmastate takes
-    /// its 4.x branch (v6.0.6 `ErgoTreeSerializer.scala:380-404`): the header byte, the number
-    /// of constants also for a tree WITHOUT the segregation flag (which then reads back as
-    /// another tree: the source's own comment says so), the constants, the tree bytes, and no
-    /// size whatever the header and the tree version say.
+    /// sigmastate's 4.x branch below an activated version of 2 (v6.0.6
+    /// `ErgoTreeSerializer.scala:380-404`: the number of constants written whatever the
+    /// header says, never a size) is not held: see `Context::activated_script_version`.
     pub fn substitute_constants(
         script_bytes: Vec<u8>,
         positions: &[usize],
@@ -698,9 +696,7 @@ impl ErgoTree {
             // (same source the parse used above), matching the JVM's single outer
             // `VersionContext` across the whole substitution.
             inner_w.with_tree_version(tree_version, |inner_w| -> SigmaSerializeResult {
-                // the 4.x branch writes the count whatever the header says
-                let below_the_activation = activated_version < ErgoTreeVersion::V2;
-                if header.is_constant_segregation() || below_the_activation {
+                if header.is_constant_segregation() {
                     inner_w.put_usize_as_u32_unwrapped(constants.len())?;
                     constants
                         .iter()
@@ -716,12 +712,8 @@ impl ErgoTree {
         header.sigma_serialize(&mut w)?;
         // V6 soft-fork: re-emit the size slot only when the evaluation's tree
         // version is >= V3 (`isV3OrLaterErgoTreeVersion`); for <= V2 it is
-        // dropped even with the has_size bit set (JVM parity). The 4.x branch, below an
-        // activated version of 2, writes no size at all
-        if activated_version >= ErgoTreeVersion::V2
-            && tree_version >= ErgoTreeVersion::V3
-            && header.has_size()
-        {
+        // dropped even with the has_size bit set (JVM parity).
+        if tree_version >= ErgoTreeVersion::V3 && header.has_size() {
             w.put_usize_as_u32_unwrapped(body_section.len())?;
         }
         w.write_all(&body_section)?;
@@ -1247,50 +1239,6 @@ mod tests {
         let mut expected_v2 = vec![bytes[0]];
         expected_v2.extend_from_slice(&bytes[2..]);
         assert_eq!(out_v2, expected_v2, "v<=2 must drop the size slot");
-    }
-
-    /// Below an activated version of 2 sigmastate's `substituteConstants` is its 4.x branch
-    /// (v6.0.6 `ErgoTreeSerializer.scala:380-404`): the header byte, the number of constants also
-    /// for a tree without the segregation flag, the constants, the tree bytes, and no size
-    /// whatever the header says. The bytes are sigma-state 6.0.7's at activated version 1
-    #[test]
-    fn substitute_constants_below_the_activation() {
-        let int = |n: i32| -> Constant { n.into() };
-        let sigma_prop_false = Constant {
-            tpe: SType::SSigmaProp,
-            v: Literal::SigmaProp(SigmaProp::new(false.into()).into()),
-        };
-        let run = |hex: &str, positions: &[usize], values: &[Constant], tree: ErgoTreeVersion| {
-            let bytes = base16::decode(hex).unwrap();
-            let (out, _) =
-                ErgoTree::substitute_constants(bytes, positions, values, ErgoTreeVersion::V1, tree)
-                    .unwrap();
-            base16::encode_lower(&out)
-        };
-        let (v0, v1, v3) = (
-            ErgoTreeVersion::V0,
-            ErgoTreeVersion::V1,
-            ErgoTreeVersion::V3,
-        );
-        // no segregation flag: the count `00` is written all the same
-        for tree in [v0, v3] {
-            assert_eq!(run("0008d3", &[0], &[int(0)], tree), "000008d3");
-        }
-        assert_eq!(run("0903d10101", &[], &[], v1), "0900d10101");
-        // a size in the template: read, never written
-        for tree in [v0, v3] {
-            assert_eq!(run("19050101007300", &[], &[], tree), "190101007300");
-        }
-        assert_eq!(
-            run("38050108d37300", &[0], &[sigma_prop_false], v3),
-            "380108d27300"
-        );
-        assert_eq!(run("1807ffffffff0f08d3", &[], &[], v3), "180008d3");
-        // a tree with the flag and no size: as from the activation on
-        assert_eq!(
-            run("10010402d19373000402", &[0], &[int(3)], v0),
-            "10010406d19373000402"
-        );
     }
 
     #[test]
@@ -3438,17 +3386,17 @@ mod activated_version_tests {
                 .0,
             tree_of(10)
         );
-        // below the activation nothing compares the Box constant's tree version, and the
-        // bytes are the 4.x branch's: the template without its size (sigma-state 6.0.7 at
-        // activated version 1)
-        let mut without_size = tree_of(9);
-        without_size.remove(1);
-        assert_eq!(
-            ErgoTree::substitute_constants(tree_of(9), &[], &[], DEFAULT_ACTIVATED_VERSION, v3)
-                .unwrap()
-                .0,
-            without_size
-        );
+        // below the activation nothing compares the Box constant's tree version: the substitution
+        // goes through. Its bytes there are not asserted: sigmastate's are its 4.x branch's, which
+        // the library does not hold
+        assert!(ErgoTree::substitute_constants(
+            tree_of(9),
+            &[],
+            &[],
+            DEFAULT_ACTIVATED_VERSION,
+            v3
+        )
+        .is_ok());
     }
 
     #[test]

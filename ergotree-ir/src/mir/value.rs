@@ -243,7 +243,7 @@ fn coll_to_static_shared<'ctx>(
         CollValue::Bytes(items) => CollValue::Bytes(items.clone()),
         CollValue::Booleans(items) => CollValue::Booleans(items.clone()),
         CollValue::Ints(items) => CollValue::Ints(items.clone()),
-        CollValue::Generic { elem_tpe, items } | CollValue::Objects { elem_tpe, items } => {
+        CollValue::Generic { elem_tpe, items } => {
             let key = Arc::as_ptr(items) as *const Value as usize;
             let items = match memo.items.get(&key) {
                 Some(done) => done.clone(),
@@ -254,9 +254,9 @@ fn coll_to_static_shared<'ctx>(
                     done
                 }
             };
-            match coll {
-                CollValue::Objects { .. } => CollValue::objects(elem_tpe.clone(), items),
-                _ => CollValue::generic(elem_tpe.clone(), items),
+            CollValue::Generic {
+                elem_tpe: elem_tpe.clone(),
+                items,
             }
         }
         CollValue::Pairs { ls, rs } => CollValue::pairs(

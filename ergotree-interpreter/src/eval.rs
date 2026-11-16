@@ -24,6 +24,9 @@ use ergotree_ir::chain::context::Context;
 pub mod env;
 
 pub(crate) mod and;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod append_zip_rows;
 pub(crate) mod apply;
 pub(crate) mod atleast;
 pub(crate) mod bin_op;
@@ -77,9 +80,6 @@ pub(crate) mod option_get;
 pub(crate) mod option_get_or_else;
 pub(crate) mod option_is_defined;
 pub(crate) mod or;
-#[cfg(test)]
-#[cfg(feature = "arbitrary")]
-mod pre_activation_rows;
 pub(crate) mod property_call;
 pub(crate) mod runtime_type;
 pub(crate) mod savltree;

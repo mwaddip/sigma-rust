@@ -117,15 +117,12 @@ pub(crate) fn eq_with_cost<'ctx>(
             // full operand length. (h28931 colleq cost divergence.)
             match coll_eq_cost(l_coll) {
                 Some((base, per_chunk, chunk_size)) => {
-                    // COA leaf colls: JVM `equalCOA_*` compares item by item and returns
-                    // the compared count; the collections are equal when no item differs
-                    let first_mismatch = coll_eq_first_mismatch(l_coll, r_coll);
-                    let compared = match first_mismatch {
-                        Some(idx) => idx as u32 + 1,
-                        None => n as u32,
-                    };
+                    // COA leaf colls: JVM `equalCOA_*` bulk-compares and returns
+                    // the compared count. Derive it from the first mismatch; the
+                    // result stays the proven `lv == rv`.
+                    let compared = coll_eq_compared_count(l_coll, r_coll);
                     ctx.add_per_item_jit_cost(base, per_chunk, chunk_size, compared)?;
-                    Ok(first_mismatch.is_none())
+                    Ok(lv == rv)
                 }
                 None => {
                     // Composite element colls: JVM generic `equalColls` recurses
@@ -346,34 +343,28 @@ fn coll_eq_cost(coll: &CollValue<'_>) -> Option<(u32, u32, u32)> {
     }
 }
 
-/// The index of the first item that differs in a COA (leaf) collection pair already known to
-/// have equal length and item type, `None` when the two are equal. JVM coll-eq per-item cost
-/// short-circuits there: the count it charges is `first_mismatch_index + 1`, or the full length
-/// when the operands are equal (`equalCOA_Prim`/`equalColls` return this `i`).
-///
-/// `equalCOA_Prim` compares the boxed items with Scala's `==` (`DataValueComparer.scala:159-176`),
-/// for which two integers are equal when their values are, whatever their widths. Items of
-/// another class than the item type exist only in a collection over an array of objects
-/// ([`CollValue::Objects`]); in an array of the item type's class the two readings are one
-fn coll_eq_first_mismatch(l: &CollValue<'_>, r: &CollValue<'_>) -> Option<usize> {
-    fn boxed_eq(a: &Value<'_>, b: &Value<'_>) -> bool {
-        match (integral(a), integral(b)) {
-            (Some(x), Some(y)) => x == y,
-            _ => a == b,
-        }
-    }
-    match (l, r) {
+/// JVM coll-eq per-item cost short-circuits on the first mismatch: the count it
+/// charges is the number of items examined before the result is decided —
+/// `first_mismatch_index + 1`, or the full length when the operands are equal
+/// (`equalCOA_Prim`/`equalColls` return this `i`). Returns that count for a COA
+/// (leaf) collection pair already known to have equal length. The operands can be
+/// of two forms of one item type (a `Coll[Byte]` constant against a `map` result,
+/// an `indices` result against a `Coll[Int]` constant): those are compared item by
+/// item, like the rest.
+fn coll_eq_compared_count(l: &CollValue<'_>, r: &CollValue<'_>) -> u32 {
+    let first_mismatch = match (l, r) {
         (CollValue::Bytes(la), CollValue::Bytes(ra)) => {
             la.iter().zip(ra.iter()).position(|(a, b)| a != b)
         }
         (CollValue::Generic { items: li, .. }, CollValue::Generic { items: ri, .. }) => {
             li.iter().zip(ri.iter()).position(|(a, b)| a != b)
         }
-        // two forms of the same item type, or an array of objects: compare item by item
-        _ => (0..l.len()).position(|i| match (l.get_val(i), r.get_val(i)) {
-            (Some(a), Some(b)) => !boxed_eq(&a, &b),
-            (a, b) => a != b,
-        }),
+        // two forms of the same item type: compare item by item
+        _ => (0..l.len()).position(|i| l.get_val(i) != r.get_val(i)),
+    };
+    match first_mismatch {
+        Some(idx) => idx as u32 + 1,
+        None => l.len() as u32,
     }
 }
 
