@@ -103,6 +103,9 @@ pub(crate) mod snumeric;
 pub(crate) mod soption;
 pub(crate) mod spreheader;
 pub(crate) mod subst_const;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod subst_lift_rows;
 pub(crate) mod tree_lookup;
 pub(crate) mod tuple;
 pub(crate) mod unevaluated;
