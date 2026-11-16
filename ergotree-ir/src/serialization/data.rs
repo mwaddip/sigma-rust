@@ -3,7 +3,6 @@ use alloc::format;
 use ergo_chain_types::Header;
 use sigma_ser::ScorexSerializable;
 
-use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -18,6 +17,7 @@ use crate::mir::constant::Literal;
 use crate::mir::constant::TryExtractFrom;
 use crate::mir::constant::TryExtractFromError;
 use crate::mir::constant::TryExtractInto;
+use crate::mir::value::debug_start;
 use crate::mir::value::CollKind;
 use crate::mir::value::NativeColl;
 use crate::mir::value::Value;
@@ -136,31 +136,6 @@ fn put_header<W: SigmaByteWrite>(w: &mut W, h: &Header) -> SigmaSerializeResult 
     }
     h.scorex_serialize(w)?;
     Ok(())
-}
-
-/// The start of `x`'s `Debug` text, for an error. A value built at evaluation can hold one
-/// collection many times over, and a type one type, so the whole text of either is work
-/// without a bound: the text stops being produced once it is this long
-fn debug_start(x: &dyn core::fmt::Debug) -> String {
-    use core::fmt::Write;
-    const LEN: usize = 200;
-    struct Start(String);
-    impl Write for Start {
-        fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            for c in s.chars() {
-                if self.0.len() >= LEN {
-                    return Err(core::fmt::Error);
-                }
-                self.0.push(c);
-            }
-            Ok(())
-        }
-    }
-    let mut start = Start(String::new());
-    if write!(start, "{x:?}").is_err() {
-        start.0.push('…');
-    }
-    start.0
 }
 
 /// The error of a value that is not of its static type's class, where sigmastate's cast throws
@@ -1326,12 +1301,10 @@ mod value_writer_tests {
         ] {
             let text = match written(&value, &tpe).0 {
                 Err(SigmaSerializationError::UnexpectedValue(e)) => e.0,
-                _ => String::new(),
+                _ => alloc::string::String::new(),
             };
             assert!(!text.is_empty() && text.len() < 600, "{}", text.len());
         }
         assert!(alloc::format!("{value:?}").len() > 500_000);
-        assert_eq!(debug_start(&"x".repeat(1000)).chars().count(), 201);
-        assert_eq!(debug_start(&1i32), "1");
     }
 }

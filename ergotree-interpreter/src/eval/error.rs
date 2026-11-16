@@ -77,7 +77,7 @@ pub enum EvalError {
     #[error("eval error: {0}")]
     SpannedWithSource(SpannedWithSourceEvalError),
     /// Wrapped error with source span
-    #[error("eval error: {0:?}")]
+    #[error("eval error: {0}")]
     Spanned(SpannedEvalError),
     /// Script version error
     #[error("Method requires at least version {required_version:?}, but activated version is {activated_version:?}")]
@@ -125,6 +125,15 @@ pub struct SpannedEvalError {
     pub source_span: SourceSpan,
     /// environment at the time when error occurred
     pub env: Env<'static>,
+}
+
+/// The error and where it was met. The environment is not part of this text: a node formats
+/// the error of a script it refuses, and the environment holds whatever the script built
+/// (`Debug` prints the start of each of its values)
+impl Display for SpannedEvalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{} at {:?}", self.error, self.source_span)
+    }
 }
 
 /// Wrapped error with source span and source code
@@ -459,5 +468,81 @@ mod tests {
             assert_eq!(swse.source, "script source");
             assert!(matches!(*swse.error, EvalError::InvalidResultType));
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+#[allow(clippy::unwrap_used)]
+mod text_tests {
+    use crate::eval::error::EvalError;
+    use crate::eval::{Env, Evaluable};
+    use alloc::format;
+    use alloc::string::String;
+    use ergotree_ir::chain::context::Context;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
+    use ergotree_ir::mir::expr::Expr;
+    use ergotree_ir::serialization::sigma_byte_reader::from_bytes;
+    use ergotree_ir::serialization::sigma_byte_reader::SigmaByteRead;
+    use ergotree_ir::serialization::SigmaSerializable;
+    use sigma_test_util::force_any_val;
+
+    /// `Global.serialize(v11).size` in a block where v1 is 1,024 bytes, v2 to v6 double it to
+    /// 32,768, v7 is a collection holding v6, and v8 to v11 double that to 16 items: the
+    /// environment's eleven values print as more than three million characters
+    fn nested_write() -> String {
+        let mut items = format!("d6010e8008{}", "01".repeat(1024));
+        for i in 2..=6 {
+            items += &format!("d6{i:02x}b372{:02x}72{:02x}", i - 1, i - 1);
+        }
+        items += "d60783010e7206";
+        for i in 8..=11 {
+            items += &format!("d6{i:02x}b372{:02x}72{:02x}", i - 1, i - 1);
+        }
+        format!("d80b{items}b1dc6a03dd01720b")
+    }
+
+    /// The error of that expression under a cost limit its write crosses
+    fn limit_error() -> EvalError {
+        let bytes = base16::decode(nested_write().as_bytes()).unwrap();
+        let expr = from_bytes(&bytes)
+            .with_tree_version(ErgoTreeVersion::V3, Expr::sigma_parse)
+            .unwrap();
+        let mut ctx = force_any_val::<Context>();
+        ctx.activated_script_version_byte = 3;
+        ctx.tree_version.set(ErgoTreeVersion::V3);
+        ctx.jit_cost.set(0);
+        ctx.jit_cost_limit = Some(100_000);
+        expr.eval(&mut Env::empty(), &ctx).unwrap_err()
+    }
+
+    // The evaluator hands an error on wrapped with the environment of the node that met it, and a
+    // cost-limit error is never unwrapped again (`reduce_to_crypto` does not retry it): whoever
+    // refuses a transaction formats exactly this error. A value built at evaluation can hold
+    // one collection many times over, so neither text may hold the environment's values whole
+    #[test]
+    fn an_errors_text_does_not_hold_the_environments_values() {
+        let e = limit_error();
+        assert!(
+            e.is_cost_error() && matches!(e, EvalError::Spanned(_)),
+            "{}",
+            e.is_cost_error()
+        );
+        let shown = format!("{e}");
+        assert!(
+            shown.contains("CostLimitExceeded(100000)"),
+            "{}",
+            shown.len()
+        );
+        assert!(shown.len() < 300, "{}", shown.len());
+        let debugged = format!("{e:?}");
+        assert!(debugged.contains("v11"), "{}", debugged.len());
+        assert!(debugged.len() < 5_000, "{}", debugged.len());
+        // with a source attached, as the retry of every other error makes it
+        let with_source = e.wrap_spanned_with_src("a source text of some length".into());
+        assert!(format!("{with_source}").len() < 2_000);
+        let debugged = format!("{with_source:?}");
+        assert!(debugged.contains("v11"), "{}", debugged.len());
+        assert!(debugged.len() < 5_000, "{}", debugged.len());
     }
 }
