@@ -1,5 +1,4 @@
 use alloc::vec::Vec;
-use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 
@@ -23,26 +22,10 @@ impl Evaluable for XorOf {
             ctx.add_per_item_jit_cost(20, 5, 32, coll.len() as u32)?;
         }
         let input_v_bools = input_v.try_extract_into::<Vec<bool>>()?;
-        // sigmastate's `xorOf` (`sigma/data/CSigmaDslBuilder.scala:116-132`) takes its 4.x reading
-        // while `VersionContext.isJitActivated` is false: below an ACTIVATED version of 2,
-        // whatever the tree's version, it is `distinct.length == 2`, true when the collection
-        // holds both a `true` and a `false`. From the activation on it is the exclusive or of
-        // the items, also for a tree of version 0 or 1
-        if ctx.activated_script_version() < ErgoTreeVersion::V2 {
-            let mut has_true = false;
-            let mut has_false = false;
-            for b in input_v_bools {
-                if b {
-                    has_true = true;
-                } else {
-                    has_false = true;
-                }
-                if has_true && has_false {
-                    break;
-                }
-            }
-            return Ok((has_true && has_false).into());
-        }
+        // the exclusive or of the items (sigmastate's `xorOf` from the activation on,
+        // `sigma/data/CSigmaDslBuilder.scala:116-132`), whatever the tree's version. Its 4.x
+        // reading, `distinct.length == 2` below an activated version of 2, is not held: no tree
+        // or injected script of the blocks below the activation holds a `XorOf`
         Ok(input_v_bools.into_iter().fold(false, |a, b| a ^ b).into())
     }
 }
@@ -54,6 +37,7 @@ mod tests {
     use crate::eval::test_util::eval_out;
     use core::cell::Cell;
     use ergotree_ir::chain::context::Context;
+    use ergotree_ir::ergo_tree::ErgoTreeVersion;
     use ergotree_ir::mir::expr::Expr;
     use proptest::collection;
     use proptest::prelude::*;
@@ -80,31 +64,6 @@ mod tests {
             let expected = bools.into_iter().filter(|x| *x).count() & 1 == 1;
             prop_assert_eq!(res, expected);
         }
-
-        #[test]
-        fn eval_below_the_activation_distinct_length(bools in collection::vec(any::<bool>(), 0..=10)) {
-            // below the activation: the 4.x reading, true iff the collection holds BOTH true
-            // and false (count and order independent)
-            let expr: Expr = XorOf {input: Expr::Const(bools.clone().into()).into()}.into();
-            let ctx = ctx_at(1, ErgoTreeVersion::V0);
-            let res = eval_out::<bool>(&expr, &ctx);
-            let has_true = bools.iter().any(|x| *x);
-            let has_false = bools.iter().any(|x| !*x);
-            prop_assert_eq!(res, has_true && has_false);
-        }
-    }
-
-    /// `[true, true, false]` is true under the 4.x reading (both values present) and false as
-    /// an exclusive or (an even number of trues): the activated version decides, not the tree's
-    #[test]
-    fn eval_below_the_activation_two_trues_one_false_is_true() {
-        let bools = vec![true, true, false];
-        let expr: Expr = XorOf {
-            input: Expr::Const(bools.into()).into(),
-        }
-        .into();
-        let ctx = ctx_at(1, ErgoTreeVersion::V1);
-        assert!(eval_out::<bool>(&expr, &ctx));
     }
 
     #[test]
@@ -130,11 +89,11 @@ mod activation_rows {
     /// version, the value as `shown` prints it or `ERR`, and the cost counter
     type Row = (&'static str, &'static str, u8, i8, &'static str, u64);
 
-    /// `xorOf` on sigma-state 6.0.7 at every pair of activated and tree version sigmastate can hold: below an
-    /// activated version of 2 it is "the collection holds both values", from 2 on the exclusive or, whatever
-    /// the tree's version (the round's `measure/jvm-act*.txt`, rows `gate|XorOf|*`). The rows `arr|XorOf|*`,
-    /// at activated versions 2 and 3: collections whose array is not `boolean[]` (a tuple of booleans, another
-    /// item type behind an untaken `if`, empty ones), which the reading from the activation on takes item by item
+    /// `xorOf` on sigma-state 6.0.7 at every pair of tree version and activated version from 2 on: the
+    /// exclusive or, whatever the tree's version (fork PR 97's `measure/jvm-act*.txt`, rows `gate|XorOf|*`).
+    /// The rows `arr|XorOf|*`: collections whose array is not `boolean[]` (a tuple of booleans, another item
+    /// type behind an untaken `if`, empty ones), which are taken item by item. Below an activated version of
+    /// 2 sigmastate has its 4.x reading, which is not held here
     #[rustfmt::skip]
     const ROWS: &[Row] = &[
         ("arr|XorOf|lie-empty-CollInt|v0", "ff9501000d03051000", 0, 2, "false", 45),
@@ -221,42 +180,6 @@ mod activation_rows {
         ("arr|XorOf|Coll-1-false|v1", "ff0d0100", 1, 3, "false", 30),
         ("arr|XorOf|Coll-1-false|v2", "ff0d0100", 2, 3, "false", 30),
         ("arr|XorOf|Coll-1-false|v3", "ff0d0100", 3, 3, "false", 30),
-        ("gate|XorOf|tft|v0", "ff0d0305", 0, 0, "true", 30),
-        ("gate|XorOf|tft|v1", "ff0d0305", 1, 0, "true", 30),
-        ("gate|XorOf|tt|v0", "ff0d0203", 0, 0, "false", 30),
-        ("gate|XorOf|tt|v1", "ff0d0203", 1, 0, "false", 30),
-        ("gate|XorOf|tf|v0", "ff0d0201", 0, 0, "true", 30),
-        ("gate|XorOf|tf|v1", "ff0d0201", 1, 0, "true", 30),
-        ("gate|XorOf|ttf|v0", "ff0d0303", 0, 0, "true", 30),
-        ("gate|XorOf|ttf|v1", "ff0d0303", 1, 0, "true", 30),
-        ("gate|XorOf|ttt|v0", "ff0d0307", 0, 0, "false", 30),
-        ("gate|XorOf|ttt|v1", "ff0d0307", 1, 0, "false", 30),
-        ("gate|XorOf|ff|v0", "ff0d0200", 0, 0, "false", 30),
-        ("gate|XorOf|ff|v1", "ff0d0200", 1, 0, "false", 30),
-        ("gate|XorOf|t|v0", "ff0d0101", 0, 0, "false", 30),
-        ("gate|XorOf|t|v1", "ff0d0101", 1, 0, "false", 30),
-        ("gate|XorOf|f|v0", "ff0d0100", 0, 0, "false", 30),
-        ("gate|XorOf|f|v1", "ff0d0100", 1, 0, "false", 30),
-        ("gate|XorOf|empty|v0", "ff0d00", 0, 0, "false", 30),
-        ("gate|XorOf|empty|v1", "ff0d00", 1, 0, "false", 30),
-        ("gate|XorOf|tft|v0", "ff0d0305", 0, 1, "true", 30),
-        ("gate|XorOf|tft|v1", "ff0d0305", 1, 1, "true", 30),
-        ("gate|XorOf|tt|v0", "ff0d0203", 0, 1, "false", 30),
-        ("gate|XorOf|tt|v1", "ff0d0203", 1, 1, "false", 30),
-        ("gate|XorOf|tf|v0", "ff0d0201", 0, 1, "true", 30),
-        ("gate|XorOf|tf|v1", "ff0d0201", 1, 1, "true", 30),
-        ("gate|XorOf|ttf|v0", "ff0d0303", 0, 1, "true", 30),
-        ("gate|XorOf|ttf|v1", "ff0d0303", 1, 1, "true", 30),
-        ("gate|XorOf|ttt|v0", "ff0d0307", 0, 1, "false", 30),
-        ("gate|XorOf|ttt|v1", "ff0d0307", 1, 1, "false", 30),
-        ("gate|XorOf|ff|v0", "ff0d0200", 0, 1, "false", 30),
-        ("gate|XorOf|ff|v1", "ff0d0200", 1, 1, "false", 30),
-        ("gate|XorOf|t|v0", "ff0d0101", 0, 1, "false", 30),
-        ("gate|XorOf|t|v1", "ff0d0101", 1, 1, "false", 30),
-        ("gate|XorOf|f|v0", "ff0d0100", 0, 1, "false", 30),
-        ("gate|XorOf|f|v1", "ff0d0100", 1, 1, "false", 30),
-        ("gate|XorOf|empty|v0", "ff0d00", 0, 1, "false", 30),
-        ("gate|XorOf|empty|v1", "ff0d00", 1, 1, "false", 30),
         ("gate|XorOf|tft|v0", "ff0d0305", 0, 2, "false", 30),
         ("gate|XorOf|tft|v1", "ff0d0305", 1, 2, "false", 30),
         ("gate|XorOf|tft|v2", "ff0d0305", 2, 2, "false", 30),
