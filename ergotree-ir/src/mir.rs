@@ -71,6 +71,8 @@ pub mod extract_script_bytes;
 pub mod func_value;
 pub mod get_var;
 pub mod global_vars;
+#[cfg(test)]
+mod group_op_type_rows;
 /// If-else conditional op
 pub mod if_op;
 /// Logical NOT op

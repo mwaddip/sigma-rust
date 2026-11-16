@@ -68,6 +68,9 @@ pub(crate) mod extract_script_bytes;
 pub(crate) mod func_value;
 pub(crate) mod get_var;
 pub(crate) mod global_vars;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod group_op_type_rows;
 pub(crate) mod if_op;
 pub(crate) mod logical_not;
 pub(crate) mod long_to_byte_array;
