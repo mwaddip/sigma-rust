@@ -167,6 +167,10 @@ fn matches_at<'ctx>(
 /// others), and the result keeps the LEFT's item type. A `PairOfCols` unzips the right side and
 /// appends side by side. SANTA `Coll.append_runtime_item_type`, `Append.reference_array_store`,
 /// `Coll.append_node_array_class`
+///
+/// sigmastate's 4.x concat below an activated version of 2 (`concatArrays_v4`,
+/// `core/.../sigma/util/CollectionUtil.scala:11-26`) is not held: see
+/// `Context::activated_script_version`
 pub(crate) fn append<'ctx>(
     left: &CollValue<'ctx>,
     right: &CollValue<'ctx>,

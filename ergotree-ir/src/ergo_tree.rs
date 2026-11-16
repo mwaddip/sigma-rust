@@ -638,6 +638,10 @@ impl ErgoTree {
     /// `ErgoTreeSerializer.scala`; for `<= V2` the slot is dropped even
     /// though the header's `has_size` bit stays set, a JVM quirk we mirror
     /// byte-for-byte.
+    ///
+    /// sigmastate's 4.x branch below an activated version of 2 (v6.0.6
+    /// `ErgoTreeSerializer.scala:380-404`: the number of constants written whatever the
+    /// header says, never a size) is not held: see `Context::activated_script_version`.
     pub fn substitute_constants(
         script_bytes: Vec<u8>,
         positions: &[usize],

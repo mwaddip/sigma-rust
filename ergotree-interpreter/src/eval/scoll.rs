@@ -195,7 +195,9 @@ pub(crate) static ZIP_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         )));
     };
     // a `PairOfCols` of both sides as they are, the longer sliced to the shorter's length, which
-    // keeps its class (`pairColl`, v6.0.7 `CollsOverArrays.scala:183-196`)
+    // keeps its class (`pairColl`, v6.0.7 `CollsOverArrays.scala:183-196`). Its 4.x branch, the
+    // sides at their own lengths below an activated version of 2 (`:196-202`), is not held: see
+    // `Context::activated_script_version`
     fn shorten(side: CollValue<'_>, n: usize) -> Result<CollValue<'_>, EvalError> {
         if side.len() > n {
             Ok(side.rebuild_like(side.as_vec().into_iter().take(n).collect())?)
