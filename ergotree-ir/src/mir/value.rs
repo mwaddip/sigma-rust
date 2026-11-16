@@ -218,6 +218,44 @@ where
 /// copied or walked once per path: [`Value::to_static`] and a lambda's `Debug` do neither
 pub type Bindings<'ctx> = Arc<HashMap<ValId, Value<'ctx>>>;
 
+/// How many characters [`debug_start`] and [`display_start`] keep of a text
+pub const TEXT_START_LEN: usize = 200;
+
+/// The start of a text: its first [`TEXT_START_LEN`] characters, then `…`. The text stops being
+/// PRODUCED once it is that long, so what it costs does not depend on what is printed
+fn text_start(text: core::fmt::Arguments<'_>) -> alloc::string::String {
+    use core::fmt::Write;
+    struct Start(alloc::string::String);
+    impl Write for Start {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            for c in s.chars() {
+                if self.0.len() >= TEXT_START_LEN {
+                    return Err(core::fmt::Error);
+                }
+                self.0.push(c);
+            }
+            Ok(())
+        }
+    }
+    let mut start = Start(alloc::string::String::new());
+    if start.write_fmt(text).is_err() {
+        start.0.push('…');
+    }
+    start.0
+}
+
+/// The start of `x`'s `Debug` text, for an error or a log line. A value built at evaluation can
+/// hold one collection many times over, and a type one type, so the whole text of either is
+/// work without a bound: an error names the start of a value, never the whole of it
+pub fn debug_start(x: &dyn core::fmt::Debug) -> alloc::string::String {
+    text_start(format_args!("{x:?}"))
+}
+
+/// The start of `x`'s `Display` text (see [`debug_start`])
+pub fn display_start(x: &dyn core::fmt::Display) -> alloc::string::String {
+    text_start(format_args!("{x}"))
+}
+
 /// Converts `bindings` to `'static`, each shared map once (see [`Value::to_static`])
 pub fn bindings_to_static<'ctx>(bindings: &'ctx Bindings<'ctx>) -> Bindings<'static> {
     bindings_to_static_shared(bindings, &mut StaticMemo::default())
@@ -1084,5 +1122,28 @@ mod tests {
                 "{other:?}"
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod text_start_tests {
+    use super::*;
+    use alloc::string::String;
+
+    // the text of a long value is cut where it is produced, and marked; a short one is whole
+    #[test]
+    fn a_text_is_cut_at_its_start() {
+        let long = "x".repeat(1000);
+        assert_eq!(
+            display_start(&long),
+            format!("{}…", "x".repeat(TEXT_START_LEN))
+        );
+        assert_eq!(debug_start(&long).chars().count(), TEXT_START_LEN + 1);
+        assert_eq!(debug_start(&1i32), "1");
+        assert_eq!(display_start(&String::from("abc")), "abc");
+        // a value whose text is megabytes: its start, whatever its size
+        let big = Value::Coll(CollValue::Bytes(alloc::vec![1i8; 1_000_000].into()));
+        assert_eq!(debug_start(&big).chars().count(), TEXT_START_LEN + 1);
+        assert_eq!(display_start(&big).chars().count(), TEXT_START_LEN + 1);
     }
 }

@@ -130,13 +130,13 @@ impl SigmaSerializable for AvlTreeData {
         // a tree that was parsed; treeFlags = PutByteCost via the virtual put; keyLength
         // & valueLength use the no-info `putUInt` (unmetered); the option tag byte is
         // PutByteCost.
+        w.add_put_chunk_cost(self.digest.len())?;
         w.write_all(&self.digest)?;
-        w.add_put_chunk_cost(self.digest.len());
+        w.add_put_byte_cost()?;
         w.put_u8(self.tree_flags.0)?;
-        w.add_put_byte_cost();
         w.put_u32(self.key_length)?;
+        w.add_put_byte_cost()?;
         self.value_length_opt.sigma_serialize(w)?;
-        w.add_put_byte_cost();
         Ok(())
     }
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
@@ -322,13 +322,14 @@ mod tests {
                 value_length_opt: None,
             };
             let mut buf = vec![];
-            let cost = {
-                let mut w = SigmaByteWriter::new(&mut buf, None);
-                w.enable_serialize_cost_tracking();
-                data.sigma_serialize(&mut w).unwrap();
-                w.serialize_cost()
+            let cost = core::cell::Cell::new(0u64);
+            let sink = |c: u64| {
+                cost.set(cost.get() + c);
+                Ok(())
             };
-            assert_eq!((cost, buf.len()), (n as u64 + 5, n + 3), "{n}");
+            let mut w = SigmaByteWriter::with_cost_sink(&mut buf, None, &sink);
+            data.sigma_serialize(&mut w).unwrap();
+            assert_eq!((cost.get(), buf.len()), (n as u64 + 5, n + 3), "{n}");
         }
     }
 }

@@ -286,8 +286,8 @@ impl SigmaSerializable for EvaluatedValue {
                         ))
                     })?;
                 OpCode::TUPLE.sigma_serialize(w)?;
+                w.add_put_byte_cost()?;
                 w.put_u8(size)?;
-                w.add_put_byte_cost();
                 items.iter().try_for_each(|item| item.sigma_serialize(w))
             }
             EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => {

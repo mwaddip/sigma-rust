@@ -163,10 +163,10 @@ impl TypeCode {
 
 impl SigmaSerializable for TypeCode {
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
-        w.put_u8(self.value())?;
         // Each serialized type code is one byte (PutByteCost) -- charged for Constant type
         // prefixes (e.g. box register types) during Global.serialize; gated, no-op otherwise.
-        w.add_put_byte_cost();
+        w.add_put_byte_cost()?;
+        w.put_u8(self.value())?;
         Ok(())
     }
 
@@ -412,12 +412,12 @@ impl SigmaSerializable for SType {
                 // TypeCode::from_primitive_type can't fail since it's only called on primitive types here
                 SBoolean | SByte | SShort | SInt | SLong | SBigInt | SGroupElement | SSigmaProp
                 | SUnsignedBigInt => {
+                    // fast-path combined type code = one byte; meter it like TypeCode::sigma_serialize
+                    w.add_put_byte_cost()?;
                     w.put_u8(
                         TypeCode::COLL as u8
                             + TypeCode::from_primitive_type(elem_type).unwrap() as u8,
                     )?;
-                    // fast-path combined type code = one byte; meter it like TypeCode::sigma_serialize
-                    w.add_put_byte_cost();
                     Ok(())
                 }
                 SColl(inner_elem_type) => match &**inner_elem_type {
@@ -425,11 +425,11 @@ impl SigmaSerializable for SType {
                     // TypeCode::from_primitive_type can't fail since it's only called on primitive types here
                     SBoolean | SByte | SShort | SInt | SLong | SBigInt | SGroupElement
                     | SSigmaProp | SUnsignedBigInt => {
+                        w.add_put_byte_cost()?;
                         w.put_u8(
                             TypeCode::NESTED_COLL as u8
                                 + TypeCode::from_primitive_type(inner_elem_type).unwrap() as u8,
                         )?;
-                        w.add_put_byte_cost();
                         Ok(())
                     }
                     STypeVar(_) | SAny | SUnit | SBox | SAvlTree | SOption(_) | SColl(_)
@@ -468,11 +468,11 @@ impl SigmaSerializable for SType {
                         | SSigmaProp | SUnsignedBigInt,
                         t2,
                     ) if t1 == t2 => {
+                        w.add_put_byte_cost()?;
                         w.put_u8(
                             TypeCode::TUPLE_PAIR_SYMMETRIC as u8
                                 + TypeCode::from_primitive_type(t1).unwrap() as u8,
                         )?;
-                        w.add_put_byte_cost();
                         Ok(())
                     }
                     (
@@ -480,11 +480,11 @@ impl SigmaSerializable for SType {
                         | SSigmaProp | SUnsignedBigInt,
                         t2,
                     ) => {
+                        w.add_put_byte_cost()?;
                         w.put_u8(
                             TypeCode::TUPLE_PAIR1 as u8
                                 + TypeCode::from_primitive_type(t1).unwrap() as u8,
                         )?;
-                        w.add_put_byte_cost();
                         t2.sigma_serialize(w)
                     }
                     (
@@ -492,11 +492,11 @@ impl SigmaSerializable for SType {
                         SBoolean | SByte | SShort | SInt | SLong | SBigInt | SGroupElement
                         | SSigmaProp | SUnsignedBigInt,
                     ) => {
+                        w.add_put_byte_cost()?;
                         w.put_u8(
                             TypeCode::TUPLE_PAIR2 as u8
                                 + TypeCode::from_primitive_type(t2).unwrap() as u8,
                         )?;
-                        w.add_put_byte_cost();
                         t1.sigma_serialize(w)
                     }
                     (
@@ -539,9 +539,9 @@ impl SigmaSerializable for SType {
                 }
                 _ => {
                     TypeCode::TUPLE.sigma_serialize(w)?;
-                    w.put_u8(tuple.items.len() as u8)?;
                     // item count is one byte (PutByteCost) -- Scala `serializeTuple`'s `putUByte`
-                    w.add_put_byte_cost();
+                    w.add_put_byte_cost()?;
+                    w.put_u8(tuple.items.len() as u8)?;
                     tuple.items.iter().try_for_each(|i| i.sigma_serialize(w))
                 }
             },
@@ -552,21 +552,24 @@ impl SigmaSerializable for SType {
             }
             SType::SFunc(sfunc) if w.tree_version() >= ErgoTreeVersion::V3 => {
                 TypeCode::SFUNC.sigma_serialize(w)?;
-                w.put_u8(sfunc.t_dom.len().try_into().map_err(|_| {
+                let t_dom_len: u8 = sfunc.t_dom.len().try_into().map_err(|_| {
                     SigmaSerializationError::NotSupported("t_dom.len() must be <= 255".into())
-                })?)?;
-                // tDom length is one byte (PutByteCost) -- Scala `TypeSerializer`'s `putUByte`
-                w.add_put_byte_cost();
+                })?;
+                // tDom length is one byte (PutByteCost) -- Scala `TypeSerializer`'s `putUByte`,
+                // which looks at the length before its `put` adds the cost
+                w.add_put_byte_cost()?;
+                w.put_u8(t_dom_len)?;
                 sfunc
                     .t_dom
                     .iter()
                     .try_for_each(|arg| arg.sigma_serialize(w))?;
                 sfunc.t_range.sigma_serialize(w)?;
-                w.put_u8(sfunc.tpe_params.len().try_into().map_err(|_| {
+                let tpe_params_len: u8 = sfunc.tpe_params.len().try_into().map_err(|_| {
                     SigmaSerializationError::NotSupported("tpe_params.len() must be <= 255".into())
-                })?)?;
+                })?;
                 // tpeParams length is one byte (PutByteCost) -- Scala `TypeSerializer`'s `putUByte`
-                w.add_put_byte_cost();
+                w.add_put_byte_cost()?;
+                w.put_u8(tpe_params_len)?;
                 sfunc.tpe_params.iter().try_for_each(|tpe_param| {
                     SType::STypeVar(tpe_param.ident.clone()).sigma_serialize(w)
                 })
@@ -687,10 +690,14 @@ mod tests {
         use crate::serialization::sigma_byte_writer::SigmaByteWriter;
         fn type_put_cost(t: &SType) -> u64 {
             let mut buf = Vec::new();
-            let mut w = SigmaByteWriter::new(&mut buf, None);
-            w.enable_serialize_cost_tracking();
+            let cost = core::cell::Cell::new(0u64);
+            let sink = |c: u64| {
+                cost.set(cost.get() + c);
+                Ok(())
+            };
+            let mut w = SigmaByteWriter::with_cost_sink(&mut buf, None, &sink);
             t.sigma_serialize(&mut w).unwrap();
-            w.serialize_cost()
+            cost.get()
         }
         let coll = |t: SType| SType::SColl(t.into());
         let pair = |a: SType, b: SType| SType::STuple(stuple::STuple::pair(a, b).into());
@@ -710,11 +717,15 @@ mod tests {
         use crate::serialization::sigma_byte_writer::SigmaByteWriter;
         fn type_put_cost(t: &SType, version: ErgoTreeVersion) -> u64 {
             let mut buf = Vec::new();
-            let mut w = SigmaByteWriter::new(&mut buf, None);
-            w.enable_serialize_cost_tracking();
+            let cost = core::cell::Cell::new(0u64);
+            let sink = |c: u64| {
+                cost.set(cost.get() + c);
+                Ok(())
+            };
+            let mut w = SigmaByteWriter::with_cost_sink(&mut buf, None, &sink);
             w.with_tree_version(version, |w| t.sigma_serialize(w))
                 .unwrap();
-            w.serialize_cost()
+            cost.get()
         }
         // quadruple rides the symmetric-pair code: PAIR_SYMMETRIC(1) + 4 prim codes -- no count byte
         let quad = SType::STuple(

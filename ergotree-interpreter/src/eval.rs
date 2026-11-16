@@ -87,6 +87,9 @@ pub(crate) mod sbox;
 pub(crate) mod scoll;
 pub(crate) mod scontext;
 pub(crate) mod select_field;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod serialize_rows;
 pub(crate) mod sglobal;
 pub(crate) mod sgroup_elem;
 pub(crate) mod sheader;

@@ -64,13 +64,14 @@ impl core::fmt::Display for Cor {
 
 impl SigmaSerializable for Cor {
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
+        // child count is Scala `putUShort` => PutUnsignedNumericCost(3) under `Global.serialize`,
+        // added before the count is looked at
+        w.add_put_numeric_cost()?;
         // sigmastate's `putUShort` refuses a count above 65535
         let count: u16 = self.items.len().try_into().map_err(|_| {
             SigmaSerializationError::NotSupported("COR with more than 65535 children".into())
         })?;
         w.put_u16(count)?;
-        // child count is Scala `putUShort` => PutUnsignedNumericCost(3) under `Global.serialize`
-        w.add_put_numeric_cost();
         self.items.iter().try_for_each(|i| i.sigma_serialize(w))
     }
 

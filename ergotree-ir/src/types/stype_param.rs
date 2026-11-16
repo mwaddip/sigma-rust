@@ -97,12 +97,13 @@ impl SigmaSerializable for STypeVar {
                 self.name_bytes.len()
             ))
         })?;
+        // name length is one byte (PutByteCost) -- Scala `TypeSerializer`'s `putUByte`, which
+        // looks at the length before its `put` adds the cost
+        w.add_put_byte_cost()?;
         w.put_u8(len)?;
-        // name length is one byte (PutByteCost) -- Scala `TypeSerializer`'s `putUByte`
-        w.add_put_byte_cost();
-        w.write_all(self.name_bytes.as_slice())?;
         // name bytes are written as one block -- Scala `putBytes` => PutChunkCost over the length
-        w.add_put_chunk_cost(self.name_bytes.len());
+        w.add_put_chunk_cost(self.name_bytes.len())?;
+        w.write_all(self.name_bytes.as_slice())?;
         Ok(())
     }
 

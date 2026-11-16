@@ -175,8 +175,8 @@ impl TryFrom<Vec<Constant>> for NonMandatoryRegisters {
 impl SigmaSerializable for NonMandatoryRegisters {
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
         let regs_num = self.len();
+        w.add_put_byte_cost()?;
         w.put_u8(regs_num as u8)?;
-        w.add_put_byte_cost();
         for (idx, reg_value) in self.0.iter().enumerate() {
             match reg_value {
                 RegisterValue::Parsed(c) => c.sigma_serialize(w)?,

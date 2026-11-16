@@ -12,11 +12,15 @@ use crate::bigint256::BigInt256;
 use crate::chain::ergo_box::ErgoBox;
 use crate::ergo_tree::ErgoTreeVersion;
 use crate::mir::avl_tree_data::AvlTreeData;
+use crate::mir::coll_value::CollValue;
 use crate::mir::constant::Literal;
+use crate::mir::constant::TryExtractFrom;
 use crate::mir::constant::TryExtractFromError;
 use crate::mir::constant::TryExtractInto;
+use crate::mir::value::debug_start;
 use crate::mir::value::CollKind;
 use crate::mir::value::NativeColl;
+use crate::mir::value::Value;
 use crate::serialization::SigmaSerializationError;
 use crate::serialization::SigmaSerializeResult;
 use crate::serialization::{
@@ -41,14 +45,17 @@ pub struct DataSerializer {}
 /// hold more; a collection built at evaluation can (by `Append`, `patch`, `flatMap`, or as the
 /// bytes `Global.serialize` and `propBytes` return), and a script hands it to this writer
 /// through `Global.serialize` and through the new values of `substConstants`.
+///
+/// `putUShort` adds its cost before it looks at the count (`SigmaByteWriter.scala:83-86`), so a
+/// refused count has been charged.
 fn put_coll_len<W: SigmaByteWrite>(w: &mut W, len: usize) -> SigmaSerializeResult {
+    w.add_put_numeric_cost()?;
     let count = u16::try_from(len).map_err(|_| {
         SigmaSerializationError::NotSupported(format!(
             "a collection of {len} items is out of unsigned short range"
         ))
     })?;
     w.put_u16(count)?;
-    w.add_put_numeric_cost();
     Ok(())
 }
 
@@ -63,6 +70,95 @@ fn is_zero_width(tpe: &SType) -> bool {
     }
 }
 
+/// A `String`'s data: the length of its UTF-8 bytes, then the bytes (v6.0.6
+/// `CoreDataSerializer.scala:29-32`). The length is free: sigmastate writes it with
+/// `putUInt(length)`, which the cost-counting writer hands to the inner writer without a cost
+/// (`SigmaByteWriter.scala:105-107`)
+fn put_string<W: SigmaByteWrite>(w: &mut W, s: &str) -> SigmaSerializeResult {
+    w.put_usize_as_u32_unwrapped(s.len())?;
+    w.add_put_chunk_cost(s.len())?;
+    w.write_all(s.as_bytes())?;
+    Ok(())
+}
+
+/// A group element's data. `EcPoint::scorex_serialize` writes exactly `GROUP_SIZE` (33) bytes as
+/// one block; Scala meters it as `putBytes(33)` = `PutChunkCost`. (`EcPoint` is in
+/// ergo-chain-types and can't reach the cost sink, so the cost is added here.)
+fn put_group_element<W: SigmaByteWrite>(w: &mut W, ecp: &EcPoint) -> SigmaSerializeResult {
+    w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?;
+    ecp.sigma_serialize(w)
+}
+
+/// A header's data (tree version 3)
+fn put_header<W: SigmaByteWrite>(w: &mut W, h: &Header) -> SigmaSerializeResult {
+    // Header is in ergo-chain-types and can't reach the cost sink, so mirror the
+    // JVM's metered put sequence here (as for EcPoint/AvlTree), each cost before
+    // the one statement that writes all the fields. Order matches
+    // `ErgoHeader.sigmaSerializer` = `HeaderWithoutPowSerializer.serialize` +
+    // `AutolykosSolution.sigmaSerializerV{1,2}` (sigma
+    // `org/ergoplatform/{ErgoHeader,HeaderWithoutPow}.scala`); keep in sync with
+    // `Header::serialize_without_pow` / `AutolykosSolution::serialize_bytes`. All
+    // puts are no-info, so `putUInt(height)` is unmetered (0). Blessed v6
+    // `Global.serialize[Header]` = 333 (= 89 + put_cost 244, v2/empty-unparsed).
+    w.add_put_byte_cost()?; // put(version)
+    w.add_put_chunk_cost(32)?; // putBytes(parentId: Digest32)
+    w.add_put_chunk_cost(32)?; // putBytes(ADProofsRoot: Digest32)
+    w.add_put_chunk_cost(32)?; // putBytes(transactionsRoot: Digest32)
+    w.add_put_chunk_cost(33)?; // putBytes(stateRoot: ADDigest)
+    w.add_put_numeric_cost()?; // putULong(timestamp)
+    w.add_put_chunk_cost(32)?; // putBytes(extensionRoot: Digest32)
+    w.add_put_chunk_cost(4)?; // DifficultySerializer: putBytes(nBits, 4 BE)
+                              // putUInt(height): no-info, unmetered (0)
+    w.add_put_chunk_cost(3)?; // putBytes(votes)
+    if h.version > 1 {
+        w.add_put_byte_cost()?; // putUByte(unparsedBytes.len)
+        w.add_put_chunk_cost(h.unparsed_bytes.len())?; // putBytes(unparsedBytes)
+    }
+    // AutolykosSolution.sigmaSerializerV{1,2}
+    w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?; // GroupElementSerializer(pk)
+    if h.version == 1 {
+        // GroupElementSerializer(w) — one-time pk, v1 only
+        w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?;
+    }
+    w.add_put_chunk_cost(8)?; // putBytes(nonce)
+    if h.version == 1 {
+        w.add_put_byte_cost()?; // putUByte(dBytes.len) — v1 only
+                                // putBytes(dBytes): length per sigma `asUnsignedByteArray` — empty for
+                                // zero, else minimal big-endian (matches `fix/autolykos-v1-zero-distance`).
+        let d_len = h.autolykos_solution.pow_distance.as_ref().map_or(0, |d| {
+            if d.is_zero() {
+                0
+            } else {
+                d.to_bytes_be().len()
+            }
+        });
+        w.add_put_chunk_cost(d_len)?;
+    }
+    h.scorex_serialize(w)?;
+    Ok(())
+}
+
+/// The error of a value that is not of its static type's class, where sigmastate's cast throws
+fn another_class(tpe: &SType, value: &dyn core::fmt::Debug) -> SigmaSerializationError {
+    TryExtractFromError(format!(
+        "a value of type {} cannot be {}",
+        debug_start(tpe),
+        debug_start(value)
+    ))
+    .into()
+}
+
+/// The items of a collection whose array sigmastate casts to a primitive array, read one at a
+/// time into the buffer the put takes
+fn primitive_items<'ctx, T: TryExtractFrom<Value<'ctx>>>(
+    coll: &CollValue<'ctx>,
+) -> Result<Vec<T>, TryExtractFromError> {
+    (0..coll.len())
+        .filter_map(|i| coll.get_val(i))
+        .map(|item| item.try_extract_into::<T>())
+        .collect()
+}
+
 impl DataSerializer {
     /// Serialize Literal without typecode serialized
     pub fn sigma_serialize<W: SigmaByteWrite>(c: &Literal, w: &mut W) -> SigmaSerializeResult {
@@ -70,43 +166,30 @@ impl DataSerializer {
         Ok(match c {
             Literal::Unit => (),
             Literal::Boolean(v) => {
+                w.add_put_byte_cost()?;
                 w.put_u8(u8::from(*v))?;
-                w.add_put_byte_cost();
             }
             Literal::Byte(v) => {
+                w.add_put_byte_cost()?;
                 w.put_i8(*v)?;
-                w.add_put_byte_cost();
             }
             Literal::Short(v) => {
+                w.add_put_numeric_cost()?;
                 w.put_i16(*v)?;
-                w.add_put_numeric_cost();
             }
             Literal::Int(v) => {
+                w.add_put_numeric_cost()?;
                 w.put_i32(*v)?;
-                w.add_put_numeric_cost();
             }
             Literal::Long(v) => {
+                w.add_put_numeric_cost()?;
                 w.put_i64(*v)?;
-                w.add_put_numeric_cost();
             }
             Literal::BigInt(v) => {
                 v.sigma_serialize(w)?;
             }
-            Literal::String(s) => {
-                // the length is free: sigmastate writes it with `putUInt(length)`
-                // (`CoreDataSerializer.scala:31`), which the cost-counting writer hands to the
-                // inner writer without a cost (`SigmaByteWriter.scala:105-107`)
-                w.put_usize_as_u32_unwrapped(s.len())?;
-                w.write_all(s.as_bytes())?;
-                w.add_put_chunk_cost(s.len());
-            }
-            Literal::GroupElement(ecp) => {
-                // EcPoint::scorex_serialize writes exactly GROUP_SIZE (33) bytes as one block;
-                // Scala meters it as putBytes(33) = PutChunkCost. (EcPoint is in ergo-chain-types
-                // and can't reach the cost sink, so record it here at the delegating site.)
-                ecp.sigma_serialize(w)?;
-                w.add_put_chunk_cost(EcPoint::GROUP_SIZE);
-            }
+            Literal::String(s) => put_string(w, s)?,
+            Literal::GroupElement(ecp) => put_group_element(w, ecp)?,
             Literal::SigmaProp(s) => s.value().sigma_serialize(w)?,
             Literal::UnsignedBigInt(v) if w.tree_version() >= ErgoTreeVersion::V3 => {
                 v.sigma_serialize(w)?
@@ -121,8 +204,8 @@ impl DataSerializer {
             Literal::Coll(ct) => match ct {
                 CollKind::NativeColl(NativeColl::CollByte(b)) => {
                     put_coll_len(w, b.len())?;
+                    w.add_put_chunk_cost(b.len())?;
                     w.write_all(b.clone().as_vec_u8().as_slice())?;
-                    w.add_put_chunk_cost(b.len());
                 }
                 CollKind::WrappedColl {
                     elem_tpe: SType::SBoolean,
@@ -135,8 +218,10 @@ impl DataSerializer {
                         .cloned()
                         .map(|i| i.try_extract_into::<bool>())
                         .collect();
-                    w.put_bits(maybe_bools?.as_slice())?;
-                    w.add_put_chunk_cost(v.len());
+                    // the array is cast before `putBits` adds its cost
+                    let bools = maybe_bools?;
+                    w.add_put_chunk_cost(v.len())?;
+                    w.put_bits(bools.as_slice())?;
                 }
                 // sigmastate refuses to write a collection of zero-width elements before its
                 // length (6.0.7 `CoreDataSerializer.scala:50-55`)
@@ -157,56 +242,13 @@ impl DataSerializer {
             Literal::Tup(items) => items
                 .iter()
                 .try_for_each(|i| DataSerializer::sigma_serialize(i, w))?,
-            Literal::Header(h) if w.tree_version() >= ErgoTreeVersion::V3 => {
-                h.scorex_serialize(w)?;
-                // Header is in ergo-chain-types and can't reach the cost sink, so mirror the
-                // JVM's metered put sequence here (as for EcPoint/AvlTree). Order matches
-                // `ErgoHeader.sigmaSerializer` = `HeaderWithoutPowSerializer.serialize` +
-                // `AutolykosSolution.sigmaSerializerV{1,2}` (sigma
-                // `org/ergoplatform/{ErgoHeader,HeaderWithoutPow}.scala`); keep in sync with
-                // `Header::serialize_without_pow` / `AutolykosSolution::serialize_bytes`. All
-                // puts are no-info, so `putUInt(height)` is unmetered (0). Blessed v6
-                // `Global.serialize[Header]` = 333 (= 89 + put_cost 244, v2/empty-unparsed).
-                w.add_put_byte_cost(); // put(version)
-                w.add_put_chunk_cost(32); // putBytes(parentId: Digest32)
-                w.add_put_chunk_cost(32); // putBytes(ADProofsRoot: Digest32)
-                w.add_put_chunk_cost(32); // putBytes(transactionsRoot: Digest32)
-                w.add_put_chunk_cost(33); // putBytes(stateRoot: ADDigest)
-                w.add_put_numeric_cost(); // putULong(timestamp)
-                w.add_put_chunk_cost(32); // putBytes(extensionRoot: Digest32)
-                w.add_put_chunk_cost(4); // DifficultySerializer: putBytes(nBits, 4 BE)
-                                         // putUInt(height): no-info, unmetered (0)
-                w.add_put_chunk_cost(3); // putBytes(votes)
-                if h.version > 1 {
-                    w.add_put_byte_cost(); // putUByte(unparsedBytes.len)
-                    w.add_put_chunk_cost(h.unparsed_bytes.len()); // putBytes(unparsedBytes)
-                }
-                // AutolykosSolution.sigmaSerializerV{1,2}
-                w.add_put_chunk_cost(EcPoint::GROUP_SIZE); // GroupElementSerializer(pk)
-                if h.version == 1 {
-                    // GroupElementSerializer(w) — one-time pk, v1 only
-                    w.add_put_chunk_cost(EcPoint::GROUP_SIZE);
-                }
-                w.add_put_chunk_cost(8); // putBytes(nonce)
-                if h.version == 1 {
-                    w.add_put_byte_cost(); // putUByte(dBytes.len) — v1 only
-                                           // putBytes(dBytes): length per sigma `asUnsignedByteArray` — empty for
-                                           // zero, else minimal big-endian (matches `fix/autolykos-v1-zero-distance`).
-                    let d_len = h.autolykos_solution.pow_distance.as_ref().map_or(0, |d| {
-                        if d.is_zero() {
-                            0
-                        } else {
-                            d.to_bytes_be().len()
-                        }
-                    });
-                    w.add_put_chunk_cost(d_len);
-                }
-            }
+            Literal::Header(h) if w.tree_version() >= ErgoTreeVersion::V3 => put_header(w, h)?,
             Literal::Opt(opt) if w.tree_version() >= ErgoTreeVersion::V3 => {
+                // the tag's cost before the tag (`SigmaByteWriter.scala:171-174`)
+                w.add_put_byte_cost()?;
                 w.put_option(Option::as_ref(opt), |w, v| {
                     DataSerializer::sigma_serialize(v, w)
                 })?;
-                w.add_put_byte_cost();
             }
             // unsupported, see
             // https://github.com/ScorexFoundation/sigmastate-interpreter/issues/659
@@ -221,6 +263,134 @@ impl DataSerializer {
                 ));
             }
         })
+    }
+
+    /// Writes a runtime value as data of type `tpe`, without the type: sigmastate's
+    /// `DataSerializer.serialize(value, tpe, w)` (v6.0.6 `CoreDataSerializer.scala:22-87`,
+    /// `DataSerializer.scala:15-24`), which `Global.serialize` calls with its argument's static
+    /// type (`methods.scala:1982`).
+    ///
+    /// The value is read by `tpe` and cast to the type's class where the type's arm reads it, so
+    /// whatever comes before a value of another class has been written. A tuple type takes a
+    /// pair, or a collection of `Any` holding as many items as the type (`fromDslTuple`,
+    /// `Evaluation.scala:91-96`, and the length assert, `CoreDataSerializer.scala:69`). A
+    /// collection type takes any collection and writes its items by the item type; for
+    /// `Coll[Byte]` and `Coll[Boolean]` the JVM casts the collection's array, after the length
+    /// (`CoreDataSerializer.scala:54-57`). `Unit` writes nothing and reads no value (`:23`). A
+    /// type with no arm (`Any`, a function, a type variable, `Global`, `Context`, `PreHeader`)
+    /// is an error (`:84-86`).
+    ///
+    /// Each put's cost goes to the writer's cost sink BEFORE the put
+    /// ([`SigmaByteWriter::with_cost_sink`](super::sigma_byte_writer::SigmaByteWriter::with_cost_sink)).
+    /// A value built at evaluation can hold one collection many times over, so it can be far
+    /// larger written than it cost to build: the costs, added as the write goes, are what bounds
+    /// the work. That is why this writer walks the value and does not convert it to data first:
+    /// a collection's items are read one at a time, and the bytes or bits of a `Coll[Byte]` or
+    /// `Coll[Boolean]` are gathered after their cost. What is copied before its own cost is one
+    /// item at a time (the collections inside it are shared, not copied) and a tree's digest.
+    pub fn sigma_serialize_value<W: SigmaByteWrite>(
+        value: &Value<'_>,
+        tpe: &SType,
+        w: &mut W,
+    ) -> SigmaSerializeResult {
+        let v3 = w.tree_version() >= ErgoTreeVersion::V3;
+        match (tpe, value) {
+            (SType::SUnit, _) => {}
+            (SType::SBoolean, Value::Boolean(v)) => {
+                w.add_put_byte_cost()?;
+                w.put_u8(u8::from(*v))?;
+            }
+            (SType::SByte, Value::Byte(v)) => {
+                w.add_put_byte_cost()?;
+                w.put_i8(*v)?;
+            }
+            (SType::SShort, Value::Short(v)) => {
+                w.add_put_numeric_cost()?;
+                w.put_i16(*v)?;
+            }
+            (SType::SInt, Value::Int(v)) => {
+                w.add_put_numeric_cost()?;
+                w.put_i32(*v)?;
+            }
+            (SType::SLong, Value::Long(v)) => {
+                w.add_put_numeric_cost()?;
+                w.put_i64(*v)?;
+            }
+            (SType::SString, Value::String(s)) => put_string(w, s)?,
+            // data is 256-bit: `require(bi.fitsIn256Bits)`, before the length
+            // (`CoreDataSerializer.scala:35`)
+            (SType::SBigInt, Value::BigInt(v)) => BigInt256::try_from(v.clone())
+                .map_err(TryExtractFromError)?
+                .sigma_serialize(w)?,
+            (SType::SUnsignedBigInt, Value::UnsignedBigInt(v)) if v3 => v.sigma_serialize(w)?,
+            (SType::SGroupElement, Value::GroupElement(ecp)) => put_group_element(w, ecp)?,
+            (SType::SSigmaProp, Value::SigmaProp(s)) => s.value().sigma_serialize(w)?,
+            // the digest's array is cast to bytes before anything of the tree is written
+            // (`AvlTreeData.scala:75`)
+            (SType::SAvlTree, Value::AvlTree(tree)) => {
+                if tree.digest.elem_tpe() != SType::SByte {
+                    return Err(another_class(tpe, &tree.digest));
+                }
+                AvlTreeData::try_from((**tree).clone())?.sigma_serialize(w)?
+            }
+            (SType::SBox, Value::CBox(b)) => b.sigma_serialize(w)?,
+            (SType::SHeader, Value::Header(h)) if v3 => put_header(w, h)?,
+            (SType::SColl(elem_tpe), Value::Coll(coll)) => {
+                // sigmastate refuses to write a collection of zero-width elements before its
+                // length (6.0.7 `CoreDataSerializer.scala:50-55`)
+                if is_zero_width(elem_tpe) {
+                    return Err(SigmaSerializationError::NotSupported(format!(
+                        "collection with zero-width element type {} cannot be serialized",
+                        debug_start(&**elem_tpe)
+                    )));
+                }
+                put_coll_len(w, coll.len())?;
+                match **elem_tpe {
+                    // the cast of the collection's array, after the length and before the
+                    // items' cost
+                    SType::SByte | SType::SBoolean if coll.elem_tpe() != **elem_tpe => {
+                        return Err(another_class(tpe, coll))
+                    }
+                    SType::SByte => {
+                        w.add_put_chunk_cost(coll.len())?;
+                        let bytes: Vec<u8> = primitive_items::<i8>(coll)?.as_vec_u8();
+                        w.write_all(&bytes)?;
+                    }
+                    SType::SBoolean => {
+                        w.add_put_chunk_cost(coll.len())?;
+                        w.put_bits(&primitive_items::<bool>(coll)?)?;
+                    }
+                    _ => {
+                        for item in (0..coll.len()).filter_map(|i| coll.get_val(i)) {
+                            DataSerializer::sigma_serialize_value(&item, elem_tpe, w)?;
+                        }
+                    }
+                }
+            }
+            (SType::STuple(t), Value::Pair(pair)) if t.items.len() == 2 => {
+                for (item, item_tpe) in [&pair.0, &pair.1].into_iter().zip(t.items.iter()) {
+                    DataSerializer::sigma_serialize_value(item, item_tpe, w)?;
+                }
+            }
+            (SType::STuple(t), Value::Coll(coll))
+                if coll.elem_tpe() == SType::SAny && coll.len() == t.items.len() =>
+            {
+                for (i, item_tpe) in t.items.iter().enumerate() {
+                    if let Some(item) = coll.get_val(i) {
+                        DataSerializer::sigma_serialize_value(&item, item_tpe, w)?;
+                    }
+                }
+            }
+            (SType::SOption(elem_tpe), Value::Opt(opt)) if v3 => {
+                // the tag's cost before the tag (`SigmaByteWriter.scala:171-174`)
+                w.add_put_byte_cost()?;
+                w.put_option(opt.as_deref(), |w, v| {
+                    DataSerializer::sigma_serialize_value(v, elem_tpe, w)
+                })?;
+            }
+            _ => return Err(another_class(tpe, value)),
+        }
+        Ok(())
     }
 
     /// Parse sigma-serialized literal
@@ -676,5 +846,465 @@ mod collection_length_tests {
         assert!(refused(&bools.into()), "inner booleans");
         let ints: Vec<Vec<i32>> = vec![vec![1i32; 65536]];
         assert!(refused(&ints.into()), "inner ints");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod value_writer_tests {
+    use super::*;
+    use crate::chain::context::CostLimitExceeded;
+    use crate::mir::avl_tree_data::AvlTreeFlags;
+    use crate::mir::avl_tree_data::AvlTreeValue;
+    use crate::serialization::sigma_byte_writer::SigmaByteWriter;
+    use crate::sigma_protocol::sigma_boolean::ProveDlog;
+    use crate::types::stuple::STuple;
+    use core::cell::Cell;
+    use ergo_chain_types::ec_point::generator;
+    use num_bigint::BigInt;
+
+    use ErgoTreeVersion as Version;
+
+    /// What a write at a tree version gave, and the sum of the costs it added, also when it failed
+    fn written_at(
+        version: Version,
+        value: &Value<'_>,
+        tpe: &SType,
+    ) -> (Result<Vec<u8>, SigmaSerializationError>, u64) {
+        let mut buf = Vec::new();
+        let cost = Cell::new(0u64);
+        let sink = |c: u64| {
+            cost.set(cost.get() + c);
+            Ok(())
+        };
+        let res = {
+            let mut w = SigmaByteWriter::with_cost_sink(&mut buf, None, &sink);
+            w.with_tree_version(version, |w| {
+                DataSerializer::sigma_serialize_value(value, tpe, w)
+            })
+        };
+        (res.map(|()| buf), cost.get())
+    }
+
+    fn written(value: &Value<'_>, tpe: &SType) -> (Result<Vec<u8>, SigmaSerializationError>, u64) {
+        written_at(Version::V3, value, tpe)
+    }
+
+    /// Data as the data writer writes it at tree version 3, and the sum of its costs
+    fn data(lit: &Literal) -> (Result<Vec<u8>, SigmaSerializationError>, u64) {
+        let mut buf = Vec::new();
+        let cost = Cell::new(0u64);
+        let sink = |c: u64| {
+            cost.set(cost.get() + c);
+            Ok(())
+        };
+        {
+            let mut w = SigmaByteWriter::with_cost_sink(&mut buf, None, &sink);
+            w.with_tree_version(Version::V3, |w| DataSerializer::sigma_serialize(lit, w))
+                .unwrap();
+        }
+        (Ok(buf), cost.get())
+    }
+
+    /// The error of a value that is not of its type's class, and the costs added before it
+    fn refused(value: &Value<'_>, tpe: &SType) -> Option<u64> {
+        let (res, cost) = written(value, tpe);
+        matches!(res, Err(SigmaSerializationError::UnexpectedValue(_))).then_some(cost)
+    }
+
+    fn coll(t: SType) -> SType {
+        SType::SColl(t.into())
+    }
+
+    fn int_pair() -> SType {
+        SType::STuple(STuple::pair(SType::SInt, SType::SInt).into())
+    }
+
+    fn int_triple() -> SType {
+        SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into())
+    }
+
+    fn ints(xs: &[i32]) -> Vec<Value<'static>> {
+        xs.iter().map(|x| Value::Int(*x)).collect()
+    }
+
+    /// sigmastate's value of a tuple of other than two items
+    fn any_coll(items: Vec<Value<'static>>) -> Value<'static> {
+        Value::Coll(CollValue::generic(SType::SAny, items))
+    }
+
+    fn int_tuple(xs: &[i32]) -> Literal {
+        let items: Vec<Literal> = xs.iter().map(|x| Literal::Int(*x)).collect();
+        Literal::Tup(items.try_into().unwrap())
+    }
+
+    fn items(elem_tpe: SType, items: Vec<Literal>) -> Literal {
+        Literal::Coll(CollKind::WrappedColl {
+            elem_tpe,
+            items: items.into(),
+        })
+    }
+
+    fn bytes(xs: &[i8]) -> Literal {
+        Literal::Coll(CollKind::NativeColl(NativeColl::CollByte(xs.into())))
+    }
+
+    // every arm that needs no context: a constant's value is written as the constant's data is,
+    // bytes and costs
+    #[test]
+    fn a_value_is_written_as_its_data() {
+        let tree = AvlTreeData {
+            digest: vec![1; 33],
+            tree_flags: AvlTreeFlags::new(true, true, true),
+            key_length: 32,
+            value_length_opt: None,
+        };
+        let dlog = SigmaProp::new(ProveDlog::new(generator()).into());
+        let rows: Vec<(Literal, SType)> = vec![
+            (Literal::Unit, SType::SUnit),
+            (Literal::Boolean(true), SType::SBoolean),
+            (Literal::Byte(-5), SType::SByte),
+            (Literal::Short(-300), SType::SShort),
+            (Literal::Int(70000), SType::SInt),
+            (Literal::Long(-1), SType::SLong),
+            (Literal::String("abc".into()), SType::SString),
+            (Literal::String("".into()), SType::SString),
+            (Literal::BigInt(BigInt256::from(-70000i32)), SType::SBigInt),
+            (
+                Literal::UnsignedBigInt(UnsignedBigInt::from(70000u32)),
+                SType::SUnsignedBigInt,
+            ),
+            (
+                Literal::GroupElement(Arc::new(generator())),
+                SType::SGroupElement,
+            ),
+            (Literal::SigmaProp(Box::new(dlog)), SType::SSigmaProp),
+            (Literal::AvlTree(Box::new(tree)), SType::SAvlTree),
+            (bytes(&[1, -2, 3]), coll(SType::SByte)),
+            (bytes(&[]), coll(SType::SByte)),
+            (
+                items(
+                    SType::SBoolean,
+                    vec![Literal::Boolean(true), Literal::Boolean(false)],
+                ),
+                coll(SType::SBoolean),
+            ),
+            (
+                items(SType::SInt, vec![Literal::Int(1), Literal::Int(2)]),
+                coll(SType::SInt),
+            ),
+            (
+                items(coll(SType::SByte), vec![bytes(&[1]), bytes(&[2, 3])]),
+                coll(coll(SType::SByte)),
+            ),
+            (
+                items(int_pair(), vec![int_tuple(&[1, 2]), int_tuple(&[3, 4])]),
+                coll(int_pair()),
+            ),
+            (
+                items(int_triple(), vec![int_tuple(&[1, 2, 3])]),
+                coll(int_triple()),
+            ),
+            (int_tuple(&[1, 2]), int_pair()),
+            (int_tuple(&[1, 2, 3]), int_triple()),
+            (
+                Literal::Opt(Some(Box::new(Literal::Int(1)))),
+                SType::SOption(SType::SInt.into()),
+            ),
+            (Literal::Opt(None), SType::SOption(SType::SInt.into())),
+        ];
+        for (lit, tpe) in rows {
+            assert_eq!(
+                written(&Value::from(lit.clone()), &tpe),
+                data(&lit),
+                "{tpe:?}"
+            );
+        }
+    }
+
+    // the two arms that need a context to have a value: a box and a header
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn a_box_and_a_header_are_written_as_their_data() {
+        use sigma_test_util::force_any_val;
+        for _ in 0..8 {
+            let b = Literal::CBox(Arc::new(force_any_val::<ErgoBox>()).into());
+            assert_eq!(written(&Value::from(b.clone()), &SType::SBox), data(&b));
+            let h = Literal::Header(Box::new(force_any_val::<Header>()));
+            assert_eq!(written(&Value::from(h.clone()), &SType::SHeader), data(&h));
+        }
+    }
+
+    // A runtime `BigInt` is as wide as sigmastate's `BigInteger`; data is 256-bit, and the JVM's
+    // writer requires `fitsIn256Bits` before it writes the length (v6.0.6
+    // `CoreDataSerializer.scala:35`): `-2^255 ..= 2^255 - 1`
+    #[test]
+    fn a_runtime_bigint_outside_256_bits_is_not_written() {
+        let p: BigInt = BigInt::from(1) << 255usize;
+        for v in [p.clone(), -p.clone() - 1, p.clone() << 2000usize] {
+            assert_eq!(
+                refused(&Value::BigInt(v.clone()), &SType::SBigInt),
+                Some(0),
+                "{v}"
+            );
+        }
+        for v in [-p.clone(), p.clone() - 1, BigInt::from(0)] {
+            let lit = Literal::BigInt(BigInt256::try_from(v.clone()).unwrap());
+            assert_eq!(
+                written(&Value::BigInt(v.clone()), &SType::SBigInt),
+                data(&lit),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_collection_of_any_is_a_tuple_of_its_length() {
+        assert_eq!(
+            written(&any_coll(ints(&[1, 2, 3])), &int_triple()),
+            data(&int_tuple(&[1, 2, 3]))
+        );
+        // `fromDslTuple` takes a collection of `Any` for a pair type too
+        assert_eq!(
+            written(&any_coll(ints(&[1, 2])), &int_pair()),
+            data(&int_tuple(&[1, 2]))
+        );
+        // the length assert, before anything is written
+        assert_eq!(refused(&any_coll(ints(&[1, 2])), &int_triple()), Some(0));
+        assert_eq!(refused(&any_coll(ints(&[1, 2, 3])), &int_pair()), Some(0));
+        // `fromDslTuple` refuses a collection of another item type
+        let coll_of_ints = Value::Coll(CollValue::generic(SType::SInt, ints(&[1, 2, 3])));
+        assert_eq!(refused(&coll_of_ints, &int_triple()), Some(0));
+    }
+
+    #[test]
+    fn a_pair_is_a_tuple_of_two() {
+        let pair: Value = (1i32, 2i32).into();
+        assert_eq!(written(&pair, &int_pair()), data(&int_tuple(&[1, 2])));
+        assert_eq!(refused(&pair, &int_triple()), Some(0));
+        // the first item is written before the second one's class is looked at
+        let long_second: Value = (1i32, 2i64).into();
+        assert_eq!(refused(&long_second, &int_pair()), Some(3));
+    }
+
+    #[test]
+    fn a_collection_writes_its_items_by_the_item_type() {
+        // a data `Coll[(Int, Int, Int)]` as sigmastate holds it: a `Coll[Coll[Any]]`
+        let triples = Value::Coll(CollValue::generic(
+            coll(SType::SAny),
+            vec![any_coll(ints(&[1, 2, 3]))],
+        ));
+        assert_eq!(
+            written(&triples, &coll(int_triple())),
+            data(&items(int_triple(), vec![int_tuple(&[1, 2, 3])]))
+        );
+        // the collection arm takes any collection: a tuple of ints is written as a `Coll[Int]`
+        assert_eq!(
+            written(&any_coll(ints(&[1, 2])), &coll(SType::SInt)),
+            data(&items(SType::SInt, vec![Literal::Int(1), Literal::Int(2)]))
+        );
+        // an item of another class is met after the length and the items before it
+        let second_is_long = any_coll(vec![Value::Int(1), Value::Long(2)]);
+        assert_eq!(refused(&second_is_long, &coll(SType::SInt)), Some(6));
+    }
+
+    #[test]
+    fn a_value_of_another_class_is_refused() {
+        // by reading: `DataSerializer.serialize` has no arm for `Any`, and casts a value to its
+        // type's class
+        assert_eq!(refused(&Value::Int(1), &SType::SAny), Some(0));
+        assert_eq!(refused(&Value::Long(1), &SType::SInt), Some(0));
+        assert_eq!(refused(&Value::Int(1), &coll(SType::SInt)), Some(0));
+        assert_eq!(refused(&Value::Global, &SType::SGlobal), Some(0));
+        assert_eq!(
+            written(&Value::Int(1), &SType::SInt),
+            data(&Literal::Int(1))
+        );
+    }
+
+    #[test]
+    fn byte_and_boolean_collections_need_their_array() {
+        let coll_byte = coll(SType::SByte);
+        let two = vec![Value::Byte(1), Value::Byte(2)];
+        for value in [
+            Value::Coll(CollValue::Bytes(vec![1i8, 2].into())),
+            Value::Coll(CollValue::generic(SType::SByte, two.clone())),
+        ] {
+            assert_eq!(written(&value, &coll_byte), data(&bytes(&[1, 2])));
+        }
+        // a tuple of bytes is an `Object[]`: the cast to `byte[]` throws, after the length
+        assert_eq!(refused(&any_coll(two), &coll_byte), Some(3));
+        let coll_bool = coll(SType::SBoolean);
+        let bools = items(
+            SType::SBoolean,
+            vec![Literal::Boolean(true), Literal::Boolean(false)],
+        );
+        for value in [
+            Value::Coll(CollValue::Booleans(vec![true, false].into())),
+            Value::Coll(CollValue::generic(
+                SType::SBoolean,
+                vec![Value::Boolean(true), Value::Boolean(false)],
+            )),
+        ] {
+            assert_eq!(written(&value, &coll_bool), data(&bools));
+        }
+        assert_eq!(
+            refused(&any_coll(vec![Value::Boolean(true)]), &coll_bool),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn unit_reads_no_value_and_an_option_writes_its_value() {
+        assert_eq!(written(&Value::Int(1), &SType::SUnit), (Ok(vec![]), 0));
+        let opt_triple = SType::SOption(int_triple().into());
+        assert_eq!(
+            written(
+                &Value::Opt(Some(Box::new(any_coll(ints(&[1, 2, 3]))))),
+                &opt_triple
+            ),
+            data(&Literal::Opt(Some(Box::new(int_tuple(&[1, 2, 3])))))
+        );
+        // a `None` casts nothing
+        assert_eq!(written(&Value::Opt(None), &opt_triple), (Ok(vec![0]), 1));
+        // the tag is written before the value's class is looked at
+        assert_eq!(
+            refused(&Value::Opt(Some(Box::new(Value::Long(1)))), &opt_triple),
+            Some(1)
+        );
+    }
+
+    // sigmastate refuses a collection of zero-width items before it writes the length (6.0.7
+    // `CoreDataSerializer.scala:50-55`)
+    #[test]
+    fn a_collection_of_zero_width_items_is_refused_before_its_length() {
+        let units = Value::Coll(CollValue::generic(SType::SUnit, vec![Value::Unit]));
+        let (res, cost) = written(&units, &coll(SType::SUnit));
+        assert!(
+            matches!(res, Err(SigmaSerializationError::NotSupported(_))),
+            "{res:?}"
+        );
+        assert_eq!(cost, 0);
+    }
+
+    // an option and an unsigned big integer have data from tree version 3 only
+    // (`isV3OrLaterErgoTreeVersion`, `CoreDataSerializer.scala:78`, `:39`)
+    #[test]
+    fn an_option_and_an_unsigned_big_integer_have_no_arm_below_tree_version_3() {
+        let rows = [
+            (
+                Value::Opt(Some(Box::new(Value::Int(1)))),
+                SType::SOption(SType::SInt.into()),
+            ),
+            (
+                Value::UnsignedBigInt(UnsignedBigInt::from(1u32)),
+                SType::SUnsignedBigInt,
+            ),
+        ];
+        for (value, tpe) in rows {
+            for version in [Version::V0, Version::V1, Version::V2] {
+                let (res, cost) = written_at(version, &value, &tpe);
+                assert!(res.is_err(), "{tpe:?}");
+                assert_eq!(cost, 0);
+            }
+            assert!(written(&value, &tpe).0.is_ok(), "{tpe:?}");
+        }
+    }
+
+    // and so has a header (`DataSerializer.scala:19`)
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn a_header_has_no_arm_below_tree_version_3() {
+        use sigma_test_util::force_any_val;
+        let header = Value::Header(Box::new(force_any_val::<Header>()));
+        for version in [Version::V0, Version::V1, Version::V2] {
+            let (res, cost) = written_at(version, &header, &SType::SHeader);
+            assert!(res.is_err(), "{version:?}");
+            assert_eq!(cost, 0);
+        }
+        assert!(written(&header, &SType::SHeader).0.is_ok());
+    }
+
+    /// 50 collections that are all ONE collection of 50 collections that are all one collection
+    /// of 100 bytes: three allocations, 252,551 bytes when written
+    fn shared() -> (Value<'static>, SType) {
+        let inner = Value::Coll(CollValue::Bytes(vec![1i8; 100].into()));
+        let middle = Value::Coll(CollValue::generic(coll(SType::SByte), vec![inner; 50]));
+        let top = Value::Coll(CollValue::generic(
+            coll(coll(SType::SByte)),
+            vec![middle; 50],
+        ));
+        (top, coll(coll(coll(SType::SByte))))
+    }
+
+    // The bound, as a count: a sink that refuses its k-th cost has been called k times, and
+    // the writer has written the bytes of the puts before the k-th and no more. The costs are,
+    // in order: the three lengths (one byte each), the first 100 bytes, the next length, ...
+    #[test]
+    fn a_shared_collection_is_written_only_as_far_as_its_costs_are_accepted() {
+        let (value, tpe) = shared();
+        assert_eq!(
+            written(&value, &tpe).0.map(|bytes| bytes.len()),
+            Ok(1 + 50 * (1 + 50 * (1 + 100)))
+        );
+        assert_eq!(written(&value, &tpe).1, 3 + 50 * (3 + 50 * (3 + 103)));
+        for (refused, bytes_written) in [(1, 0), (2, 1), (3, 2), (4, 3), (5, 103), (6, 104)] {
+            let mut buf = Vec::new();
+            let calls = Cell::new(0);
+            let sink = |_: u64| {
+                calls.set(calls.get() + 1);
+                if calls.get() == refused {
+                    Err(CostLimitExceeded(7))
+                } else {
+                    Ok(())
+                }
+            };
+            let res = {
+                let mut w = SigmaByteWriter::with_cost_sink(&mut buf, None, &sink);
+                w.with_tree_version(Version::V3, |w| {
+                    DataSerializer::sigma_serialize_value(&value, &tpe, w)
+                })
+            };
+            assert_eq!(
+                res,
+                Err(SigmaSerializationError::CostLimitExceeded(
+                    CostLimitExceeded(7)
+                ))
+            );
+            assert_eq!((calls.get(), buf.len()), (refused, bytes_written));
+        }
+    }
+
+    // an error names the start of the value and of the type, never the whole of either: the
+    // `Debug` text of this value is over half a megabyte
+    #[test]
+    fn an_error_does_not_print_a_whole_value() {
+        let (value, tpe) = shared();
+        // a tree whose digest is that value: the digest's class is looked at before the digest
+        // is read as bytes, which would print it
+        let tree = match &value {
+            Value::Coll(digest) => Value::AvlTree(Box::new(AvlTreeValue {
+                digest: digest.clone(),
+                tree_flags: AvlTreeFlags::new(true, true, true),
+                key_length: 32,
+                value_length_opt: None,
+            })),
+            _ => Value::Unit,
+        };
+        let trees = Value::Coll(CollValue::generic(SType::SAvlTree, vec![tree.clone()]));
+        for (value, tpe) in [
+            (value.clone(), SType::SLong),
+            (value.clone(), coll(SType::SByte)),
+            (Value::Long(1), tpe),
+            (tree, SType::SAvlTree),
+            (trees, coll(SType::SAvlTree)),
+        ] {
+            let text = match written(&value, &tpe).0 {
+                Err(SigmaSerializationError::UnexpectedValue(e)) => e.0,
+                _ => alloc::string::String::new(),
+            };
+            assert!(!text.is_empty() && text.len() < 600, "{}", text.len());
+        }
+        assert!(alloc::format!("{value:?}").len() > 500_000);
     }
 }

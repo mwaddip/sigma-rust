@@ -1,4 +1,5 @@
 //! Serialization of Ergo types
+use crate::chain::context::CostLimitExceeded;
 use crate::chain::ergo_box::RegisterValueError;
 use crate::ergo_tree::{ErgoTreeError, ErgoTreeHeaderError, ErgoTreeVersion};
 use crate::mir::val_def::ValId;
@@ -41,6 +42,16 @@ pub enum SigmaSerializationError {
     /// Scorex serialization error
     #[error("Scorex serialization error: {0}")]
     ScorexSerializationError(#[from] ScorexSerializationError),
+    /// The cost of a put crossed the limit of the writer's cost sink
+    /// ([`SigmaByteWriter::with_cost_sink`]): the put was not made
+    #[error("{0}")]
+    CostLimitExceeded(CostLimitExceeded),
+}
+
+impl From<CostLimitExceeded> for SigmaSerializationError {
+    fn from(e: CostLimitExceeded) -> Self {
+        SigmaSerializationError::CostLimitExceeded(e)
+    }
 }
 
 impl From<io::Error> for SigmaSerializationError {
