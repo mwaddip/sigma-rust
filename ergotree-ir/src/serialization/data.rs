@@ -41,14 +41,17 @@ pub struct DataSerializer {}
 /// hold more; a collection built at evaluation can (by `Append`, `patch`, `flatMap`, or as the
 /// bytes `Global.serialize` and `propBytes` return), and a script hands it to this writer
 /// through `Global.serialize` and through the new values of `substConstants`.
+///
+/// `putUShort` adds its cost before it looks at the count (`SigmaByteWriter.scala:83-86`), so a
+/// refused count has been charged.
 fn put_coll_len<W: SigmaByteWrite>(w: &mut W, len: usize) -> SigmaSerializeResult {
+    w.add_put_numeric_cost()?;
     let count = u16::try_from(len).map_err(|_| {
         SigmaSerializationError::NotSupported(format!(
             "a collection of {len} items is out of unsigned short range"
         ))
     })?;
     w.put_u16(count)?;
-    w.add_put_numeric_cost();
     Ok(())
 }
 
@@ -70,24 +73,24 @@ impl DataSerializer {
         Ok(match c {
             Literal::Unit => (),
             Literal::Boolean(v) => {
+                w.add_put_byte_cost()?;
                 w.put_u8(u8::from(*v))?;
-                w.add_put_byte_cost();
             }
             Literal::Byte(v) => {
+                w.add_put_byte_cost()?;
                 w.put_i8(*v)?;
-                w.add_put_byte_cost();
             }
             Literal::Short(v) => {
+                w.add_put_numeric_cost()?;
                 w.put_i16(*v)?;
-                w.add_put_numeric_cost();
             }
             Literal::Int(v) => {
+                w.add_put_numeric_cost()?;
                 w.put_i32(*v)?;
-                w.add_put_numeric_cost();
             }
             Literal::Long(v) => {
+                w.add_put_numeric_cost()?;
                 w.put_i64(*v)?;
-                w.add_put_numeric_cost();
             }
             Literal::BigInt(v) => {
                 v.sigma_serialize(w)?;
@@ -97,15 +100,15 @@ impl DataSerializer {
                 // (`CoreDataSerializer.scala:31`), which the cost-counting writer hands to the
                 // inner writer without a cost (`SigmaByteWriter.scala:105-107`)
                 w.put_usize_as_u32_unwrapped(s.len())?;
+                w.add_put_chunk_cost(s.len())?;
                 w.write_all(s.as_bytes())?;
-                w.add_put_chunk_cost(s.len());
             }
             Literal::GroupElement(ecp) => {
                 // EcPoint::scorex_serialize writes exactly GROUP_SIZE (33) bytes as one block;
                 // Scala meters it as putBytes(33) = PutChunkCost. (EcPoint is in ergo-chain-types
                 // and can't reach the cost sink, so record it here at the delegating site.)
+                w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?;
                 ecp.sigma_serialize(w)?;
-                w.add_put_chunk_cost(EcPoint::GROUP_SIZE);
             }
             Literal::SigmaProp(s) => s.value().sigma_serialize(w)?,
             Literal::UnsignedBigInt(v) if w.tree_version() >= ErgoTreeVersion::V3 => {
@@ -121,8 +124,8 @@ impl DataSerializer {
             Literal::Coll(ct) => match ct {
                 CollKind::NativeColl(NativeColl::CollByte(b)) => {
                     put_coll_len(w, b.len())?;
+                    w.add_put_chunk_cost(b.len())?;
                     w.write_all(b.clone().as_vec_u8().as_slice())?;
-                    w.add_put_chunk_cost(b.len());
                 }
                 CollKind::WrappedColl {
                     elem_tpe: SType::SBoolean,
@@ -135,8 +138,10 @@ impl DataSerializer {
                         .cloned()
                         .map(|i| i.try_extract_into::<bool>())
                         .collect();
-                    w.put_bits(maybe_bools?.as_slice())?;
-                    w.add_put_chunk_cost(v.len());
+                    // the array is cast before `putBits` adds its cost
+                    let bools = maybe_bools?;
+                    w.add_put_chunk_cost(v.len())?;
+                    w.put_bits(bools.as_slice())?;
                 }
                 // sigmastate refuses to write a collection of zero-width elements before its
                 // length (6.0.7 `CoreDataSerializer.scala:50-55`)
@@ -158,40 +163,40 @@ impl DataSerializer {
                 .iter()
                 .try_for_each(|i| DataSerializer::sigma_serialize(i, w))?,
             Literal::Header(h) if w.tree_version() >= ErgoTreeVersion::V3 => {
-                h.scorex_serialize(w)?;
                 // Header is in ergo-chain-types and can't reach the cost sink, so mirror the
-                // JVM's metered put sequence here (as for EcPoint/AvlTree). Order matches
+                // JVM's metered put sequence here (as for EcPoint/AvlTree), each cost before
+                // the one statement that writes all the fields. Order matches
                 // `ErgoHeader.sigmaSerializer` = `HeaderWithoutPowSerializer.serialize` +
                 // `AutolykosSolution.sigmaSerializerV{1,2}` (sigma
                 // `org/ergoplatform/{ErgoHeader,HeaderWithoutPow}.scala`); keep in sync with
                 // `Header::serialize_without_pow` / `AutolykosSolution::serialize_bytes`. All
                 // puts are no-info, so `putUInt(height)` is unmetered (0). Blessed v6
                 // `Global.serialize[Header]` = 333 (= 89 + put_cost 244, v2/empty-unparsed).
-                w.add_put_byte_cost(); // put(version)
-                w.add_put_chunk_cost(32); // putBytes(parentId: Digest32)
-                w.add_put_chunk_cost(32); // putBytes(ADProofsRoot: Digest32)
-                w.add_put_chunk_cost(32); // putBytes(transactionsRoot: Digest32)
-                w.add_put_chunk_cost(33); // putBytes(stateRoot: ADDigest)
-                w.add_put_numeric_cost(); // putULong(timestamp)
-                w.add_put_chunk_cost(32); // putBytes(extensionRoot: Digest32)
-                w.add_put_chunk_cost(4); // DifficultySerializer: putBytes(nBits, 4 BE)
-                                         // putUInt(height): no-info, unmetered (0)
-                w.add_put_chunk_cost(3); // putBytes(votes)
+                w.add_put_byte_cost()?; // put(version)
+                w.add_put_chunk_cost(32)?; // putBytes(parentId: Digest32)
+                w.add_put_chunk_cost(32)?; // putBytes(ADProofsRoot: Digest32)
+                w.add_put_chunk_cost(32)?; // putBytes(transactionsRoot: Digest32)
+                w.add_put_chunk_cost(33)?; // putBytes(stateRoot: ADDigest)
+                w.add_put_numeric_cost()?; // putULong(timestamp)
+                w.add_put_chunk_cost(32)?; // putBytes(extensionRoot: Digest32)
+                w.add_put_chunk_cost(4)?; // DifficultySerializer: putBytes(nBits, 4 BE)
+                                          // putUInt(height): no-info, unmetered (0)
+                w.add_put_chunk_cost(3)?; // putBytes(votes)
                 if h.version > 1 {
-                    w.add_put_byte_cost(); // putUByte(unparsedBytes.len)
-                    w.add_put_chunk_cost(h.unparsed_bytes.len()); // putBytes(unparsedBytes)
+                    w.add_put_byte_cost()?; // putUByte(unparsedBytes.len)
+                    w.add_put_chunk_cost(h.unparsed_bytes.len())?; // putBytes(unparsedBytes)
                 }
                 // AutolykosSolution.sigmaSerializerV{1,2}
-                w.add_put_chunk_cost(EcPoint::GROUP_SIZE); // GroupElementSerializer(pk)
+                w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?; // GroupElementSerializer(pk)
                 if h.version == 1 {
                     // GroupElementSerializer(w) — one-time pk, v1 only
-                    w.add_put_chunk_cost(EcPoint::GROUP_SIZE);
+                    w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?;
                 }
-                w.add_put_chunk_cost(8); // putBytes(nonce)
+                w.add_put_chunk_cost(8)?; // putBytes(nonce)
                 if h.version == 1 {
-                    w.add_put_byte_cost(); // putUByte(dBytes.len) — v1 only
-                                           // putBytes(dBytes): length per sigma `asUnsignedByteArray` — empty for
-                                           // zero, else minimal big-endian (matches `fix/autolykos-v1-zero-distance`).
+                    w.add_put_byte_cost()?; // putUByte(dBytes.len) — v1 only
+                                            // putBytes(dBytes): length per sigma `asUnsignedByteArray` — empty for
+                                            // zero, else minimal big-endian (matches `fix/autolykos-v1-zero-distance`).
                     let d_len = h.autolykos_solution.pow_distance.as_ref().map_or(0, |d| {
                         if d.is_zero() {
                             0
@@ -199,14 +204,16 @@ impl DataSerializer {
                             d.to_bytes_be().len()
                         }
                     });
-                    w.add_put_chunk_cost(d_len);
+                    w.add_put_chunk_cost(d_len)?;
                 }
+                h.scorex_serialize(w)?;
             }
             Literal::Opt(opt) if w.tree_version() >= ErgoTreeVersion::V3 => {
+                // the tag's cost before the tag (`SigmaByteWriter.scala:171-174`)
+                w.add_put_byte_cost()?;
                 w.put_option(Option::as_ref(opt), |w, v| {
                     DataSerializer::sigma_serialize(v, w)
                 })?;
-                w.add_put_byte_cost();
             }
             // unsupported, see
             // https://github.com/ScorexFoundation/sigmastate-interpreter/issues/659

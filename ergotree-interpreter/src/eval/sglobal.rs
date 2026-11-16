@@ -12,6 +12,7 @@ use ergotree_ir::{
         data::DataSerializer,
         sigma_byte_reader::{self, SigmaByteRead},
         sigma_byte_writer::SigmaByteWriter,
+        SigmaSerializationError,
     },
 };
 use num_bigint::BigInt;
@@ -181,18 +182,28 @@ pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
     let arg = literal_of_type(args.first().ok_or_else(missing)?.to_static(), &arg_tpe)
         .map_err(EvalError::UnexpectedValue)?;
 
+    // each put's cost goes to the evaluator before the put, and the write stops at the put that
+    // crosses the cost limit (`addFixedCostCallback`, `addPerItemCostCallback`,
+    // `methods.scala:1971-1980`)
     let mut buf = vec![];
-    let put_cost = {
-        let mut writer = SigmaByteWriter::new(&mut buf, None);
-        writer.enable_serialize_cost_tracking();
-        writer.with_tree_version(ctx.tree_version(), |writer| {
+    let sink = |cost: u64| ctx.add_jit_cost(cost);
+    let mut writer = SigmaByteWriter::with_cost_sink(&mut buf, None, &sink);
+    writer
+        .with_tree_version(ctx.tree_version(), |writer| {
             DataSerializer::sigma_serialize(&arg, writer)
-        })?;
-        writer.serialize_cost()
-    };
-    ctx.add_jit_cost(put_cost)?;
+        })
+        .map_err(serialize_error)?;
     Ok(Value::from(buf))
 };
+
+/// A writer's error as the evaluator's: a cost limit the writer's sink met is the limit
+/// `Context::add_jit_cost` reports anywhere else
+fn serialize_error(e: SigmaSerializationError) -> EvalError {
+    match e {
+        SigmaSerializationError::CostLimitExceeded(limit) => limit.into(),
+        other => other.into(),
+    }
+}
 
 pub(crate) static SGLOBAL_SOME_EVAL_FN: EvalFn = |_mc, _env, _ctx, _obj, args| {
     let value = args
@@ -1540,15 +1551,17 @@ mod long_collection_rows {
         let (res, cost) = eval_body(body, version);
         (res.unwrap().try_extract_into::<Vec<i8>>().unwrap(), cost)
     }
-    /// The writer's refusal of a collection's length, at tree version 3
-    fn refused(body: &str) -> bool {
-        let (res, _) = eval_body(body, V3);
+    /// The cost counter at the writer's refusal of a collection's length, at tree version 3;
+    /// `None` for any other outcome
+    fn refused(body: &str) -> Option<u64> {
+        let (res, cost) = eval_body(body, V3);
         matches!(
             res.as_ref().map_err(innermost),
             Err(EvalError::SigmaSerializationError(
                 SigmaSerializationError::NotSupported(text)
             )) if text.contains("out of unsigned short range")
         )
+        .then_some(cost)
     }
 
     #[test]
@@ -1577,15 +1590,14 @@ mod long_collection_rows {
         }
     }
 
-    // the jars stop at 2,823: sigmastate adds each put's cost before the put, the refused one's
-    // included. Here the writer's costs reach the counter only when the write succeeded, so the
-    // cost of a `Global.serialize` refusal is not asserted in this module
+    // the jars stop at 2,823: sigmastate adds each put's cost before the put, the refused
+    // length's included (`putUShort` adds its 3 and then looks at the count)
     #[test]
     fn serialize_refuses_65536_items() {
         for (constant, row_len) in [(bytes as CollConst, 1076), (bools, 180), (ints, 1076)] {
             let body = block(constant, &serialize(&of_65536()));
             assert_eq!(body.len() / 2, row_len);
-            assert!(refused(&body), "{body}");
+            assert_eq!(refused(&body), Some(2823), "{row_len}");
         }
     }
 
@@ -1602,10 +1614,12 @@ mod long_collection_rows {
             let body = block(constant, &format!("b1{}", nested(&of_65535(constant))));
             let (res, c) = eval_body(&body, V3);
             assert_eq!((res.unwrap(), c), (Value::Int(len), cost), "{item_type}");
-            assert!(refused(&block(
-                constant,
-                &format!("b1{}", nested(&of_65536()))
-            )));
+            // the outer collection's length and the refused inner one's have been charged
+            assert_eq!(
+                refused(&block(constant, &format!("b1{}", nested(&of_65536())))),
+                Some(2846),
+                "{item_type}"
+            );
         }
     }
 
@@ -1655,7 +1669,10 @@ mod long_collection_rows {
             assert_eq!((size.len() / 2, write.len() / 2), (row_len, row_len + 4));
             let (res, c) = eval_body(&size, V3);
             assert_eq!((res.unwrap(), c), (Value::Int(len), cost), "{row_len}");
-            assert!(refused(&write), "{row_len}");
+            // the jars' refusal is 8 above the row that takes the size (fork PR 99's review
+            // rows `prod|*|ser`): the writer's start, less the size's own cost, and the
+            // refused length's 3
+            assert_eq!(refused(&write), Some(cost + 8), "{row_len}");
         }
     }
 

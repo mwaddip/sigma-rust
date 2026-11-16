@@ -314,10 +314,10 @@ impl SigmaSerializable for UnsignedBigInt {
         w: &mut W,
     ) -> crate::serialization::SigmaSerializeResult {
         let bytes = self.to_be_vec();
+        w.add_put_numeric_cost()?;
         w.put_u16(bytes.len() as u16)?;
-        w.add_put_numeric_cost();
+        w.add_put_chunk_cost(bytes.len())?;
         w.write_all(&bytes)?;
-        w.add_put_chunk_cost(bytes.len());
         Ok(())
     }
 

@@ -324,8 +324,8 @@ impl SigmaSerializable for ErgoBox {
             w,
         )?;
         self.transaction_id.sigma_serialize(w)?;
+        w.add_put_numeric_cost()?;
         w.put_u16(self.index)?;
-        w.add_put_numeric_cost();
         Ok(())
     }
     fn sigma_parse<R: SigmaByteRead>(r: &mut R) -> Result<Self, SigmaParsingError> {
@@ -446,9 +446,9 @@ pub fn serialize_box_with_indexed_digests<W: SigmaByteWrite>(
 ) -> SigmaSerializeResult {
     // reference implementation - https://github.com/ScorexFoundation/sigmastate-interpreter/blob/9b20cb110effd1987ff76699d637174a4b2fb441/sigmastate/src/main/scala/org/ergoplatform/ErgoBoxCandidate.scala#L95-L95
     box_value.sigma_serialize(w)?;
-    w.write_all(&ergo_tree_bytes[..])?;
     // ergoTree is pre-serialized to bytes and written as one block => PutChunkCost over its length.
-    w.add_put_chunk_cost(ergo_tree_bytes.len());
+    w.add_put_chunk_cost(ergo_tree_bytes.len())?;
+    w.write_all(&ergo_tree_bytes[..])?;
     w.put_u32(creation_height)?;
     // Scala writes creationHeight via the no-info `putUInt`, which delegates straight to the
     // underlying writer and is NOT metered (unlike putULong/putUByte) — so do not charge it.
@@ -456,8 +456,9 @@ pub fn serialize_box_with_indexed_digests<W: SigmaByteWrite>(
     let tokens: &[Token] = tokens.as_ref().map(BoundedVec::as_ref).unwrap_or(&[]);
     // Unwrap is safe since BoxTokens size is bounded to ErgoBox::MAX_TOKENS_COUNT
     #[allow(clippy::unwrap_used)]
-    w.put_u8(u8::try_from(tokens.len()).unwrap())?;
-    w.add_put_byte_cost();
+    let tokens_count = u8::try_from(tokens.len()).unwrap();
+    w.add_put_byte_cost()?;
+    w.put_u8(tokens_count)?;
 
     tokens.iter().try_for_each(|t| -> SigmaSerializeResult {
         match token_ids_in_tx {
@@ -475,17 +476,17 @@ pub fn serialize_box_with_indexed_digests<W: SigmaByteWrite>(
                 .unwrap(),
             )?),
             None => {
-                t.token_id.sigma_serialize(w)?;
                 // token id is one 32-byte block -- Scala `putBytes` => PutChunkCost(32); the
                 // indexed-digest arm above is Scala's no-info `putUInt`, which is unmetered
-                w.add_put_chunk_cost(32);
+                w.add_put_chunk_cost(32)?;
+                t.token_id.sigma_serialize(w)?;
                 Ok(())
             }
         }
         .and_then(|()| {
-            w.put_u64(t.amount.into())?;
             // amount is Scala `putULong` => PutUnsignedNumericCost(3)
-            w.add_put_numeric_cost();
+            w.add_put_numeric_cost()?;
+            w.put_u64(t.amount.into())?;
             Ok(())
         })
     })?;
@@ -687,8 +688,12 @@ mod tests {
         use crate::serialization::sigma_byte_writer::SigmaByteWriter;
         let ergo_tree_bytes = vec![0u8; 7];
         let mut buf = Vec::new();
-        let mut w = SigmaByteWriter::new(&mut buf, None);
-        w.enable_serialize_cost_tracking();
+        let cost = core::cell::Cell::new(0u64);
+        let sink = |c: u64| {
+            cost.set(cost.get() + c);
+            Ok(())
+        };
+        let mut w = SigmaByteWriter::with_cost_sink(&mut buf, None, &sink);
         serialize_box_with_indexed_digests(
             &BoxValue::SAFE_USER_MIN,
             ergo_tree_bytes.clone(),
@@ -701,10 +706,7 @@ mod tests {
         .unwrap();
         // value putULong 3 + ergoTree chunk (3 + len) + creationHeight (no-info putUInt => 0)
         //   + tokenCount byte 1 + registerCount byte 1. A re-added creationHeight charge => +3.
-        assert_eq!(
-            w.serialize_cost(),
-            3 + (3 + ergo_tree_bytes.len() as u64) + 1 + 1
-        );
+        assert_eq!(cost.get(), 3 + (3 + ergo_tree_bytes.len() as u64) + 1 + 1);
     }
 
     // Regression: a box parsed off the wire keeps its on-the-wire identity. Two boxes whose

@@ -75,8 +75,8 @@ impl SigmaSerializable for SigmaBoolean {
 
 impl SigmaSerializable for ProveDlog {
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
+        w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?;
         self.h.sigma_serialize(w)?;
-        w.add_put_chunk_cost(EcPoint::GROUP_SIZE);
         Ok(())
     }
 
@@ -88,14 +88,14 @@ impl SigmaSerializable for ProveDlog {
 
 impl SigmaSerializable for ProveDhTuple {
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
+        w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?;
         self.g.sigma_serialize(w)?;
-        w.add_put_chunk_cost(EcPoint::GROUP_SIZE);
+        w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?;
         self.h.sigma_serialize(w)?;
-        w.add_put_chunk_cost(EcPoint::GROUP_SIZE);
+        w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?;
         self.u.sigma_serialize(w)?;
-        w.add_put_chunk_cost(EcPoint::GROUP_SIZE);
+        w.add_put_chunk_cost(EcPoint::GROUP_SIZE)?;
         self.v.sigma_serialize(w)?;
-        w.add_put_chunk_cost(EcPoint::GROUP_SIZE);
         Ok(())
     }
 
