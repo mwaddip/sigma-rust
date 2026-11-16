@@ -280,6 +280,7 @@ mod cost_sink_tests {
         };
         let tokens = Some(vec![token].try_into().unwrap());
         let value = BoxValue::try_from(1_000_000u64).unwrap();
+        let body_tree = tree();
         vec![
             ("Boolean", data(Literal::Boolean(true)), vec![(1, 0)]),
             ("Byte", data(Literal::Byte(5)), vec![(1, 0)]),
@@ -446,7 +447,7 @@ mod cost_sink_tests {
                 Box::new(move |w| {
                     serialize_box_with_indexed_digests(
                         &value,
-                        vec![0x00, 0x08, 0xd3],
+                        &body_tree,
                         &tokens,
                         &NonMandatoryRegisters::empty(),
                         12345,
@@ -534,6 +535,40 @@ mod cost_sink_tests {
             );
             assert_eq!((calls.get(), buf.borrow().len()), (refused, written));
         }
+    }
+
+    // sigmastate writes a box's value, then serializes its tree and puts the tree's bytes (v6.0.6
+    // `ErgoBoxCandidate.scala:141-142`): a tree that cannot be written (its type variable's name
+    // is 86 malformed bytes, a text of 258) stops the box after the value's cost and its bytes
+    #[test]
+    fn a_box_whose_tree_is_not_written_has_written_its_value() {
+        let unwritable = alloc::format!("00d193b183006756{}0400", "ff".repeat(86));
+        let tree =
+            ErgoTree::sigma_parse_bytes(&base16::decode(unwritable.as_bytes()).unwrap()).unwrap();
+        assert!(tree.sigma_serialize_bytes().is_err());
+        let value = BoxValue::try_from(1_000_000u64).unwrap();
+        let buf = RefCell::new(Vec::new());
+        let seen = RefCell::new(Vec::new());
+        let sink = |cost: u64| {
+            seen.borrow_mut().push((cost, buf.borrow().len()));
+            Ok(())
+        };
+        let mut inner = Shared(&buf);
+        let mut w = SigmaByteWriter::with_cost_sink(&mut inner, None, &sink);
+        let res = serialize_box_with_indexed_digests(
+            &value,
+            &tree,
+            &None,
+            &NonMandatoryRegisters::empty(),
+            0,
+            None,
+            &mut w,
+        );
+        assert!(
+            matches!(&res, Err(SigmaSerializationError::NotSupported(text)) if text.contains("out of unsigned byte range")),
+            "{res:?}"
+        );
+        assert_eq!((seen.into_inner(), buf.borrow().len()), (vec![(3, 0)], 3));
     }
 
     // sigmastate's `putUShort` adds its cost and then refuses a count above 65535

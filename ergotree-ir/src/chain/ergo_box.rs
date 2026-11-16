@@ -313,10 +313,9 @@ impl ErgoBox {
 
 impl SigmaSerializable for ErgoBox {
     fn sigma_serialize<W: SigmaByteWrite>(&self, w: &mut W) -> SigmaSerializeResult {
-        let ergo_tree_bytes = self.ergo_tree.sigma_serialize_bytes()?;
         serialize_box_with_indexed_digests(
             &self.value,
-            ergo_tree_bytes,
+            &self.ergo_tree,
             &self.tokens,
             &self.additional_registers,
             self.creation_height,
@@ -393,7 +392,7 @@ impl ErgoBoxCandidate {
     ) -> SigmaSerializeResult {
         serialize_box_with_indexed_digests(
             &self.value,
-            self.ergo_tree.sigma_serialize_bytes()?,
+            &self.ergo_tree,
             &self.tokens,
             &self.additional_registers,
             self.creation_height,
@@ -437,7 +436,7 @@ impl From<ErgoBox> for ErgoBoxCandidate {
 /// (in this case only token index is saved)
 pub fn serialize_box_with_indexed_digests<W: SigmaByteWrite>(
     box_value: &BoxValue,
-    ergo_tree_bytes: Vec<u8>,
+    ergo_tree: &ErgoTree,
     tokens: &Option<BoxTokens>,
     additional_registers: &NonMandatoryRegisters,
     creation_height: u32,
@@ -446,7 +445,10 @@ pub fn serialize_box_with_indexed_digests<W: SigmaByteWrite>(
 ) -> SigmaSerializeResult {
     // reference implementation - https://github.com/ScorexFoundation/sigmastate-interpreter/blob/9b20cb110effd1987ff76699d637174a4b2fb441/sigmastate/src/main/scala/org/ergoplatform/ErgoBoxCandidate.scala#L95-L95
     box_value.sigma_serialize(w)?;
-    // ergoTree is pre-serialized to bytes and written as one block => PutChunkCost over its length.
+    // the tree is written apart, by a writer of its own, once the value has been written: a tree
+    // that cannot be written stops the box there (v6.0.6 `ErgoBoxCandidate.scala:141-142`)
+    let ergo_tree_bytes = ergo_tree.sigma_serialize_bytes()?;
+    // its bytes are put as one block => PutChunkCost over their length
     w.add_put_chunk_cost(ergo_tree_bytes.len())?;
     w.write_all(&ergo_tree_bytes[..])?;
     w.put_u32(creation_height)?;
@@ -681,12 +683,12 @@ mod tests {
 
     /// Regression: the box body must NOT charge serialize cost for `creationHeight` — Scala writes
     /// it via the no-info `putUInt` (unmetered). Charging it was a +3 base over-count on every box
-    /// (blessed `Global.serialize[Box]` minimal = 139). Raw ergoTree bytes exercise the body put
-    /// sequence without heavyweight box/ErgoTree construction.
+    /// (blessed `Global.serialize[Box]` minimal = 139).
     #[test]
     fn serialize_box_body_does_not_charge_creation_height() {
         use crate::serialization::sigma_byte_writer::SigmaByteWriter;
-        let ergo_tree_bytes = vec![0u8; 7];
+        let ergo_tree = ErgoTree::sigma_parse_bytes(&[0x00, 0x08, 0xd3]).unwrap();
+        let ergo_tree_bytes = ergo_tree.sigma_serialize_bytes().unwrap();
         let mut buf = Vec::new();
         let cost = core::cell::Cell::new(0u64);
         let sink = |c: u64| {
@@ -696,7 +698,7 @@ mod tests {
         let mut w = SigmaByteWriter::with_cost_sink(&mut buf, None, &sink);
         serialize_box_with_indexed_digests(
             &BoxValue::SAFE_USER_MIN,
-            ergo_tree_bytes.clone(),
+            &ergo_tree,
             &None,
             &NonMandatoryRegisters::empty(),
             12345,
