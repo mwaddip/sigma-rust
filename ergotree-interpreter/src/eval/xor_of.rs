@@ -1,9 +1,7 @@
-use alloc::format;
 use alloc::vec::Vec;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
-use ergotree_ir::types::stype::SType;
 
 use crate::eval::env::Env;
 use crate::eval::operand::{eval_to, OperandClass};
@@ -21,27 +19,16 @@ impl Evaluable for XorOf {
         let input_v = eval_to(&self.input, OperandClass::Coll, env, ctx)?;
         // the cost is over the collection's length, whatever its items; the booleans are the body's
         // (`trees.scala:238-243`)
-        // sigmastate's `xorOf` (`sigma/data/CSigmaDslBuilder.scala:116-132`) takes its 4.x reading
-        // while `VersionContext.isJitActivated` is false: below an ACTIVATED version of 2,
-        // whatever the tree's version, it is `conditions.toArray.distinct.length == 2`, true when
-        // the collection holds both a `true` and a `false`. From the activation on it is the
-        // exclusive or of the items, also for a tree of version 0 or 1
-        let below_the_activation = ctx.activated_script_version() < ErgoTreeVersion::V2;
         if let Value::Coll(coll) = &input_v {
             ctx.add_per_item_jit_cost(20, 5, 32, coll.len() as u32)?;
-            // the 4.x reading takes the collection's ARRAY, which is cast to `boolean[]`
-            // (`:130`): a collection of another item type is refused whatever it holds, an
-            // empty one and a tuple of booleans included. The reading from the activation on
-            // takes the items one by one and casts each
-            if below_the_activation && coll.elem_tpe() != SType::SBoolean {
-                return Err(EvalError::UnexpectedValue(format!(
-                    "xorOf: the array of a collection of {:?} is not an array of Boolean",
-                    coll.elem_tpe()
-                )));
-            }
         }
         let input_v_bools = input_v.try_extract_into::<Vec<bool>>()?;
-        if below_the_activation {
+        // sigmastate's `xorOf` (`sigma/data/CSigmaDslBuilder.scala:116-132`) takes its 4.x reading
+        // while `VersionContext.isJitActivated` is false: below an ACTIVATED version of 2,
+        // whatever the tree's version, it is `distinct.length == 2`, true when the collection
+        // holds both a `true` and a `false`. From the activation on it is the exclusive or of
+        // the items, also for a tree of version 0 or 1
+        if ctx.activated_script_version() < ErgoTreeVersion::V2 {
             let mut has_true = false;
             let mut has_false = false;
             for b in input_v_bools {
@@ -145,106 +132,11 @@ mod activation_rows {
 
     /// `xorOf` on sigma-state 6.0.7 at every pair of activated and tree version sigmastate can hold: below an
     /// activated version of 2 it is "the collection holds both values", from 2 on the exclusive or, whatever
-    /// the tree's version (the round's `measure/jvm-act*.txt`, rows `gate|XorOf|*`)
+    /// the tree's version (the round's `measure/jvm-act*.txt`, rows `gate|XorOf|*`). The rows `arr|XorOf|*`,
+    /// at activated versions 2 and 3: collections whose array is not `boolean[]` (a tuple of booleans, another
+    /// item type behind an untaken `if`, empty ones), which the reading from the activation on takes item by item
     #[rustfmt::skip]
     const ROWS: &[Row] = &[
-        ("gate|XorOf|tft|v0", "ff0d0305", 0, 0, "true", 30),
-        ("arr|XorOf|lie-empty-CollInt|v0", "ff9501000d03051000", 0, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollInt|v1", "ff9501000d03051000", 1, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollInt|v2", "ff9501000d03051000", 2, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollInt|v3", "ff9501000d03051000", 3, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollByte|v0", "ff9501000d03050e00", 0, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollByte|v1", "ff9501000d03050e00", 1, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollByte|v2", "ff9501000d03050e00", 2, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollByte|v3", "ff9501000d03050e00", 3, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollLong|v0", "ff9501000d03051100", 0, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollLong|v1", "ff9501000d03051100", 1, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollLong|v2", "ff9501000d03051100", 2, 0, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollLong|v3", "ff9501000d03051100", 3, 0, "ERR", 45),
-        ("arr|XorOf|empty-CollBool|v0", "ff0d00", 0, 0, "false", 30),
-        ("arr|XorOf|empty-CollBool|v1", "ff0d00", 1, 0, "false", 30),
-        ("arr|XorOf|empty-CollBool|v2", "ff0d00", 2, 0, "false", 30),
-        ("arr|XorOf|empty-CollBool|v3", "ff0d00", 3, 0, "false", 30),
-        ("arr|XorOf|Triple-tft|v0", "ff48010101010001", 0, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tft|v1", "ff48010101010001", 1, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tft|v2", "ff48010101010001", 2, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tft|v3", "ff48010101010001", 3, 0, "ERR", 30),
-        ("arr|XorOf|Triple-ttt|v0", "ff48010101010101", 0, 0, "ERR", 30),
-        ("arr|XorOf|Triple-ttt|v1", "ff48010101010101", 1, 0, "ERR", 30),
-        ("arr|XorOf|Triple-ttt|v2", "ff48010101010101", 2, 0, "ERR", 30),
-        ("arr|XorOf|Triple-ttt|v3", "ff48010101010101", 3, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tff|v0", "ff48010101010000", 0, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tff|v1", "ff48010101010000", 1, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tff|v2", "ff48010101010000", 2, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tff|v3", "ff48010101010000", 3, 0, "ERR", 30),
-        ("arr|XorOf|Triple-fff|v0", "ff48010101000000", 0, 0, "ERR", 30),
-        ("arr|XorOf|Triple-fff|v1", "ff48010101000000", 1, 0, "ERR", 30),
-        ("arr|XorOf|Triple-fff|v2", "ff48010101000000", 2, 0, "ERR", 30),
-        ("arr|XorOf|Triple-fff|v3", "ff48010101000000", 3, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tfInt|v0", "ff48010104010002", 0, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tfInt|v1", "ff48010104010002", 1, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tfInt|v2", "ff48010104010002", 2, 0, "ERR", 30),
-        ("arr|XorOf|Triple-tfInt|v3", "ff48010104010002", 3, 0, "ERR", 30),
-        ("arr|XorOf|lie-CollInt|v0", "ff9501000d03051003020406", 0, 0, "ERR", 45),
-        ("arr|XorOf|lie-CollInt|v1", "ff9501000d03051003020406", 1, 0, "ERR", 45),
-        ("arr|XorOf|lie-CollInt|v2", "ff9501000d03051003020406", 2, 0, "ERR", 45),
-        ("arr|XorOf|lie-CollInt|v3", "ff9501000d03051003020406", 3, 0, "ERR", 45),
-        ("arr|XorOf|Coll-1-true|v0", "ff0d0101", 0, 0, "false", 30),
-        ("arr|XorOf|Coll-1-true|v1", "ff0d0101", 1, 0, "false", 30),
-        ("arr|XorOf|Coll-1-true|v2", "ff0d0101", 2, 0, "false", 30),
-        ("arr|XorOf|Coll-1-true|v3", "ff0d0101", 3, 0, "false", 30),
-        ("arr|XorOf|Coll-1-false|v0", "ff0d0100", 0, 0, "false", 30),
-        ("arr|XorOf|Coll-1-false|v1", "ff0d0100", 1, 0, "false", 30),
-        ("arr|XorOf|Coll-1-false|v2", "ff0d0100", 2, 0, "false", 30),
-        ("arr|XorOf|Coll-1-false|v3", "ff0d0100", 3, 0, "false", 30),
-        ("arr|XorOf|lie-empty-CollInt|v0", "ff9501000d03051000", 0, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollInt|v1", "ff9501000d03051000", 1, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollInt|v2", "ff9501000d03051000", 2, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollInt|v3", "ff9501000d03051000", 3, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollByte|v0", "ff9501000d03050e00", 0, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollByte|v1", "ff9501000d03050e00", 1, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollByte|v2", "ff9501000d03050e00", 2, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollByte|v3", "ff9501000d03050e00", 3, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollLong|v0", "ff9501000d03051100", 0, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollLong|v1", "ff9501000d03051100", 1, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollLong|v2", "ff9501000d03051100", 2, 1, "ERR", 45),
-        ("arr|XorOf|lie-empty-CollLong|v3", "ff9501000d03051100", 3, 1, "ERR", 45),
-        ("arr|XorOf|empty-CollBool|v0", "ff0d00", 0, 1, "false", 30),
-        ("arr|XorOf|empty-CollBool|v1", "ff0d00", 1, 1, "false", 30),
-        ("arr|XorOf|empty-CollBool|v2", "ff0d00", 2, 1, "false", 30),
-        ("arr|XorOf|empty-CollBool|v3", "ff0d00", 3, 1, "false", 30),
-        ("arr|XorOf|Triple-tft|v0", "ff48010101010001", 0, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tft|v1", "ff48010101010001", 1, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tft|v2", "ff48010101010001", 2, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tft|v3", "ff48010101010001", 3, 1, "ERR", 30),
-        ("arr|XorOf|Triple-ttt|v0", "ff48010101010101", 0, 1, "ERR", 30),
-        ("arr|XorOf|Triple-ttt|v1", "ff48010101010101", 1, 1, "ERR", 30),
-        ("arr|XorOf|Triple-ttt|v2", "ff48010101010101", 2, 1, "ERR", 30),
-        ("arr|XorOf|Triple-ttt|v3", "ff48010101010101", 3, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tff|v0", "ff48010101010000", 0, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tff|v1", "ff48010101010000", 1, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tff|v2", "ff48010101010000", 2, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tff|v3", "ff48010101010000", 3, 1, "ERR", 30),
-        ("arr|XorOf|Triple-fff|v0", "ff48010101000000", 0, 1, "ERR", 30),
-        ("arr|XorOf|Triple-fff|v1", "ff48010101000000", 1, 1, "ERR", 30),
-        ("arr|XorOf|Triple-fff|v2", "ff48010101000000", 2, 1, "ERR", 30),
-        ("arr|XorOf|Triple-fff|v3", "ff48010101000000", 3, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tfInt|v0", "ff48010104010002", 0, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tfInt|v1", "ff48010104010002", 1, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tfInt|v2", "ff48010104010002", 2, 1, "ERR", 30),
-        ("arr|XorOf|Triple-tfInt|v3", "ff48010104010002", 3, 1, "ERR", 30),
-        ("arr|XorOf|lie-CollInt|v0", "ff9501000d03051003020406", 0, 1, "ERR", 45),
-        ("arr|XorOf|lie-CollInt|v1", "ff9501000d03051003020406", 1, 1, "ERR", 45),
-        ("arr|XorOf|lie-CollInt|v2", "ff9501000d03051003020406", 2, 1, "ERR", 45),
-        ("arr|XorOf|lie-CollInt|v3", "ff9501000d03051003020406", 3, 1, "ERR", 45),
-        ("arr|XorOf|Coll-1-true|v0", "ff0d0101", 0, 1, "false", 30),
-        ("arr|XorOf|Coll-1-true|v1", "ff0d0101", 1, 1, "false", 30),
-        ("arr|XorOf|Coll-1-true|v2", "ff0d0101", 2, 1, "false", 30),
-        ("arr|XorOf|Coll-1-true|v3", "ff0d0101", 3, 1, "false", 30),
-        ("arr|XorOf|Coll-1-false|v0", "ff0d0100", 0, 1, "false", 30),
-        ("arr|XorOf|Coll-1-false|v1", "ff0d0100", 1, 1, "false", 30),
-        ("arr|XorOf|Coll-1-false|v2", "ff0d0100", 2, 1, "false", 30),
-        ("arr|XorOf|Coll-1-false|v3", "ff0d0100", 3, 1, "false", 30),
         ("arr|XorOf|lie-empty-CollInt|v0", "ff9501000d03051000", 0, 2, "false", 45),
         ("arr|XorOf|lie-empty-CollInt|v1", "ff9501000d03051000", 1, 2, "false", 45),
         ("arr|XorOf|lie-empty-CollInt|v2", "ff9501000d03051000", 2, 2, "false", 45),
@@ -329,6 +221,7 @@ mod activation_rows {
         ("arr|XorOf|Coll-1-false|v1", "ff0d0100", 1, 3, "false", 30),
         ("arr|XorOf|Coll-1-false|v2", "ff0d0100", 2, 3, "false", 30),
         ("arr|XorOf|Coll-1-false|v3", "ff0d0100", 3, 3, "false", 30),
+        ("gate|XorOf|tft|v0", "ff0d0305", 0, 0, "true", 30),
         ("gate|XorOf|tft|v1", "ff0d0305", 1, 0, "true", 30),
         ("gate|XorOf|tt|v0", "ff0d0203", 0, 0, "false", 30),
         ("gate|XorOf|tt|v1", "ff0d0203", 1, 0, "false", 30),
