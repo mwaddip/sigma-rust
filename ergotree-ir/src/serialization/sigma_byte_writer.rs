@@ -182,6 +182,7 @@ mod cost_sink_tests {
     use crate::mir::tuple::Tuple;
     use crate::mir::value::CollKind;
     use crate::mir::value::NativeColl;
+    use crate::mir::value::Value;
     use crate::serialization::data::DataSerializer;
     use crate::serialization::op_code::OpCode;
     use crate::serialization::SigmaSerializable;
@@ -473,6 +474,93 @@ mod cost_sink_tests {
                 vec![(3, 0), (6, 3), (1, 7), (1, 8), (35, 9), (3, 41)],
             ),
         ]
+    }
+
+    /// Data, its type, and each cost its write adds with the bytes written before it
+    type ValueRow = (Literal, SType, Vec<(u64, usize)>);
+
+    fn value(x: Literal, tpe: SType) -> Put {
+        let v = Value::from(x);
+        Box::new(move |w| DataSerializer::sigma_serialize_value(&v, &tpe, w))
+    }
+
+    // the writer of a runtime value adds each cost where the data writer adds it: every arm of
+    // its own that puts (a box and a header go to the writers of the table above)
+    #[test]
+    fn a_values_costs_are_added_before_its_puts() {
+        let coll = |t: SType| SType::SColl(t.into());
+        let rows: Vec<ValueRow> = vec![
+            (Literal::Boolean(true), SType::SBoolean, vec![(1, 0)]),
+            (Literal::Byte(5), SType::SByte, vec![(1, 0)]),
+            (Literal::Short(1), SType::SShort, vec![(3, 0)]),
+            (Literal::Int(1), SType::SInt, vec![(3, 0)]),
+            (Literal::Long(1), SType::SLong, vec![(3, 0)]),
+            (Literal::String("abc".into()), SType::SString, vec![(6, 1)]),
+            (
+                Literal::BigInt(BigInt256::from(1i32)),
+                SType::SBigInt,
+                vec![(3, 0), (4, 1)],
+            ),
+            (
+                Literal::UnsignedBigInt(UnsignedBigInt::from(1u32)),
+                SType::SUnsignedBigInt,
+                vec![(3, 0), (4, 1)],
+            ),
+            (
+                Literal::GroupElement(Arc::new(generator())),
+                SType::SGroupElement,
+                vec![(36, 0)],
+            ),
+            (
+                Literal::SigmaProp(Box::new(SigmaProp::new(dlog()))),
+                SType::SSigmaProp,
+                vec![(1, 0), (36, 1)],
+            ),
+            (
+                Literal::AvlTree(Box::new(AvlTreeData {
+                    digest: vec![1; 33],
+                    tree_flags: AvlTreeFlags::new(true, true, true),
+                    key_length: 32,
+                    value_length_opt: None,
+                })),
+                SType::SAvlTree,
+                vec![(36, 0), (1, 33), (1, 35)],
+            ),
+            (
+                Literal::Coll(CollKind::NativeColl(NativeColl::CollByte(
+                    vec![1i8, 2, 3].into(),
+                ))),
+                coll(SType::SByte),
+                vec![(3, 0), (6, 1)],
+            ),
+            (
+                Literal::Coll(CollKind::WrappedColl {
+                    elem_tpe: SType::SBoolean,
+                    items: vec![Literal::Boolean(true); 3].into(),
+                }),
+                coll(SType::SBoolean),
+                vec![(3, 0), (6, 1)],
+            ),
+            (
+                ints(&[1, 2]),
+                coll(SType::SInt),
+                vec![(3, 0), (3, 1), (3, 2)],
+            ),
+            (
+                Literal::Opt(Some(Box::new(Literal::Int(1)))),
+                SType::SOption(SType::SInt.into()),
+                vec![(1, 0), (3, 1)],
+            ),
+            (
+                Literal::Tup([Literal::Int(1), Literal::Long(1)].into()),
+                SType::STuple(STuple::pair(SType::SInt, SType::SLong).into()),
+                vec![(3, 0), (3, 1)],
+            ),
+        ];
+        for (lit, tpe, expected) in rows {
+            assert_eq!(costs(&data(lit.clone())).0, expected, "{tpe:?}");
+            assert_eq!(costs(&value(lit, tpe.clone())).0, expected, "{tpe:?}");
+        }
     }
 
     #[test]

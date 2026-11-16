@@ -3,7 +3,6 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 
 use ergo_chain_types::autolykos_pow_scheme::{decode_compact_bits, encode_compact_bits};
-use ergotree_ir::mir::constant::literal_of_type;
 use ergotree_ir::serialization::sigma_byte_writer::SigmaByteWrite;
 use ergotree_ir::unsignedbigint256::UnsignedBigInt;
 use ergotree_ir::{
@@ -179,28 +178,30 @@ pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
     // (`DataSerializer.serialize(value, mc.args(0).tpe, w)`, v6.0.6 `methods.scala:1982`)
     let missing = || EvalError::NotFound("serialize: missing first arg".into());
     let arg_tpe = mc.args.first().ok_or_else(missing)?.tpe();
-    let arg = literal_of_type(args.first().ok_or_else(missing)?.to_static(), &arg_tpe)
-        .map_err(EvalError::UnexpectedValue)?;
+    let arg = args.first().ok_or_else(missing)?;
 
     // each put's cost goes to the evaluator before the put, and the write stops at the put that
     // crosses the cost limit (`addFixedCostCallback`, `addPerItemCostCallback`,
-    // `methods.scala:1971-1980`)
+    // `methods.scala:1971-1980`). The value is written as it is walked: a value that holds one
+    // collection many times over is larger written than the cost limit lets anything be
     let mut buf = vec![];
     let sink = |cost: u64| ctx.add_jit_cost(cost);
     let mut writer = SigmaByteWriter::with_cost_sink(&mut buf, None, &sink);
     writer
         .with_tree_version(ctx.tree_version(), |writer| {
-            DataSerializer::sigma_serialize(&arg, writer)
+            DataSerializer::sigma_serialize_value(arg, &arg_tpe, writer)
         })
         .map_err(serialize_error)?;
     Ok(Value::from(buf))
 };
 
 /// A writer's error as the evaluator's: a cost limit the writer's sink met is the limit
-/// `Context::add_jit_cost` reports anywhere else
+/// `Context::add_jit_cost` reports anywhere else, and a value that is not of its static type's
+/// class is an unexpected value
 fn serialize_error(e: SigmaSerializationError) -> EvalError {
     match e {
         SigmaSerializationError::CostLimitExceeded(limit) => limit.into(),
+        SigmaSerializationError::UnexpectedValue(e) => EvalError::UnexpectedValue(e.0),
         other => other.into(),
     }
 }
@@ -359,10 +360,23 @@ mod tests {
             3,
         )
         .unwrap();
-        // the value as data of the requested type: a tuple of other than two items is a
-        // collection of `Any` at evaluation
+        // the value as data of the requested type, through its bytes: a tuple of other than two
+        // items is a collection of `Any` at evaluation
+        use super::{SigmaByteRead, SigmaByteWrite};
+        let mut bytes = vec![];
+        let mut w = super::SigmaByteWriter::new(&mut bytes, None);
+        w.with_tree_version(ErgoTreeVersion::V3, |w| {
+            super::DataSerializer::sigma_serialize_value(&value, &return_type, w)
+        })
+        .unwrap();
+        let mut r = super::sigma_byte_reader::from_bytes(&bytes);
+        let v = r
+            .with_tree_version(ErgoTreeVersion::V3, |r| {
+                super::DataSerializer::sigma_parse(&return_type, r)
+            })
+            .unwrap();
         Constant {
-            v: super::literal_of_type(value, &return_type).unwrap(),
+            v,
             tpe: return_type,
         }
     }

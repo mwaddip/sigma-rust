@@ -2935,16 +2935,18 @@ mod digest_collection {
             let (e, cost) = eval_body_err(&serialize(&t));
             assert!(matches!(e, EvalError::UnexpectedValue(_)), "{c}: {e:?}");
             assert_eq!(cost, 73, "{c}");
-            // inside a collection or a pair it is refused too. The cost counter there is not
-            // pinned: sigmastate has charged for what it wrote before the tree
-            for body in [
-                serialize(&coll_of_trees(&[&t])),
-                serialize(&coll_of_trees(&[&tree(), &t])),
-                serialize(&format!("8602{t}0402")),
-                serialize(&format!("86020402{t}")),
+            // inside a collection or a pair it is refused too, and what was written before the
+            // tree has been charged: the collection's length (3), the tree written before it
+            // (38), the pair's first item (3)
+            for (body, cost) in [
+                (serialize(&coll_of_trees(&[&t])), 96),
+                (serialize(&coll_of_trees(&[&tree(), &t])), 139),
+                (serialize(&format!("8602{t}0402")), 93),
+                (serialize(&format!("86020402{t}")), 96),
             ] {
-                let (e, _) = eval_body_err(&body);
+                let (e, stopped_at) = eval_body_err(&body);
                 assert!(matches!(e, EvalError::UnexpectedValue(_)), "{body}: {e:?}");
+                assert_eq!(stopped_at, cost, "{body}");
             }
         }
     }
