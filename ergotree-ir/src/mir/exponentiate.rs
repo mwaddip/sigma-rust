@@ -37,9 +37,11 @@ impl Exponentiate {
         }
     }
 
-    /// Type
+    /// Type: `GroupElement`, whatever the operands' types are. sigmastate's is that constant
+    /// (`NotReadyValueGroupElement`, v6.0.6 `values.scala:755-757`, mixed in at `trees.scala:1028-1031`),
+    /// and its parser builds the node over operands of any type, so the operands' types are not read here.
     pub fn tpe(&self) -> SType {
-        self.left.tpe()
+        SType::SGroupElement
     }
 }
 
