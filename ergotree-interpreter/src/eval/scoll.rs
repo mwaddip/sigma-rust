@@ -4,7 +4,6 @@ use crate::eval::LambdaInvoker;
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use ergotree_ir::ergo_tree::ErgoTreeVersion;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractFromError;
 use ergotree_ir::mir::constant::TryExtractInto;
@@ -195,18 +194,14 @@ pub(crate) static ZIP_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             arg_1
         )));
     };
-    // `pairColl` (v6.0.7 `CollsOverArrays.scala:183-203`): from an activated script version of 2
-    // a `PairOfCols` of both sides, the longer sliced to the shorter's length, which keeps its
-    // class (`:184-195`); below it of both sides as they are, of whatever lengths (`:196-202`)
+    // a `PairOfCols` of both sides as they are, the longer sliced to the shorter's length, which
+    // keeps its class (`pairColl`, v6.0.7 `CollsOverArrays.scala:183-196`)
     fn shorten(side: CollValue<'_>, n: usize) -> Result<CollValue<'_>, EvalError> {
         if side.len() > n {
             Ok(side.rebuild_like(side.as_vec().into_iter().take(n).collect())?)
         } else {
             Ok(side)
         }
-    }
-    if ctx.activated_script_version() < ErgoTreeVersion::V2 {
-        return Ok(Value::Coll(CollValue::pairs(ls, rs)));
     }
     let n = ls.len().min(rs.len());
     Ok(Value::Coll(CollValue::pairs(
@@ -275,14 +270,15 @@ pub(crate) static PATCH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
 };
 
 pub(crate) static UPDATED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
-    let receiver = match obj {
-        Value::Coll(coll) => Ok(coll),
+    let (normalized_input_vals, receiver) = match obj {
+        Value::Coll(coll) => Ok((coll.as_vec(), coll)),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected obj to be Value::Coll, got: {0:?}",
             obj
         ))),
     }?;
-    ctx.add_per_item_jit_cost(20, 1, 10, receiver.len() as u32)?;
+    let n = normalized_input_vals.len() as u32;
+    ctx.add_per_item_jit_cost(20, 1, 10, n)?;
     let target_index_val = args
         .first()
         .cloned()
@@ -292,12 +288,20 @@ pub(crate) static UPDATED_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         .cloned()
         .ok_or_else(|| EvalError::NotFound("updated: missing second arg (update)".to_string()))?;
 
-    let target_index = target_index_val.try_extract_into::<i32>()?;
-    Ok(Value::Coll(super::coll_shape::updated(
-        &receiver,
-        target_index,
-        update_val,
-    )?))
+    let target_index_usize = target_index_val.clone().try_extract_into::<i32>()? as usize;
+    let mut res = normalized_input_vals;
+
+    match res.get_mut(target_index_usize) {
+        Some(elem) => {
+            *elem = update_val;
+            // the receiver's class (`builder.fromArray` inside the receiver)
+            Ok(Value::Coll(receiver.rebuild_like(res)?))
+        }
+        None => Err(EvalError::UnexpectedValue(format!(
+            "updated: target index out of bounds, got: {:?}",
+            target_index_val
+        ))),
+    }
 };
 
 pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
@@ -351,10 +355,10 @@ pub(crate) static UPDATE_MANY_EVAL_FN: EvalFn =
         // ones that array would not take (SANTA `Tuple.non_pair_value_ops` T23, U3,
         // `Coll.reference_store_ops`)
         Ok(Value::Coll(match &receiver {
-            // a `PairOfCols` clones each side's WHOLE array, checks an index against the shorter
-            // side, stores each value's halves and rebuilds each side with `fromArray` at an
-            // abstract type (v6.0.7 `CollsOverArrays.scala:436-448`; SANTA
-            // `Coll.pair_shape_restored` Y8): sides of unequal length stay as long as they were
+            // a `PairOfCols` clones each side's array, checks each index, stores each value's
+            // halves there, where a value that is no pair is refused, and rebuilds each side with
+            // `fromArray` at an abstract type (v6.0.7 `CollsOverArrays.scala:436-448`; SANTA
+            // `Coll.pair_shape_restored` Y8)
             CollValue::Pairs { ls, rs } => {
                 let (mut l_items, mut r_items) = (ls.as_vec(), rs.as_vec());
                 for (pos, update) in indexes_usize.iter().zip(updates_val) {

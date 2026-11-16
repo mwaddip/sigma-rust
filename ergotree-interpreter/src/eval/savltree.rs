@@ -19,7 +19,6 @@ use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 
-use super::coll_shape::{walked_item, walked_len};
 use super::Context;
 use super::EvalError;
 use super::EvalFn;
@@ -45,28 +44,12 @@ fn tree_height(avl_tree_data: &AvlTreeData) -> u32 {
     avl_tree_data.digest.last().copied().unwrap_or(0) as u32
 }
 
-/// The items of a keys argument, which the call has checked to be a collection. sigmastate
-/// reads such an argument item by item, each where it uses it (`remove_eval` loops over
-/// `keys.length` and reads `keys(i)`, `CErgoTreeEvaluator.scala:230-241`), so nothing is cast
-/// here.
+/// The items of a keys or entries argument, which the call has checked to be a collection.
+/// sigmastate reads such an argument item by item, each where it uses it
+/// (`CErgoTreeEvaluator.scala:78-241`), so nothing is cast here.
 fn coll_items(v: Value<'_>) -> Result<Vec<Value<'_>>, EvalError> {
     match v {
         Value::Coll(coll) => Ok(coll.as_vec()),
-        _ => Err(EvalError::UnexpectedValue(format!(
-            "expected a collection, found {v:?}"
-        ))),
-    }
-}
-
-/// A keys or entries argument that sigmastate WALKS: `keys.map` in `getMany_eval`,
-/// `entries.forall` in `insert_eval`, `update_eval` and `insertOrUpdate_eval`
-/// (`CErgoTreeEvaluator.scala:118`, `:140`, `:178`, `:209`). The walk's length is
-/// [`walked_len`] and each item is read with [`walked_item`] before anything is done with it,
-/// so over a collection of pairs with a longer left side (a `zip` below an activated script
-/// version of 2) it fails where the right side ends
-fn walked_coll(v: Value<'_>) -> Result<CollValue<'_>, EvalError> {
-    match v {
-        Value::Coll(coll) => Ok(coll),
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected a collection, found {v:?}"
         ))),
@@ -257,7 +240,7 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let tree = obj.try_extract_into::<AvlTreeValue>()?;
 
     let keys =
-        walked_coll(args.first().cloned().ok_or_else(|| {
+        coll_items(args.first().cloned().ok_or_else(|| {
             EvalError::AvlTree("eval is missing first arg (entries)".to_string())
         })?)?;
     let proof = args
@@ -277,15 +260,14 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // construction charge are not construction failures — they
         // propagate.
         Err(EvalError::AvlTree(_)) => {
-            return if walked_len(&keys) == 0 {
+            return if keys.is_empty() {
                 Ok(Value::Coll(CollValue::Generic {
                     elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
                     items: Arc::new([]),
                 }))
             } else {
-                let key = walked_item(&keys, 0)?;
                 ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-                bytes_of(key)?;
+                bytes_of(keys[0].clone())?;
                 Err(EvalError::AvlTree(format!(
                     "Tree proof is incorrect {:?}",
                     avl_tree_data
@@ -295,9 +277,9 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         Err(e) => return Err(e),
     };
     let height = tree_height(&avl_tree_data);
-    let res = (0..walked_len(&keys))
-        .map(|i| {
-            let key = walked_item(&keys, i)?;
+    let res = keys
+        .into_iter()
+        .map(|key| {
             // Per key, the cost of a tree lookup is O(treeHeight):
             // `LookupAvlTree_Info` = PerItemCost(40, 10, 1) per height item
             // (Scala `getMany_eval`).
@@ -335,7 +317,7 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     }
 
     let entries =
-        walked_coll(args.first().cloned().ok_or_else(|| {
+        coll_items(args.first().cloned().ok_or_else(|| {
             EvalError::AvlTree("eval is missing first arg (entries)".to_string())
         })?)?;
 
@@ -357,10 +339,10 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // Cost-limit errors from the construction charge are not
         // construction failures — they propagate.
         Err(EvalError::AvlTree(_)) => {
-            if walked_len(&entries) == 0 {
+            if entries.is_empty() {
                 return Ok(Value::Opt(None));
             }
-            let (key, value) = entry_of(walked_item(&entries, 0)?)?;
+            let (key, value) = entry_of(entries[0].clone())?;
             let n_items = tree_height(&avl_tree_data).max(1);
             ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
             bytes_of(key)?;
@@ -379,8 +361,8 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     // When the tree is empty we still need to add the insert cost (Scala
     // `insert_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
     let n_items = tree_height(&avl_tree_data).max(1);
-    for i in 0..walked_len(&entries) {
-        let (key, value) = entry_of(walked_item(&entries, i)?)?;
+    for entry in entries {
+        let (key, value) = entry_of(entry)?;
         // The cost of a tree insert is O(treeHeight): `InsertIntoAvlTree_Info`
         // = PerItemCost(40, 10, 1) per height item.
         ctx.add_per_item_jit_cost(40, 10, 1, n_items)?;
@@ -529,7 +511,7 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     }
 
     let entries =
-        walked_coll(args.first().cloned().ok_or_else(|| {
+        coll_items(args.first().cloned().ok_or_else(|| {
             EvalError::AvlTree("eval is missing first arg (entries)".to_string())
         })?)?;
 
@@ -550,8 +532,8 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // that charge. Cost-limit errors from the construction charge are
         // not construction failures — they propagate.
         Err(EvalError::AvlTree(_)) => {
-            if walked_len(&entries) != 0 {
-                let (key, value) = entry_of(walked_item(&entries, 0)?)?;
+            if !entries.is_empty() {
+                let (key, value) = entry_of(entries[0].clone())?;
                 let n_items = tree_height(&avl_tree_data).max(1);
                 ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
                 bytes_of(key)?;
@@ -564,8 +546,8 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     // When the tree is empty we still need to add the update cost (Scala
     // `update_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
     let n_items = tree_height(&avl_tree_data).max(1);
-    for i in 0..walked_len(&entries) {
-        let (key, value) = entry_of(walked_item(&entries, i)?)?;
+    for entry in entries {
+        let (key, value) = entry_of(entry)?;
         // The cost of a tree update is O(treeHeight): `UpdateAvlTree_Info`
         // = PerItemCost(120, 20, 1) per height item.
         ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
@@ -599,7 +581,7 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
     }
 
     let entries =
-        walked_coll(args.first().cloned().ok_or_else(|| {
+        coll_items(args.first().cloned().ok_or_else(|| {
             EvalError::AvlTree("eval is missing first arg (entries)".to_string())
         })?)?;
 
@@ -621,8 +603,8 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         // that charge. Cost-limit errors from the construction charge are not
         // construction failures — they propagate.
         Err(EvalError::AvlTree(_)) => {
-            if walked_len(&entries) != 0 {
-                let (key, value) = entry_of(walked_item(&entries, 0)?)?;
+            if !entries.is_empty() {
+                let (key, value) = entry_of(entries[0].clone())?;
                 let n_items = tree_height(&avl_tree_data).max(1);
                 ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;
                 bytes_of(key)?;
@@ -635,8 +617,8 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
     // When the tree is empty we still need to add the insert cost (Scala
     // `insertOrUpdate_eval`: `nItems = Math.max(bv.treeHeight, 1)`).
     let n_items = tree_height(&avl_tree_data).max(1);
-    for i in 0..walked_len(&entries) {
-        let (key, value) = entry_of(walked_item(&entries, i)?)?;
+    for entry in entries {
+        let (key, value) = entry_of(entry)?;
         // Per entry, Scala `insertOrUpdate_eval` charges `UpdateAvlTree_Info`
         // = PerItemCost(120, 20, 1) per height item.
         ctx.add_per_item_jit_cost(120, 20, 1, n_items)?;

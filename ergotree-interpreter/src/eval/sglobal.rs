@@ -36,8 +36,7 @@ pub(crate) static XOR_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, args| {
         .ok_or_else(|| EvalError::NotFound("xor: missing right arg".to_string()))?;
 
     // `xor_eval` is `Xor.xorWithCosting(ls, rs)` on its two arguments in their order (v6.0.6
-    // `methods.scala:1917-1920`): the node's cost and its reading of its operands. The order
-    // shows below an activated script version of 2, where the walk is over the left operand
+    // `methods.scala:1917-1920`): the node's cost and its reading of its operands
     super::xor::xor_with_costing(ctx, &left_v, &right_v)
 };
 
