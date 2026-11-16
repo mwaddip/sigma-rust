@@ -150,9 +150,8 @@ fn to_misc_err<T: core::fmt::Debug>(e: T) -> EvalError {
 enum NewValue {
     /// A constant
     Constant(Constant),
-    /// A constant on the JVM that its writer refuses: it holds a `BigInt` outside 256 bits, an
-    /// `AvlTree` whose digest is not of bytes, or an array of objects with an item of another
-    /// class than its item type. The text is the refusal
+    /// A constant on the JVM that its writer refuses: it holds a `BigInt` outside 256 bits or
+    /// an `AvlTree` whose digest is not of bytes. The text is the refusal
     Unwritable(String),
 }
 
@@ -205,8 +204,7 @@ fn written_values(
 
 /// The value with every part that only sigmastate's WRITER refuses replaced by a stand-in the
 /// lift accepts: a `BigInt` outside the 256-bit range by zero, an `AvlTree` whose digest is not
-/// of bytes by the same tree with an empty digest of bytes, a collection over an array of
-/// objects by the same one without its items of another class. What the conversion to a constant
+/// of bytes by the same tree with an empty digest of bytes. What the conversion to a constant
 /// still refuses then, the writer was not the one to refuse. The stand-in is never written:
 /// such a value is [`NewValue::Unwritable`] either way
 fn with_writable_parts(v: Value<'static>) -> Value<'static> {
@@ -233,17 +231,6 @@ fn coll_with_writable_parts(coll: CollValue<'static>) -> CollValue<'static> {
             elem_tpe,
             items: items.iter().cloned().map(with_writable_parts).collect(),
         },
-        // an array of objects holds its items as a generic collection does; an item of
-        // another class than the item type is what the writer's cast refuses, and is left out
-        CollValue::Objects { elem_tpe, items } => {
-            let items: Vec<_> = items
-                .iter()
-                .filter(|v| CollValue::from_array(elem_tpe.clone(), vec![(*v).clone()]).is_ok())
-                .cloned()
-                .map(with_writable_parts)
-                .collect();
-            CollValue::objects(elem_tpe, items)
-        }
         CollValue::Pairs { ls, rs } => CollValue::Pairs {
             ls: Arc::new(coll_with_writable_parts((*ls).clone())),
             rs: Arc::new(coll_with_writable_parts((*rs).clone())),
@@ -474,40 +461,6 @@ mod tests {
         let mut without_size = template(0x0c);
         without_size.remove(1);
         assert_eq!(subst(0x0c, 1).unwrap(), without_size);
-    }
-
-    #[test]
-    fn an_array_of_objects_with_a_foreign_item_is_only_the_writers_to_refuse() {
-        // `Coll[BigInt]` over an array of objects holding an `Int`: no constant as it is, a
-        // constant once the foreign item is left out, so the lift takes it and the writer
-        // refuses it where it is written
-        let mixed = Value::Coll(CollValue::objects(
-            SType::SBigInt,
-            vec![Value::BigInt(num_bigint::BigInt::from(7)), Value::Int(1)],
-        ));
-        assert!(Constant::try_from(mixed.clone()).is_err());
-        match with_writable_parts(mixed) {
-            Value::Coll(CollValue::Objects { elem_tpe, items }) => {
-                assert_eq!(elem_tpe, SType::SBigInt);
-                assert_eq!(items[..], [Value::BigInt(num_bigint::BigInt::from(7))]);
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_collection_over_an_array_of_objects_gets_its_stand_ins() {
-        // the 4.x `append`'s result holds its items as a generic collection does, so a `BigInt`
-        // outside 256 bits inside one is replaced for the lift's test like any other
-        let wide = Value::BigInt(num_bigint::BigInt::from(1) << 300);
-        let coll = CollValue::objects(SType::SBigInt, vec![wide]);
-        match with_writable_parts(Value::Coll(coll)) {
-            Value::Coll(CollValue::Objects { elem_tpe, items }) => {
-                assert_eq!(elem_tpe, SType::SBigInt);
-                assert_eq!(items[..], [Value::BigInt(num_bigint::BigInt::from(0))]);
-            }
-            other => panic!("{other:?}"),
-        }
     }
 
     #[test]

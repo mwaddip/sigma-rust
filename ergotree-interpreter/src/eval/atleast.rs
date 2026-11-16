@@ -21,11 +21,9 @@ use crate::eval::Evaluable;
 /// The propositions of `AtLeast`'s input. sigmastate casts the collection's backing array to
 /// `SigmaProp[]` (`toSigmaTrees(props.toArray)`, v6.0.6 `CSigmaDslBuilder.scala:105`), which only
 /// a collection built at the item type `SigmaProp` has: a tuple of propositions, a `Coll[Any]`
-/// over `Object[]`, throws there, empty or not (SANTA's tuple-values reply, A4). So does a
-/// `Coll[SigmaProp]` over an array of objects ([`CollValue::Objects`]: the 4.x `++` of two
-/// collections of propositions, a `slice` or a `filter` of it), whatever it holds
+/// over `Object[]`, throws there, empty or not (SANTA's tuple-values reply, A4)
 fn sigma_props(coll: &CollValue<'_>) -> Result<Vec<SigmaBoolean>, EvalError> {
-    if coll.elem_tpe() != SType::SSigmaProp || matches!(coll, CollValue::Objects { .. }) {
+    if coll.elem_tpe() != SType::SSigmaProp {
         return Err(EvalError::UnexpectedValue(format!(
             "Atleast: a collection of {:?} is not an array of SigmaProp",
             coll.elem_tpe()
