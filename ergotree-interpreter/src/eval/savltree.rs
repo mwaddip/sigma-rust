@@ -17,6 +17,7 @@ use ergotree_ir::mir::avl_tree_data::AvlTreeFlags;
 use ergotree_ir::mir::avl_tree_data::AvlTreeValue;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
+use ergotree_ir::mir::value::debug_start;
 use ergotree_ir::mir::value::Value;
 
 use super::Context;
@@ -45,8 +46,10 @@ fn tree_height(avl_tree_data: &AvlTreeData) -> u32 {
 }
 
 /// The items of a keys or entries argument, which the call has checked to be a collection.
-/// sigmastate reads such an argument item by item, each where it uses it
-/// (`CErgoTreeEvaluator.scala:78-241`), so nothing is cast here.
+/// sigmastate reads such an argument item by item: `getMany` and the entry methods cast an
+/// item's class where they bind it ([`bound_as_coll`], [`entry_of`]) and its array where they
+/// use it, `remove` casts both where it uses the key (`CErgoTreeEvaluator.scala:78-244`), so
+/// nothing is cast here.
 fn coll_items(v: Value<'_>) -> Result<Vec<Value<'_>>, EvalError> {
     match v {
         Value::Coll(coll) => Ok(coll.as_vec()),
@@ -56,12 +59,30 @@ fn coll_items(v: Value<'_>) -> Result<Vec<Value<'_>>, EvalError> {
     }
 }
 
+/// A key or a value where sigmastate binds it to a name of the type `Coll[Byte]`: the parameter
+/// of `keys.map { key => … }` and the two variables of `case (key, value)` are cast to
+/// `sigma.Coll` there, BEFORE that item's cost (`CErgoTreeEvaluator.scala:118`, `:140`, `:178`,
+/// `:209`). The class only: the items are read where the operation is performed ([`bytes_of`]).
+fn bound_as_coll(v: Value<'_>) -> Result<Value<'_>, EvalError> {
+    match v {
+        Value::Coll(_) => Ok(v),
+        _ => Err(EvalError::UnexpectedValue(format!(
+            "expected a collection, found {}",
+            debug_start(&v)
+        ))),
+    }
+}
+
 /// One entry of a key-value collection. sigmastate takes it apart with `case (key, value)`
-/// BEFORE the operation's cost, so an entry that is no pair fails there
+/// BEFORE the operation's cost, so an entry that is no pair fails there, and so does a pair
+/// whose key or value is no collection, the key first
 /// (`CErgoTreeEvaluator.scala:140`, `:178`, `:209`).
 fn entry_of(entry: Value<'_>) -> Result<(Value<'_>, Value<'_>), EvalError> {
     match entry {
-        Value::Pair(pair) => Ok(*pair),
+        Value::Pair(pair) => {
+            let (key, value) = *pair;
+            Ok((bound_as_coll(key)?, bound_as_coll(value)?))
+        }
         _ => Err(EvalError::UnexpectedValue(format!(
             "expected a pair of a key and a value, found {entry:?}"
         ))),
@@ -266,8 +287,9 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
                     items: Arc::new([]),
                 }))
             } else {
+                let key = bound_as_coll(keys[0].clone())?;
                 ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
-                bytes_of(keys[0].clone())?;
+                bytes_of(key)?;
                 Err(EvalError::AvlTree(format!(
                     "Tree proof is incorrect {:?}",
                     avl_tree_data
@@ -280,6 +302,7 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     let res = keys
         .into_iter()
         .map(|key| {
+            let key = bound_as_coll(key)?;
             // Per key, the cost of a tree lookup is O(treeHeight):
             // `LookupAvlTree_Info` = PerItemCost(40, 10, 1) per height item
             // (Scala `getMany_eval`).
@@ -2234,6 +2257,19 @@ mod charge_order {
     /// no fixed value length
     const TREE: &str = "64000000000000000000000000000000000000000000000000000000000000000000072000";
 
+    // A refusal at the bind names the value by its start, never whole (`debug_start`): what a
+    // value prints is not bounded by what the script cost. A key that holds two thousand bytes
+    // is refused in fewer than three hundred characters.
+    #[test]
+    fn a_value_refused_at_the_bind_is_named_by_its_start() {
+        let bytes = || Value::Coll(super::CollValue::Bytes(alloc::vec![0i8; 1000].into()));
+        let refused = super::bound_as_coll(Value::Pair(super::Box::new((bytes(), bytes()))));
+        assert!(
+            matches!(&refused, Err(EvalError::UnexpectedValue(text)) if text.chars().count() < 300),
+            "the refusal's text is not the value's start"
+        );
+    }
+
     // A proof that is a collection of another item type passes the call's class check.
     // sigmastate's `createVerifier` adds its per-item cost over the proof's LENGTH and builds
     // the verifier inside that block, where the proof's array is cast
@@ -2296,10 +2332,11 @@ mod charge_order {
         NoPair,
     }
 
-    // sigmastate reads a key or an entry where it uses it: inside the operation's cost block,
-    // so after that item's cost (`CErgoTreeEvaluator.scala:78-241`: `key.toArray`,
+    // sigmastate casts a key's or a value's ARRAY where it uses it: inside the operation's cost
+    // block, so after that item's cost (`CErgoTreeEvaluator.scala:78-241`: `key.toArray`,
     // `performInsert(key.toArray, value.toArray)`), while an entry that is no pair fails the
-    // `case (key, value)` match before its cost. Each tree below holds {1: 10, 2: 20} under
+    // `case (key, value)` match before its cost, and so does a key or a value that is no
+    // collection (the rows of `avl_item_bind_rows`). Each tree below holds {1: 10, 2: 20} under
     // 1-byte keys with a VALID proof for its operation; a key is a `Coll[Int]`, and the keys
     // and entries are 3-tuple constants (a `Coll[Any]` value) holding an item of another
     // type first or second. Measured on the sigma-state 6.0.7 jars.

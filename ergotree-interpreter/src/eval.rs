@@ -29,6 +29,9 @@ pub(crate) mod and;
 mod append_zip_rows;
 pub(crate) mod apply;
 pub(crate) mod atleast;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod avl_item_bind_rows;
 pub(crate) mod bin_op;
 pub(crate) mod block;
 pub(crate) mod bool_to_sigma;
