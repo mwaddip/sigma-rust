@@ -813,7 +813,9 @@ fn subst_deserialize(expr: &Expr, ctx: &Context) -> Result<Option<Expr>, SubstDe
 }
 
 /// A register as `eba.value.toArray` reads it (v6.0.7 `ErgoLikeInterpreter.scala:19-22`): `None`
-/// for a register the box does not have, else the bytes of a `Coll[Byte]`. The value is read as
+/// for a register the box does not have, else the bytes of a `Coll[Byte]`, the specialised
+/// collection of a constant and the generic one of a collection expression alike (`toArray`
+/// hands back the `byte[]` either holds). The value is read as
 /// a script reads it (`EvaluatedValue::script_value`): a read that fails (an item that
 /// is not a value, an `AssertionError`; a pair's tuple expression in a collection, an
 /// `ArrayStoreException`) fails the spend. The arm matching an `EvaluatedValue[SByteArray]` is
@@ -824,7 +826,6 @@ fn register_script_bytes(
     ctx: &Context,
 ) -> Result<Option<Vec<u8>>, SubstDeserializeError> {
     use crate::chain::ergo_box::RegisterValue;
-    use crate::mir::coll_value::CollValue;
     use crate::mir::value::Value;
     let value = match reg {
         RegisterId::NonMandatoryRegisterId(id) => match ctx.self_box.additional_registers.get(id) {
@@ -841,7 +842,9 @@ fn register_script_bytes(
         },
     };
     match value {
-        Value::Coll(CollValue::Bytes(bytes)) => Ok(Some(bytes.iter().map(|b| *b as u8).collect())),
+        Value::Coll(coll) if coll.elem_tpe() == SType::SByte => {
+            Ok(Some(Value::Coll(coll).try_extract_into::<Vec<u8>>()?))
+        }
         other => Err(SubstDeserializeError::RegisterNotBytes(format!(
             "{other:?}"
         ))),
@@ -1553,6 +1556,21 @@ mod substitution_rule_tests {
             substitute_register(&expr, pairs),
             Err(SubstDeserializeError::TryExtractFromError(_))
         ));
+    }
+
+    #[test]
+    fn a_register_holding_a_collection_expression_of_bytes_is_read() {
+        // R4 = `Coll[Byte](1, 1)` as a ConcreteCollection (`83 02 02 0201 0201`): its value is a
+        // GENERIC collection over a `byte[]` (`ConcreteCollection.value`, `values.scala:879-884`),
+        // and `toArray` hands that array back whatever the collection's class: the bytes `01 01`,
+        // the constant `true` (SANTA `evaluated-values-spend`,
+        // `d1-r4-coll-byte-node-deserialize-accept`)
+        let coll = base16::decode(b"83020202010201").unwrap();
+        let expr = register(SType::SBoolean, None);
+        assert_eq!(substitute_register_bytes(&expr, &coll), Ok(true.into()));
+        // and a collection expression of another item type is no byte array: the node stays
+        let ints = base16::decode(b"83020404020402").unwrap();
+        assert_eq!(substitute_register_bytes(&expr, &ints), Ok(expr.clone()));
     }
 
     #[test]
