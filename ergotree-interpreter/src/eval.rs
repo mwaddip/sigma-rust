@@ -83,6 +83,12 @@ pub(crate) mod option_get;
 pub(crate) mod option_get_or_else;
 pub(crate) mod option_is_defined;
 pub(crate) mod or;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod patch_array_rows;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod producer_class_rows;
 pub(crate) mod property_call;
 pub(crate) mod runtime_type;
 pub(crate) mod savltree;

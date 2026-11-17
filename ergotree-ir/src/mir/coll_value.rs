@@ -96,24 +96,21 @@ impl<'ctx> CollValue<'ctx> {
     /// `Colls.fromArray` at the item type `stypeToRType(elementType)`. So one of tuples of other
     /// than two items keeps the tuple type as its item type, where decoded data of the same
     /// declared type has `Coll[Any]` ([`From<CollKind<Literal>>`]); equality compares item types
-    /// first, so the two differ. `items` are the items' values. The forms are the ones data
-    /// takes: a `Coll[Byte]` and a `Coll[Boolean]` specialised, pairs as their two sides
+    /// first, so the two differ. `items` are the items' values. `Colls.fromArray` at an abstract
+    /// type is never specialised ([`CollValue::from_array`]): a `Coll[Byte]` and a
+    /// `Coll[Boolean]` expression are GENERIC collections over their primitive array, where the
+    /// same items as data are specialised; pairs are their two sides. Neither parser reads a
+    /// collection expression holding an item of another type (v6.0.6
+    /// `ConcreteCollectionSerializer.scala:38`); handed such items directly, a `Coll[Byte]` is
+    /// refused and a `Coll[Boolean]` takes the form data takes
     pub fn from_expression_items(
         elem_tpe: SType,
         items: Vec<Value<'static>>,
     ) -> Result<CollValue<'static>, TryExtractFromError> {
         let all_booleans = || items.iter().all(|v| matches!(v, Value::Boolean(_)));
         match elem_tpe {
-            SType::SByte => items
-                .into_iter()
-                .map(|v| v.try_extract_into::<i8>())
-                .collect::<Result<Arc<[i8]>, _>>()
-                .map(CollValue::Bytes),
-            SType::SBoolean if all_booleans() => items
-                .into_iter()
-                .map(|v| v.try_extract_into::<bool>())
-                .collect::<Result<Arc<[bool]>, _>>()
-                .map(CollValue::Booleans),
+            SType::SByte => CollValue::from_array(SType::SByte, items),
+            SType::SBoolean if all_booleans() => CollValue::from_array(SType::SBoolean, items),
             elem_tpe => Ok(from_data(elem_tpe, items)),
         }
     }

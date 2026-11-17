@@ -6,6 +6,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use ergotree_ir::mir::coll_value::CollValue;
+use ergotree_ir::mir::value::debug_start;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 
@@ -216,9 +217,12 @@ pub(crate) fn append<'ctx>(
 /// first and patches side by side (v6.0.6 `CollsOverArrays.scala:423-428`), and the unzip reads
 /// the item type of anything that is not a `PairOfCols` as a pair type (`:245-258`), so a patch
 /// that is not a collection of pairs is refused though it is empty (SANTA
-/// `Coll.reference_store_ops` B9). Any other receiver hands the builder of its own array the
-/// patch's ITEMS (`:94-98`): an empty patch stores nothing, whatever its class, a tuple's boxed
-/// `Int`s go into an `int[]` (SANTA B2, B5, B8), and a `Coll[Unit]` takes them all as units
+/// `Coll.reference_store_ops` B9). A specialised receiver casts the patch's array to its own
+/// primitive array before anything is stored (`:96`, `patch.toArray` in the specialised class, as
+/// `startsWith` and `Append` read their argument), so a patch held over another array is an
+/// error, even an empty one. A generic receiver hands the builder of its own array the patch's
+/// ITEMS (`:94-98`): an empty patch stores nothing, whatever its class, a tuple's boxed `Int`s
+/// go into an `int[]` (SANTA B2, B5, B8), and a `Coll[Unit]` takes them all as units
 /// ([`unit_builder_items`])
 pub(crate) fn patch<'ctx>(
     coll: &CollValue<'ctx>,
@@ -239,6 +243,15 @@ pub(crate) fn patch<'ctx>(
                 patch(ls, from, &other_ls, replaced)?,
                 patch(rs, from, &other_rs, replaced)?,
             ))
+        }
+        CollValue::Bytes(_) | CollValue::Booleans(_) | CollValue::Ints(_)
+            if !same_primitive_array(coll, other) =>
+        {
+            Err(EvalError::UnexpectedValue(format!(
+                "patch: a specialised collection of {} cannot take a collection of {}",
+                debug_start(&coll.elem_tpe()),
+                debug_start(&other.elem_tpe())
+            )))
         }
         _ => {
             let items = coll.as_vec();

@@ -1,9 +1,27 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use ergo_chain_types::PreHeader;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
+use ergotree_ir::mir::value::Value;
+use ergotree_ir::types::stype::SType;
 
+use super::EvalError;
 use super::EvalFn;
+
+/// A pre-header's `parentId` and `votes` as a node hands them to a script: ergo-core builds both
+/// with `toColl` (v6.0.6 `ergo-core/.../modifiers/history/PreHeader.scala:38-47`,
+/// `PreHeader.toSigma`), the generic call of `Colls.fromArray` (`sigma/Extensions.scala:16-18`),
+/// so each is a generic collection over a `byte[]`, not the specialised one a constant, a
+/// header's field or a box's field is. The class shows wherever an operation asks the receiver's
+/// class: `getOrElse` with a default of another class, `startsWith`, `endsWith` and `patch` with
+/// a collection held over another array give a value on these two
+fn generic_bytes<'ctx>(bytes: impl Iterator<Item = i8>) -> Result<Value<'ctx>, EvalError> {
+    Ok(Value::Coll(CollValue::from_array(
+        SType::SByte,
+        bytes.map(Value::Byte).collect(),
+    )?))
+}
 
 pub(crate) static VERSION_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let preheader = obj.try_extract_into::<PreHeader>()?;
@@ -12,7 +30,7 @@ pub(crate) static VERSION_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
 
 pub(crate) static PARENT_ID_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let preheader = obj.try_extract_into::<PreHeader>()?;
-    Ok(Into::<Vec<i8>>::into(preheader.parent_id).into())
+    generic_bytes(Into::<Vec<i8>>::into(preheader.parent_id).into_iter())
 };
 
 pub(crate) static TIMESTAMP_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
@@ -37,7 +55,11 @@ pub(crate) static MINER_PK_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
 
 pub(crate) static VOTES_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let preheader = obj.try_extract_into::<PreHeader>()?;
-    Ok(Into::<Vec<u8>>::into(preheader.votes).into())
+    generic_bytes(
+        Into::<Vec<u8>>::into(preheader.votes)
+            .into_iter()
+            .map(|b| b as i8),
+    )
 };
 
 #[cfg(test)]
