@@ -1,21 +1,17 @@
 use crate::eval::env::Env;
-use crate::eval::fits_256_bits;
 use crate::eval::operand::{eval_to, OperandClass};
 use crate::eval::Context;
 use crate::eval::EvalError;
 use crate::eval::Evaluable;
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use ergotree_ir::ergo_tree::ErgoTree;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
-use ergotree_ir::mir::avl_tree_data::AvlTreeData;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::Constant;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::subst_const::SubstConstants;
+use ergotree_ir::mir::value::debug_start;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::types::stype::SType;
 use sigma_util::AsVecI8;
@@ -49,36 +45,13 @@ impl Evaluable for SubstConstants {
             .collect();
 
         // every item of the new values becomes a constant, whatever the collection's form
-        // (sigmastate's `toArrayOfConstants`, v6.0.7 `Extensions.scala:53-64`). The lift checks
-        // no `BigInt` range and reads no tree's digest (`Platform.liftToConstant`): a `BigInt`
-        // outside 256 bits, which a tree below version 3 can hold, and an `AvlTree` whose digest
-        // is not of bytes are refused later, by the constant WRITER
-        // (`CoreDataSerializer.scala:35`, `AvlTreeData.scala:75`), and so only if they are written
+        // (sigmastate's `toArrayOfConstants`, v6.0.7 `Extensions.scala:53-64`): each by its own
+        // class and the version of the tree being evaluated, before anything is substituted
+        let tree_version = ctx.tree_version();
         let new_values = if let Value::Coll(coll) = new_values_v {
             let mut new_values = vec![];
             for v in &coll.as_vec() {
-                let v = v.to_static();
-                // sigmastate's lift is a table of classes with no arm for a pair, an option
-                // or `Unit` (`Platform.liftToConstant`, v6.0.6 `Platform.scala:16-63`): such
-                // a new value throws here, whatever its position (`Extensions.scala:60`).
-                // Inside a collection they are lifted with it (the `Coll` arm)
-                if matches!(v, Value::Pair(_) | Value::Opt(_) | Value::Unit) {
-                    return Err(EvalError::Misc(format!(
-                        "SubstConstants: a new value of this kind is not lifted to a constant: \
-                         {v:?}"
-                    )));
-                }
-                new_values.push(match Constant::try_from(v.clone()) {
-                    Ok(c) => NewValue::Constant(c),
-                    Err(e) => {
-                        // not a constant even with what only the writer refuses replaced:
-                        // the lift throws
-                        if Constant::try_from(with_writable_parts(v)).is_err() {
-                            return Err(EvalError::Misc(e));
-                        }
-                        NewValue::Unwritable(e)
-                    }
-                });
+                new_values.push(lift(v.to_static(), tree_version)?);
             }
             new_values
         } else {
@@ -139,97 +112,100 @@ fn to_misc_err<T: core::fmt::Debug>(e: T) -> EvalError {
     EvalError::Misc(format!("{:?}", e))
 }
 
-/// A new value as sigmastate holds it once lifted to a constant
-enum NewValue {
-    /// A constant
-    Constant(Constant),
-    /// A constant on the JVM that its writer refuses: it holds a `BigInt` outside 256 bits or
-    /// an `AvlTree` whose digest is not of bytes. The text is the refusal
-    Unwritable(String),
+/// Whether a new value is lifted to a constant: sigmastate's `Platform.liftToConstant`, a table
+/// of runtime classes (v6.0.6 `data/jvm/.../sigma/Platform.scala:16-63`). A value whose class
+/// has no case, or whose case is closed at `tree_version`, throws there, whatever its position
+/// (`Extensions.scala:60`). The version is that of the tree being evaluated
+/// (`VersionContext.current.isV3OrLaterErgoTreeVersion`), not the template's.
+///
+/// The table looks at the value's own class and no further: a collection is lifted whole, by
+/// its item type (`:59-61`), and what it holds is read by the constant WRITER, which reaches
+/// only a new value whose position is written. So is a `BigInt`'s range and a tree's digest
+/// (`CoreDataSerializer.scala:35`, `AvlTreeData.scala:75`). So a lifted value is handed back as
+/// it is: [`written_values`] turns it into data, and only where it is written. Converting it
+/// here would read every item of a value nothing writes, and a value built at evaluation can
+/// hold one collection many times over.
+///
+/// No wildcard arm: a new `Value` variant gets its row from the JVM's case
+fn lift(v: Value<'static>, tree_version: ErgoTreeVersion) -> Result<Value<'static>, EvalError> {
+    let from_v3 = tree_version >= ErgoTreeVersion::V3;
+    let lifted = match &v {
+        // `:26-29`, `:31-33`, `:56-58`: no gate. The box case, `:50-54`, reads
+        // `isJitActivated`, which the fork does not hold below an activated version of 2
+        // (`Context::activated_script_version`)
+        Value::Boolean(_)
+        | Value::Byte(_)
+        | Value::Short(_)
+        | Value::Int(_)
+        | Value::Long(_)
+        | Value::BigInt(_)
+        | Value::GroupElement(_)
+        | Value::SigmaProp(_)
+        | Value::CBox(_)
+        | Value::AvlTree(_) => true,
+        // `:59-61`: any collection, whatever it holds
+        Value::Coll(_) => true,
+        // `:36` gates this case to tree version 3 and later. The fork does not write the
+        // gate: no `UnsignedBigInt` exists while a tree below version 3 is evaluated. The
+        // type is refused wherever such a tree, a register or a context variable would name
+        // it, and no method or node such a tree resolves returns one (the 6.0.7 jars and
+        // SANTA's census of them, 2026-11-16)
+        Value::UnsignedBigInt(_) => true,
+        // `:34-35`: from tree version 3
+        Value::Header(_) | Value::PreHeader(_) => from_v3,
+        // `:38`: below tree version 3
+        Value::String(_) => !from_v3,
+        // `:62-63`: no case
+        Value::Unit
+        | Value::Pair(_)
+        | Value::Opt(_)
+        | Value::Context
+        | Value::Global
+        | Value::Lambda(_) => false,
+    };
+    if !lifted {
+        return Err(EvalError::Misc(format!(
+            "SubstConstants: a new value of this kind is not lifted to a constant at tree \
+             version {}: {}",
+            u8::from(tree_version),
+            debug_start(&v)
+        )));
+    }
+    Ok(v)
 }
 
-/// The positions and constants to substitute, without the new values sigmastate's writer never
-/// reaches; an error if it would reach one it refuses. The writer serializes a new value only
-/// when its position is inside the tree's constants and is the first to name it
-/// (`getPositionsBackref`, v6.0.6 `ErgoTreeSerializer.scala:286-300`, and the loop at
-/// `:345-361`), so dropping a value it does not reach changes nothing for the others
+/// The positions and constants to substitute: the new values sigmastate's writer reaches, each
+/// turned into data here and nowhere earlier; an error if the writer would refuse one. The
+/// writer serializes a new value only when its position is inside the tree's constants and is
+/// the first to name it (`getPositionsBackref`, v6.0.6 `ErgoTreeSerializer.scala:286-300`, and
+/// the loop at `:345-361`), so dropping a value it does not reach changes nothing for the
+/// others, and a value that is never written is never read: a `PreHeader`, a collection holding
+/// a function, a `BigInt` outside 256 bits and a tree whose digest is not of bytes are refused
+/// only where they would be written
 fn written_values(
     script_bytes: Vec<u8>,
     positions: Vec<usize>,
-    new_values: Vec<NewValue>,
+    new_values: Vec<Value<'static>>,
     activated_version: ErgoTreeVersion,
     tree_version: ErgoTreeVersion,
 ) -> Result<(Vec<usize>, Vec<Constant>), EvalError> {
-    let mut unwritable = false;
-    let mut constants = Vec::with_capacity(new_values.len());
-    for v in &new_values {
-        match v {
-            NewValue::Constant(c) => constants.push(c.clone()),
-            NewValue::Unwritable(_) => unwritable = true,
-        }
-    }
-    if !unwritable {
-        return Ok((positions, constants));
-    }
     // the tree's number of constants, by the read the substitution itself makes
     let (_, num_constants) =
         ErgoTree::substitute_constants(script_bytes, &[], &[], activated_version, tree_version)
             .map_err(to_misc_err)?;
     let mut named = vec![false; num_constants];
-    let mut kept_positions = Vec::with_capacity(positions.len());
-    let mut kept_constants = Vec::with_capacity(positions.len());
+    let mut kept_positions = Vec::new();
+    let mut kept_constants = Vec::new();
     for (pos, v) in positions.into_iter().zip(new_values) {
-        let written = named.get(pos) == Some(&false);
         if let Some(slot) = named.get_mut(pos) {
-            *slot = true;
-        }
-        match v {
-            NewValue::Constant(c) => {
+            if !*slot {
+                *slot = true;
                 kept_positions.push(pos);
-                kept_constants.push(c);
+                kept_constants.push(Constant::try_from(v).map_err(EvalError::Misc)?);
             }
-            NewValue::Unwritable(refusal) if written => return Err(EvalError::Misc(refusal)),
-            NewValue::Unwritable(_) => {}
         }
     }
     Ok((kept_positions, kept_constants))
-}
-
-/// The value with every part that only sigmastate's WRITER refuses replaced by a stand-in the
-/// lift accepts: a `BigInt` outside the 256-bit range by zero, an `AvlTree` whose digest is not
-/// of bytes by the same tree with an empty digest of bytes. What the conversion to a constant
-/// still refuses then, the writer was not the one to refuse. The stand-in is never written:
-/// such a value is [`NewValue::Unwritable`] either way
-fn with_writable_parts(v: Value<'static>) -> Value<'static> {
-    match v {
-        Value::BigInt(b) if !fits_256_bits(&b) => Value::BigInt(num_bigint::BigInt::from(0)),
-        Value::AvlTree(t) if AvlTreeData::try_from((*t).clone()).is_err() => {
-            let mut t = *t;
-            t.digest = CollValue::Bytes(Arc::new([]));
-            Value::AvlTree(Box::new(t))
-        }
-        Value::Pair(pair) => {
-            let (l, r) = *pair;
-            Value::Pair(Box::new((with_writable_parts(l), with_writable_parts(r))))
-        }
-        Value::Opt(opt) => Value::Opt(opt.map(|v| Box::new(with_writable_parts(*v)))),
-        Value::Coll(coll) => Value::Coll(coll_with_writable_parts(coll)),
-        other => other,
-    }
-}
-
-fn coll_with_writable_parts(coll: CollValue<'static>) -> CollValue<'static> {
-    match coll {
-        CollValue::Generic { elem_tpe, items } => CollValue::Generic {
-            elem_tpe,
-            items: items.iter().cloned().map(with_writable_parts).collect(),
-        },
-        CollValue::Pairs { ls, rs } => CollValue::Pairs {
-            ls: Arc::new(coll_with_writable_parts((*ls).clone())),
-            rs: Arc::new(coll_with_writable_parts((*rs).clone())),
-        },
-        other => other,
-    }
 }
 
 /// What `substConstants` lifts. sigmastate turns each new value into a constant with
