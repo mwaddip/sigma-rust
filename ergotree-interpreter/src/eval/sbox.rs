@@ -4,12 +4,14 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use ergotree_ir::chain::ergo_box::ErgoBox;
+use ergotree_ir::chain::ergo_box::MandatoryRegisterId;
 use ergotree_ir::chain::ergo_box::NonMandatoryRegisterId;
 use ergotree_ir::chain::ergo_box::RegisterId;
 use ergotree_ir::chain::ergo_box::RegisterValue;
 use ergotree_ir::chain::ergo_box::RegisterValueError;
 use ergotree_ir::chain::evaluated_value::ScriptValue;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::reference::Ref;
@@ -80,12 +82,29 @@ pub(crate) fn get_register_script_value(
                 None => Ok(None),
             }
         }
-        RegisterId::MandatoryRegisterId(_) => Ok(ergo_box
+        // A mandatory register is a constant sigmastate builds when it is asked for. R1 is
+        // `ByteArrayConstant(propositionBytes)` (v6.0.6 `ErgoBoxCandidate.scala:72`), whose
+        // collection `toColl` builds (`values.scala:643`): a GENERIC `Coll[Byte]`, unlike
+        // `Box.propositionBytes`. R2 is a constant of `additionalTokens.map(identity)`
+        // (`ErgoBoxCandidate.scala:73-76`): a generic collection of pairs, the one `Box.tokens`
+        // is, where the same data read from bytes is a `PairOfCols`. R3 is the creation info
+        // (`ErgoBox.scala:76-79`), whose bytes are generic the same way
+        // ([`creation_info_value`])
+        RegisterId::MandatoryRegisterId(reg_id) => Ok(ergo_box
             .get_register(id)
             .map_err(|e| unreadable(id, Some(e)))?
             .map(|c| ScriptValue {
                 tpe: c.tpe,
-                v: c.v.into(),
+                v: match (reg_id, Value::from(c.v)) {
+                    (MandatoryRegisterId::R1, Value::Coll(bytes)) => {
+                        Value::Coll(CollValue::generic(SType::SByte, bytes.as_vec()))
+                    }
+                    (MandatoryRegisterId::R2, _) => ergo_box.tokens_raw().into(),
+                    (MandatoryRegisterId::R3, _) => {
+                        super::extract_creation_info::creation_info_value(ergo_box)
+                    }
+                    (_, v) => v,
+                },
             })),
     }
 }
