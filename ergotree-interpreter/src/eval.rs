@@ -26,6 +26,9 @@ pub mod env;
 pub(crate) mod and;
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
+mod and_or_item_rows;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
 mod append_zip_rows;
 pub(crate) mod apply;
 pub(crate) mod atleast;
