@@ -5,6 +5,7 @@
 use alloc::format;
 use alloc::vec::Vec;
 
+use ergotree_ir::mir::coll_value::check_coll_len;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::value::debug_start;
 use ergotree_ir::mir::value::Value;
@@ -196,6 +197,10 @@ pub(crate) fn append<'ctx>(
             Ok(left.rebuild_like(left.as_vec().into_iter().chain(right.as_vec()).collect())?)
         }
         CollValue::Generic { elem_tpe, items } => {
+            // the sum of the lengths is checked before the copy (`safeConcatArrays_v5`, v6.0.6
+            // `util/package.scala:25-28`), so a result over the limit is refused for its length
+            // though the right array could not be copied either
+            check_coll_len(left.len() + right.len())?;
             // `arraycopy` looks at the two ARRAYS first: a primitive one takes only the same
             // primitive one, a reference one no primitive one, whatever the lengths
             let arrays_fit = match primitive_array(left) {
@@ -269,7 +274,8 @@ pub(crate) fn patch<'ctx>(
 }
 
 /// The items a Scala array builder of `elem_tpe` keeps of the `items` it is handed with `++=`,
-/// as `patch` hands it the patch and `flatMap` each part. `ArrayBuilder.ofUnit` only counts them
+/// as `patch` hands it the patch (`flatMap` hands its builder each part the same way:
+/// `ergotree_ir::mir::coll_value::CollBuilder`). `ArrayBuilder.ofUnit` only counts them
 /// and stores `()` for each, so a `Coll[Unit]` takes items of any class that way and holds units
 /// after; every other builder stores the items, and the array refuses the ones that do not fit
 /// ([`CollValue::from_array`]). A single store into a `Coll[Unit]` is checked like any other
@@ -1307,7 +1313,9 @@ pub(crate) mod santa_rows {
         ] {
             assert_errs(row);
         }
-        let coll = |t: SType, items: Vec<Value<'static>>| Value::Coll(CollValue::generic(t, items));
+        let coll = |t: SType, items: Vec<Value<'static>>| {
+            Value::Coll(CollValue::generic(t, items).unwrap())
+        };
         // #2: an empty left side returns the right side as it is
         assert_row(
             "0b11b395010083010404028300058301040406",
@@ -1357,6 +1365,7 @@ pub(crate) mod santa_rows {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod scala_eq_tests {
     use alloc::vec;
 
@@ -1382,7 +1391,8 @@ mod scala_eq_tests {
             &Value::from(BigInt256::from(1i64)),
             &Value::Long(1)
         ));
-        let coll = |t: SType, v: Value<'static>| Value::Coll(CollValue::generic(t, vec![v]));
+        let coll =
+            |t: SType, v: Value<'static>| Value::Coll(CollValue::generic(t, vec![v]).unwrap());
         assert!(!scala_eq(
             &coll(SType::SInt, Value::Int(1)),
             &coll(SType::SLong, Value::Long(1))
@@ -1425,7 +1435,7 @@ mod append_tests {
     use super::append;
 
     fn bytes(b: &[i8]) -> CollValue<'static> {
-        CollValue::Bytes(b.into())
+        CollValue::Bytes(b.try_into().unwrap())
     }
 
     #[test]
@@ -1438,7 +1448,7 @@ mod append_tests {
         use ergotree_ir::mir::value::Lambda;
         use ergotree_ir::types::sfunc::SFunc;
         let twice = |t: SType, v: Value<'static>| {
-            let one = CollValue::generic(t, vec![v]);
+            let one = CollValue::generic(t, vec![v]).unwrap();
             append(&one, &one).map(|c| c.len())
         };
         assert_eq!(twice(SType::SContext, Value::Context).unwrap(), 2);
@@ -1458,13 +1468,17 @@ mod append_tests {
         // class
         let r = append(
             &bytes(&[1]),
-            &CollValue::generic(SType::SByte, vec![Value::Byte(2)]),
+            &CollValue::generic(SType::SByte, vec![Value::Byte(2)]).unwrap(),
         )
         .unwrap();
         assert!(matches!(r, CollValue::Bytes(_)), "{r:?}");
         assert_eq!(r, bytes(&[1, 2]));
         // but not another primitive array, even an empty one: the array cast comes first
-        assert!(append(&bytes(&[1]), &CollValue::generic(SType::SLong, vec![])).is_err());
+        assert!(append(
+            &bytes(&[1]),
+            &CollValue::generic(SType::SLong, vec![]).unwrap()
+        )
+        .is_err());
     }
 }
 
@@ -1486,21 +1500,23 @@ mod prefix_tests {
         // (`CollsOverArrays.scala:400`, `:405`): an argument over a primitive array throws, even
         // an empty one (review I2)
         let pairs = CollValue::pairs(
-            CollValue::generic(SType::SInt, vec![Value::Int(1)]),
-            CollValue::generic(SType::SInt, vec![Value::Int(2)]),
+            CollValue::generic(SType::SInt, vec![Value::Int(1)]).unwrap(),
+            CollValue::generic(SType::SInt, vec![Value::Int(2)]).unwrap(),
         );
         for arg in [
-            CollValue::generic(SType::SInt, vec![]),
-            CollValue::Bytes([1i8].as_slice().into()),
-            CollValue::Ints([1].as_slice().into()),
+            CollValue::generic(SType::SInt, vec![]).unwrap(),
+            CollValue::Bytes([1i8].as_slice().try_into().unwrap()),
+            CollValue::Ints([1].as_slice().try_into().unwrap()),
         ] {
             assert!(starts_with(&pairs, &arg).is_err(), "{arg:?}");
             assert!(ends_with(&pairs, &arg).is_err(), "{arg:?}");
         }
         // an argument over a reference array compares
-        let colls = |items| CollValue::generic(SType::SColl(SType::SInt.into()), items);
+        let colls = |items| CollValue::generic(SType::SColl(SType::SInt.into()), items).unwrap();
         assert!(starts_with(&pairs, &colls(vec![])).unwrap());
-        let one = colls(vec![Value::Coll(CollValue::generic(SType::SInt, vec![]))]);
+        let one = colls(vec![Value::Coll(
+            CollValue::generic(SType::SInt, vec![]).unwrap(),
+        )]);
         assert!(!starts_with(&pairs, &one).unwrap());
     }
 }

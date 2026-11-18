@@ -22,7 +22,7 @@ impl Evaluable for LongToByteArray {
             buf[i] = (val & 0xFF) as i8;
             val >>= 8;
         }
-        Ok(buf.into())
+        Ok(buf.try_into()?)
     }
 }
 

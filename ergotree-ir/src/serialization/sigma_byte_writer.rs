@@ -480,7 +480,7 @@ mod cost_sink_tests {
     type ValueRow = (Literal, SType, Vec<(u64, usize)>);
 
     fn value(x: Literal, tpe: SType) -> Put {
-        let v = Value::from(x);
+        let v = Value::try_from(x).unwrap();
         Box::new(move |w| DataSerializer::sigma_serialize_value(&v, &tpe, w))
     }
 

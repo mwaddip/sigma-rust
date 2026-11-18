@@ -375,6 +375,7 @@ mod tests {
     use super::*;
     use alloc::sync::Arc;
     use alloc::vec;
+    use ergotree_ir::mir::coll_value::CollArray;
     use sigma_test_util::force_any_val;
 
     #[test]
@@ -524,18 +525,24 @@ mod tests {
             let eq = eq_with_cost(&l, &r, &ctx).unwrap();
             (eq, ctx.jit_cost_value() - before)
         };
-        let bytes = || Value::Coll(CollValue::Bytes([1i8, 2, 3].as_slice().into()));
-        let gen_bytes = Value::Coll(CollValue::generic(
-            SType::SByte,
-            vec![Value::Byte(1), Value::Byte(2), Value::Byte(3)],
-        ));
+        let bytes = || Value::Coll(CollValue::Bytes([1i8, 2, 3].as_slice().try_into().unwrap()));
+        let gen_bytes = Value::Coll(
+            CollValue::generic(
+                SType::SByte,
+                vec![Value::Byte(1), Value::Byte(2), Value::Byte(3)],
+            )
+            .unwrap(),
+        );
         assert_eq!(cost(bytes(), gen_bytes.clone()), cost(bytes(), bytes()));
         assert!(cost(gen_bytes, bytes()).0);
-        let ints = || Value::Coll(CollValue::Ints([1, 2, 3].as_slice().into()));
-        let gen_ints = Value::Coll(CollValue::generic(
-            SType::SInt,
-            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
-        ));
+        let ints = || Value::Coll(CollValue::Ints([1, 2, 3].as_slice().try_into().unwrap()));
+        let gen_ints = Value::Coll(
+            CollValue::generic(
+                SType::SInt,
+                vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+            )
+            .unwrap(),
+        );
         assert_eq!(
             cost(ints(), gen_ints.clone()),
             cost(gen_ints.clone(), gen_ints)
@@ -553,11 +560,11 @@ mod tests {
         let items: Arc<[Value<'_>]> = Arc::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
         let lv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
-            items: items.clone(),
+            items: CollArray::new(items.clone()).unwrap(),
         });
         let rv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
-            items,
+            items: CollArray::new(items).unwrap(),
         });
         assert!(eq_with_cost(&lv, &rv, &ctx).unwrap());
         assert_eq!(ctx.jit_cost_value() - before, 18);
@@ -575,15 +582,17 @@ mod tests {
         let ctx = force_any_val::<Context>();
         let inner_a: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
-            items: Arc::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+            items: CollArray::new(Arc::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
+                .unwrap(),
         });
         let inner_b: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
-            items: Arc::from(vec![Value::Int(4), Value::Int(5), Value::Int(6)]),
+            items: CollArray::new(Arc::from(vec![Value::Int(4), Value::Int(5), Value::Int(6)]))
+                .unwrap(),
         });
         let outer: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SColl(Arc::new(SType::SInt)),
-            items: Arc::from(vec![inner_a, inner_b]),
+            items: CollArray::new(Arc::from(vec![inner_a, inner_b])).unwrap(),
         });
         let before = ctx.jit_cost_value();
         assert!(eq_with_cost(&outer, &outer.clone(), &ctx).unwrap());
@@ -600,11 +609,11 @@ mod tests {
         let items_b: Arc<[Value<'_>]> = Arc::from(vec![Value::Int(1)]);
         let lv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
-            items: items_a,
+            items: CollArray::new(items_a).unwrap(),
         });
         let rv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
-            items: items_b,
+            items: CollArray::new(items_b).unwrap(),
         });
         assert!(!eq_with_cost(&lv, &rv, &ctx).unwrap());
         assert_eq!(ctx.jit_cost_value() - before, MATCH_TYPE_COST);
@@ -618,11 +627,11 @@ mod tests {
         let empty: Arc<[Value<'_>]> = Arc::from(Vec::<Value<'_>>::new());
         let lv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: elem_tpe.clone(),
-            items: empty.clone(),
+            items: CollArray::new(empty.clone()).unwrap(),
         });
         let rv: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe,
-            items: empty,
+            items: CollArray::new(empty).unwrap(),
         });
         assert!(eq_with_cost(&lv, &rv, &ctx).unwrap());
         ctx.jit_cost_value() - before
@@ -653,8 +662,10 @@ mod tests {
         let ctx = force_any_val::<Context>();
         let before = ctx.jit_cost_value();
         let empty_bytes: Arc<[i8]> = Arc::from(Vec::<i8>::new());
-        let lv: Value<'_> = Value::Coll(CollValue::Bytes(empty_bytes.clone()));
-        let rv: Value<'_> = Value::Coll(CollValue::Bytes(empty_bytes));
+        let lv: Value<'_> = Value::Coll(CollValue::Bytes(
+            CollArray::new(empty_bytes.clone()).unwrap(),
+        ));
+        let rv: Value<'_> = Value::Coll(CollValue::Bytes(CollArray::new(empty_bytes).unwrap()));
         assert!(eq_with_cost(&lv, &rv, &ctx).unwrap());
         assert_eq!(ctx.jit_cost_value() - before, 18);
     }
@@ -685,11 +696,11 @@ mod tests {
                 Arc::from((0..len as i64).map(Value::Long).collect::<Vec<Value<'_>>>());
             let lv: Value<'_> = Value::Coll(CollValue::Generic {
                 elem_tpe: SType::SLong,
-                items: items.clone(),
+                items: CollArray::new(items.clone()).unwrap(),
             });
             let rv: Value<'_> = Value::Coll(CollValue::Generic {
                 elem_tpe: SType::SLong,
-                items,
+                items: CollArray::new(items).unwrap(),
             });
             assert!(eq_with_cost(&lv, &rv, &ctx).unwrap());
             ctx.jit_cost_value() - before
@@ -784,11 +795,11 @@ mod tests {
             let r: Arc<[Value<'_>]> = Arc::from(r_vec);
             let lv = Value::Coll(CollValue::Generic {
                 elem_tpe: SType::SLong,
-                items: l,
+                items: CollArray::new(l).unwrap(),
             });
             let rv = Value::Coll(CollValue::Generic {
                 elem_tpe: SType::SLong,
-                items: r,
+                items: CollArray::new(r).unwrap(),
             });
             let before = ctx.jit_cost_value();
             let eq = eq_with_cost(&lv, &rv, &ctx).unwrap();
@@ -816,23 +827,26 @@ mod tests {
         let ctx = force_any_val::<Context>();
         let inner_l: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
-            items: Arc::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+            items: CollArray::new(Arc::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
+                .unwrap(),
         });
         let inner_r: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
-            items: Arc::from(vec![Value::Int(9), Value::Int(2), Value::Int(3)]),
+            items: CollArray::new(Arc::from(vec![Value::Int(9), Value::Int(2), Value::Int(3)]))
+                .unwrap(),
         });
         let other: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SInt,
-            items: Arc::from(vec![Value::Int(7), Value::Int(8), Value::Int(9)]),
+            items: CollArray::new(Arc::from(vec![Value::Int(7), Value::Int(8), Value::Int(9)]))
+                .unwrap(),
         });
         let outer_l: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SColl(Arc::new(SType::SInt)),
-            items: Arc::from(vec![inner_l, other.clone(), other.clone()]),
+            items: CollArray::new(Arc::from(vec![inner_l, other.clone(), other.clone()])).unwrap(),
         });
         let outer_r: Value<'_> = Value::Coll(CollValue::Generic {
             elem_tpe: SType::SColl(Arc::new(SType::SInt)),
-            items: Arc::from(vec![inner_r, other.clone(), other]),
+            items: CollArray::new(Arc::from(vec![inner_r, other.clone(), other])).unwrap(),
         });
         let before = ctx.jit_cost_value();
         assert!(!eq_with_cost(&outer_l, &outer_r, &ctx).unwrap());
@@ -845,7 +859,7 @@ mod tests {
     fn empty_coll(elem_tpe: SType) -> Value<'static> {
         Value::Coll(CollValue::Generic {
             elem_tpe,
-            items: Arc::from(vec![]),
+            items: CollArray::new(Arc::from(vec![])).unwrap(),
         })
     }
 
@@ -881,10 +895,11 @@ mod tests {
         let pairs = || -> Value<'static> {
             Value::Coll(CollValue::Generic {
                 elem_tpe: int_pair(),
-                items: Arc::from(vec![
+                items: CollArray::new(Arc::from(vec![
                     Value::pair(Value::Int(1), Value::Int(2)),
                     Value::pair(Value::Int(3), Value::Int(4)),
-                ]),
+                ]))
+                .unwrap(),
             })
         };
         assert!(eq_with_cost(&pairs(), &pairs(), &ctx).unwrap());
@@ -969,7 +984,7 @@ mod tests {
     fn coll(elem_tpe: SType, items: Vec<Value<'static>>) -> Value<'static> {
         Value::Coll(CollValue::Generic {
             elem_tpe,
-            items: Arc::from(items),
+            items: CollArray::new(Arc::from(items)).unwrap(),
         })
     }
 
@@ -1016,7 +1031,7 @@ mod tests {
             (
                 "AvlTree",
                 "avl tree",
-                Value::from(force_any_val::<AvlTreeData>()),
+                Value::try_from(force_any_val::<AvlTreeData>()).unwrap(),
                 6,
             ),
             // by reading (`:385-396`): the harness builds none of these three
@@ -1279,7 +1294,7 @@ mod tests {
         let (res, charged) = compare(&some(Value::Global), &some(Value::Global));
         assert!(matches!(res, Err(EvalError::Misc(_))), "{res:?}");
         assert_eq!(charged, 4);
-        let bytes = Value::Coll(CollValue::Bytes([1i8].as_slice().into()));
+        let bytes = Value::Coll(CollValue::Bytes([1i8].as_slice().try_into().unwrap()));
         let rows = [
             (
                 pair(Value::Int(1), Value::Global),

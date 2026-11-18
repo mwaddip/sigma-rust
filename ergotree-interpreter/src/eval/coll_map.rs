@@ -83,12 +83,11 @@ pub(crate) fn map_coll<'ctx>(
                     Some(v) => Err(EvalError::UnexpectedValue(format!(
                         "map: a collection of {out_elem_tpe:?} cannot hold {v:?}"
                     ))),
-                    None => Ok(CollValue::generic(out_elem_tpe, values)),
+                    None => Ok(CollValue::generic(out_elem_tpe, values)?),
                 }
             } else {
                 // not a pair type from a `PairOfCols`: a generic collection, as `from_array` builds
-                CollValue::from_array(out_elem_tpe, values.to_vec())
-                    .map_err(EvalError::TryExtractFrom)
+                CollValue::from_array(out_elem_tpe, values.to_vec()).map_err(EvalError::from)
             }
         })
         .and_then(|v| v) // flatten <Result<Result<Value, _>, _>

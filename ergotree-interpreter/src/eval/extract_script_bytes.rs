@@ -16,7 +16,7 @@ impl Evaluable for ExtractScriptBytes {
         let input_v = eval_to(&self.input, OperandClass::Box, env, ctx)?;
         ctx.add_jit_cost(10)?; // ExtractScriptBytes = Fixed(10)
         match input_v {
-            Value::CBox(b) => Ok(b.script_bytes()?.into()),
+            Value::CBox(b) => Ok(b.script_bytes()?.try_into()?),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "Expected ExtractScriptBytes input to be Value::CBox, got {0:?}",
                 input_v

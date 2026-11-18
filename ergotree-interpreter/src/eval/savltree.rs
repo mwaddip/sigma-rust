@@ -245,9 +245,9 @@ pub(crate) static GET_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
     ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
     match bv.perform_one_operation(&Operation::Lookup(bytes_of(key)?)) {
         Ok(opt) => match opt {
-            Some(v) => Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
-                v.iter().map(|&b| b as i8).collect(),
-            )))))),
+            Some(v) => Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::bytes(
+                v.iter().map(|&b| b as i8).collect::<Vec<i8>>(),
+            )?))))),
             _ => Ok(Value::Opt(None)),
         },
         Err(_) => Err(EvalError::AvlTree(format!(
@@ -282,10 +282,10 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // propagate.
         Err(EvalError::AvlTree(_)) => {
             return if keys.is_empty() {
-                Ok(Value::Coll(CollValue::Generic {
-                    elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
-                    items: Arc::new([]),
-                }))
+                Ok(Value::Coll(CollValue::generic(
+                    SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
+                    Vec::new(),
+                )?))
             } else {
                 let key = bound_as_coll(keys[0].clone())?;
                 ctx.add_per_item_jit_cost(40, 10, 1, tree_height(&avl_tree_data))?;
@@ -309,9 +309,9 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
             ctx.add_per_item_jit_cost(40, 10, 1, height)?;
             if let Ok(r) = bv.perform_one_operation(&Operation::Lookup(bytes_of(key)?)) {
                 if let Some(v) = r {
-                    Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::Bytes(
-                        v.iter().map(|&b| b as i8).collect(),
-                    ))))))
+                    Ok(Value::Opt(Some(Box::new(Value::Coll(CollValue::bytes(
+                        v.iter().map(|&b| b as i8).collect::<Vec<i8>>(),
+                    )?)))))
                 } else {
                     Ok(Value::Opt(None))
                 }
@@ -324,10 +324,10 @@ pub(crate) static GET_MANY_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         })
         .collect::<Result<Arc<[_]>, _>>()?;
 
-    Ok(Value::Coll(CollValue::Generic {
-        elem_tpe: SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
-        items: res,
-    }))
+    Ok(Value::Coll(CollValue::generic(
+        SType::SOption(Arc::new(SType::SColl(Arc::new(SType::SByte)))),
+        res,
+    )?))
 };
 
 pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
@@ -408,7 +408,7 @@ pub(crate) static INSERT_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Value::Opt(Some(Box::new(Value::from(avl_tree_data))))
+        Value::Opt(Some(Box::new(Value::try_from(avl_tree_data)?)))
     } else {
         Value::Opt(None)
     })
@@ -476,7 +476,7 @@ pub(crate) static REMOVE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Ok(Value::Opt(Some(Box::new(Value::from(avl_tree_data)))))
+        Ok(Value::Opt(Some(Box::new(Value::try_from(avl_tree_data)?))))
     } else {
         Ok(Value::Opt(None))
     }
@@ -586,7 +586,7 @@ pub(crate) static UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Value::Opt(Some(Value::from(avl_tree_data).into()))
+        Value::Opt(Some(Value::try_from(avl_tree_data)?.into()))
     } else {
         Value::Opt(None)
     })
@@ -657,7 +657,7 @@ pub(crate) static INSERT_OR_UPDATE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args|
         // Digest extraction after mutation: `updateDigest_Info` = FixedCost(40).
         ctx.add_jit_cost(40)?;
         avl_tree_data.digest = new_digest.to_vec();
-        Value::Opt(Some(Box::new(Value::from(avl_tree_data))))
+        Value::Opt(Some(Box::new(Value::try_from(avl_tree_data)?)))
     } else {
         Value::Opt(None)
     })
@@ -746,7 +746,7 @@ mod tests {
 
         if let Value::Opt(opt) = res_found {
             if let Some(Value::Coll(CollValue::Bytes(b))) = opt.as_deref() {
-                assert!(lookup_found.unwrap().eq(&b.as_vec_u8()));
+                assert!(lookup_found.unwrap().eq(&b.arc().as_vec_u8()));
             } else {
                 unreachable!();
             }
@@ -922,7 +922,7 @@ mod tests {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
                 assert_eq!(
                     Value::Coll(avl.digest.clone()),
-                    Value::from(final_digest.0.to_vec())
+                    Value::try_from(final_digest.0.to_vec()).unwrap()
                 );
             } else {
                 unreachable!();
@@ -1027,7 +1027,7 @@ mod tests {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
                 assert_eq!(
                     Value::Coll(avl.digest.clone()),
-                    Value::from(final_digest.0.to_vec())
+                    Value::try_from(final_digest.0.to_vec()).unwrap()
                 );
             } else {
                 unreachable!();
@@ -1317,7 +1317,7 @@ mod tests {
             .into();
             let res = eval_out_wo_ctx::<Value>(&expr);
             if let Value::AvlTree(a) = res {
-                assert_eq!(Value::Coll(a.digest.clone()), Value::from(new_digest.0.to_vec()));
+                assert_eq!(Value::Coll(a.digest.clone()), Value::try_from(new_digest.0.to_vec()).unwrap());
             } else {
                 unreachable!();
             }
@@ -1359,7 +1359,7 @@ mod tests {
                     .unwrap()
                     .into();
             if let Value::Coll(CollValue::Bytes(b)) = eval_out_wo_ctx::<Value>(&digest_back) {
-                assert_eq!(b.as_vec_u8(), new_digest);
+                assert_eq!(b.arc().as_vec_u8(), new_digest);
             } else {
                 unreachable!();
             }
@@ -1452,7 +1452,7 @@ mod tests {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
                 assert_eq!(
                     Value::Coll(avl.digest.clone()),
-                    Value::from(final_digest.0.to_vec())
+                    Value::try_from(final_digest.0.to_vec()).unwrap()
                 );
             } else {
                 unreachable!();
@@ -1534,7 +1534,7 @@ mod tests {
             if let Some(Value::AvlTree(avl)) = opt.as_deref() {
                 assert_eq!(
                     Value::Coll(avl.digest.clone()),
-                    Value::from(final_digest.0.to_vec())
+                    Value::try_from(final_digest.0.to_vec()).unwrap()
                 );
             } else {
                 unreachable!();
@@ -2262,7 +2262,11 @@ mod charge_order {
     // is refused in fewer than three hundred characters.
     #[test]
     fn a_value_refused_at_the_bind_is_named_by_its_start() {
-        let bytes = || Value::Coll(super::CollValue::Bytes(alloc::vec![0i8; 1000].into()));
+        let bytes = || {
+            Value::Coll(super::CollValue::Bytes(
+                alloc::vec![0i8; 1000].try_into().unwrap(),
+            ))
+        };
         let refused = super::bound_as_coll(Value::Pair(super::Box::new((bytes(), bytes()))));
         assert!(
             matches!(&refused, Err(EvalError::UnexpectedValue(text)) if text.chars().count() < 300),
@@ -3001,7 +3005,7 @@ mod digest_collection {
         };
         let written = |digest: &str| -> Value<'static> {
             let bytes = base16::decode(format!("100164{digest}0701007300").as_bytes()).unwrap();
-            Value::from(bytes)
+            Value::try_from(bytes).unwrap()
         };
         for version in [V0, V3] {
             // position 0 is written
@@ -3113,7 +3117,7 @@ mod digest_collection {
             written.extend([7, 1, 0]);
             assert_eq!(
                 value_and_cost(&serialize(&upd(&tree(), &bytes(n))), V3),
-                (Value::from(written), 78 + n as u64),
+                (Value::try_from(written).unwrap(), 78 + n as u64),
                 "{n}"
             );
         }

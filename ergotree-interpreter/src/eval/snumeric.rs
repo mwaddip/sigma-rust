@@ -27,23 +27,23 @@ use super::{fits_256_bits, EvalError, EvalFn};
 const TO_BYTES_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     // the four fixed-width containers build a generic `Coll[Byte]`, the two arbitrary-precision
     // ones a specialised one (SANTA `Coll.producer_specialisation_witness` H3, H4, H12)
-    fn generic_bytes(bytes: &[u8]) -> Value<'static> {
+    fn generic_bytes(bytes: &[u8]) -> Result<Value<'static>, EvalError> {
         let items: Vec<Value> = bytes.iter().map(|&b| Value::Byte(b as i8)).collect();
-        Value::Coll(CollValue::generic(SType::SByte, items))
+        Ok(Value::Coll(CollValue::generic(SType::SByte, items)?))
     }
     Ok(match obj {
-        Value::Byte(obj) => generic_bytes(&obj.to_be_bytes()),
-        Value::Short(obj) => generic_bytes(&obj.to_be_bytes()),
-        Value::Int(obj) => generic_bytes(&obj.to_be_bytes()),
-        Value::Long(obj) => generic_bytes(&obj.to_be_bytes()),
+        Value::Byte(obj) => generic_bytes(&obj.to_be_bytes())?,
+        Value::Short(obj) => generic_bytes(&obj.to_be_bytes())?,
+        Value::Int(obj) => generic_bytes(&obj.to_be_bytes())?,
+        Value::Long(obj) => generic_bytes(&obj.to_be_bytes())?,
         // BigInt/UnsignedBigInt use a minimal-length big-endian encoding, not a
         // fixed 32 bytes: JVM `BigInt.toBytes` = `BigInteger.toByteArray` (signed
         // two's-complement, minimal length, `0 -> [0]`) and
         // `UnsignedBigInt.toBytes` = `BigIntegers.asUnsignedByteArray` (unsigned,
         // minimal length, `0 -> []`). `to_be_vec` already implements both (it is
         // what serialization uses); `to_be_bytes` is the fixed-width form.
-        Value::BigInt(obj) => bigint256(obj)?.to_be_vec().into(),
-        Value::UnsignedBigInt(obj) => obj.to_be_vec().into(),
+        Value::BigInt(obj) => bigint256(obj)?.to_be_vec().try_into()?,
+        Value::UnsignedBigInt(obj) => obj.to_be_vec().try_into()?,
         other => {
             return Err(EvalError::UnexpectedValue(format!(
                 "Expected numeric type, got {other:?}"
@@ -64,20 +64,24 @@ static TO_BITS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
         res
     }
     // every `toBits` builds a specialised `Coll[Boolean]` (SANTA H5)
-    fn to_bits(bytes: &[u8]) -> Value<'static> {
-        Value::Coll(CollValue::Booleans(
-            bytes.iter().copied().flat_map(byte_to_bits).collect(),
-        ))
+    fn to_bits(bytes: &[u8]) -> Result<Value<'static>, EvalError> {
+        Ok(Value::Coll(CollValue::booleans(
+            bytes
+                .iter()
+                .copied()
+                .flat_map(byte_to_bits)
+                .collect::<Vec<bool>>(),
+        )?))
     }
     Ok(match obj {
-        Value::Byte(obj) => to_bits(obj.to_be_bytes().as_slice()),
-        Value::Short(obj) => to_bits(obj.to_be_bytes().as_slice()),
-        Value::Int(obj) => to_bits(obj.to_be_bytes().as_slice()),
-        Value::Long(obj) => to_bits(obj.to_be_bytes().as_slice()),
+        Value::Byte(obj) => to_bits(obj.to_be_bytes().as_slice())?,
+        Value::Short(obj) => to_bits(obj.to_be_bytes().as_slice())?,
+        Value::Int(obj) => to_bits(obj.to_be_bytes().as_slice())?,
+        Value::Long(obj) => to_bits(obj.to_be_bytes().as_slice())?,
         // Minimal-length bytes, as in TO_BYTES_EVAL_FN: JVM `toBits` derives from
         // the same big-endian byte sequence, so it is minimal-length too.
-        Value::BigInt(obj) => to_bits(bigint256(obj)?.to_be_vec().as_slice()),
-        Value::UnsignedBigInt(obj) => to_bits(obj.to_be_vec().as_slice()),
+        Value::BigInt(obj) => to_bits(bigint256(obj)?.to_be_vec().as_slice())?,
+        Value::UnsignedBigInt(obj) => to_bits(obj.to_be_vec().as_slice())?,
         other => {
             return Err(EvalError::UnexpectedValue(format!(
                 "Expected numeric type, got {other:?}"

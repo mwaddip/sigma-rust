@@ -505,7 +505,7 @@ mod receiver_kind_tests {
         // SANTA `eval/v6/authored/MethodCall.numeric_receiver_width.json` (sigma-state 6.0.7):
         // the numeric handlers cast the receiver to the OWNER's class, the type code in the
         // bytes (`methods.scala:314-458`), so a value of another width throws
-        let bytes = |b: &[i8]| Value::Coll(CollValue::Bytes(b.into()));
+        let bytes = |b: &[i8]| Value::Coll(CollValue::Bytes(b.try_into().unwrap()));
         assert_trees(&[
             // N0 `SLong.toBytes` on `Long 1`, N1 on `Int 1`
             (
@@ -559,7 +559,7 @@ mod receiver_kind_tests {
 
     /// One value of every variant, and more of those that have forms
     fn one_of_each() -> Vec<Value<'static>> {
-        let ints = || CollValue::Ints(vec![1, 2].into());
+        let ints = || CollValue::Ints(vec![1, 2].try_into().unwrap());
         vec![
             Value::Boolean(true),
             Value::Byte(1),
@@ -574,12 +574,12 @@ mod receiver_kind_tests {
             Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
             Value::UnsignedBigInt(UnsignedBigInt::from(1u32)),
             Value::CBox(Ref::from(force_any_val::<ErgoBox>())),
-            Value::from(force_any_val::<AvlTreeData>()),
+            Value::try_from(force_any_val::<AvlTreeData>()).unwrap(),
             // a collection in each of its forms
-            Value::Coll(CollValue::Bytes(vec![1i8].into())),
-            Value::Coll(CollValue::Booleans(vec![true].into())),
+            Value::Coll(CollValue::Bytes(vec![1i8].try_into().unwrap())),
+            Value::Coll(CollValue::Booleans(vec![true].try_into().unwrap())),
             Value::Coll(ints()),
-            Value::Coll(CollValue::generic(SType::SLong, vec![Value::Long(1)])),
+            Value::Coll(CollValue::generic(SType::SLong, vec![Value::Long(1)]).unwrap()),
             Value::Coll(CollValue::Pairs {
                 ls: Arc::new(ints()),
                 rs: Arc::new(ints()),
@@ -923,7 +923,7 @@ mod jvm_method_rows {
         // SANTA's tuple-values reply, W1 and W2: Global.serialize((1, 2, 3)) writes the items
         // with no length, Global.serialize(Coll((1, 2, 3))) the collection's length and the items
         use ergotree_ir::mir::coll_value::CollValue;
-        let bytes = |b: &[i8]| Value::Coll(CollValue::Bytes(b.into()));
+        let bytes = |b: &[i8]| Value::Coll(CollValue::Bytes(b.try_into().unwrap()));
         assert_accepts("0b0cdc6a03dd0148040404020406", bytes(&[2, 4, 6]), 33);
         assert_accepts("0b0edc6a03dd010c4804040401020406", bytes(&[1, 2, 4, 6]), 36);
     }

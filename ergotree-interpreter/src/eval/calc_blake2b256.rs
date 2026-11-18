@@ -28,7 +28,7 @@ impl Evaluable for CalcBlake2b256 {
             Ok(coll_byte) => {
                 let expected_hash: Vec<u8> =
                     blake2b256_hash(coll_byte.as_vec_u8().as_slice()).to_vec();
-                Ok(expected_hash.into())
+                Ok(expected_hash.try_into()?)
             }
             Err(_) => Err(EvalError::UnexpectedValue(format!(
                 "expected CalcBlake2b256 input to be byte array, got: {0:?}",

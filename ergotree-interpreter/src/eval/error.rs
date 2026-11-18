@@ -9,6 +9,7 @@ use ergotree_ir::mir::expr::SubstDeserializeError;
 use bounded_vec::BoundedVecOutOfBounds;
 use derive_more::TryInto;
 use ergotree_ir::ergo_tree::ErgoTreeError;
+use ergotree_ir::mir::coll_value::{CollBuildError, CollLengthError};
 use ergotree_ir::mir::constant::TryExtractFromError;
 use ergotree_ir::serialization::SigmaParsingError;
 use ergotree_ir::serialization::SigmaSerializationError;
@@ -40,6 +41,10 @@ pub enum EvalError {
     /// Unexpected value type
     #[error("Unexpected value type: {0:?}")]
     TryExtractFrom(#[from] TryExtractFromError),
+    /// A collection of more than 100,000 items: sigmastate's collection class refuses it in its
+    /// constructor (v6.0.6 `CollsOverArrays.scala:13-14`)
+    #[error("{0}")]
+    CollLength(#[from] CollLengthError),
     /// Not found (missing value, argument, etc.)
     #[error("Not found: {0}")]
     NotFound(String),
@@ -108,6 +113,15 @@ pub enum EvalError {
     /// Autolykos PoW error
     #[error("Autolykos PoW error: {0}")]
     AutolykosPowSchemeError(#[from] AutolykosPowSchemeError),
+}
+
+impl From<CollBuildError> for EvalError {
+    fn from(e: CollBuildError) -> Self {
+        match e {
+            CollBuildError::TooLong(e) => EvalError::CollLength(e),
+            CollBuildError::Item(e) => EvalError::TryExtractFrom(e),
+        }
+    }
 }
 
 impl From<CostLimitExceeded> for EvalError {

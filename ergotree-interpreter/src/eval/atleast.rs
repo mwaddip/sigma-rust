@@ -187,12 +187,12 @@ mod tests {
                 Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
             ]
         };
-        let typed = CollValue::generic(SType::SSigmaProp, props());
+        let typed = CollValue::generic(SType::SSigmaProp, props()).unwrap();
         assert_eq!(sigma_props(&typed).unwrap().len(), 2);
         // a tuple of propositions is a `Coll[Any]`: the cast of its array throws, empty or not
-        let tuple = CollValue::generic(SType::SAny, props());
+        let tuple = CollValue::generic(SType::SAny, props()).unwrap();
         assert!(sigma_props(&tuple).is_err());
-        let empty_tuple = CollValue::generic(SType::SAny, Vec::<Value<'static>>::new());
+        let empty_tuple = CollValue::generic(SType::SAny, Vec::<Value<'static>>::new()).unwrap();
         assert!(sigma_props(&empty_tuple).is_err());
     }
 

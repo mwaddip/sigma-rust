@@ -465,7 +465,10 @@ mod runtime_bigint_tests {
                 wide(v.clone()).try_extract_into::<BigInt256>().unwrap(),
                 data
             );
-            assert_eq!(Value::from(Literal::BigInt(data)), wide(v.clone()));
+            assert_eq!(
+                Value::try_from(Literal::BigInt(data)).unwrap(),
+                wide(v.clone())
+            );
             assert_eq!(Value::from(data), wide(v.clone()));
             assert_eq!(wide(v.clone()).try_extract_into::<BigInt>().unwrap(), v);
         }

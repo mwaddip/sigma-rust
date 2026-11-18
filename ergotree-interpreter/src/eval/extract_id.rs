@@ -19,7 +19,7 @@ impl Evaluable for ExtractId {
         match input_v {
             Value::CBox(b) => {
                 let bytes: Vec<i8> = b.box_id().into();
-                Ok(bytes.into())
+                Ok(bytes.try_into()?)
             }
             _ => Err(EvalError::UnexpectedValue(format!(
                 "Expected ExtractId input to be Value::CBox, got {0:?}",

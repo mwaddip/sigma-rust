@@ -21,7 +21,7 @@ impl Evaluable for Expr {
         let res = match self {
             Expr::Const(c) => {
                 ctx.add_jit_cost(5)?; // Constant = Fixed(5)
-                Ok(Value::from(c.v.clone()))
+                Ok(Value::try_from(c.v.clone())?)
             }
             Expr::SubstConstants(op) => op.expr().eval(env, ctx),
             Expr::ByteArrayToLong(op) => op.expr().eval(env, ctx),
@@ -64,7 +64,7 @@ impl Evaluable for Expr {
                 // `ConstantPlaceholder.eval` checks the resolved constant's value against its
                 // type (`values.scala:412`). Placeholders are resolved here at eval on the
                 // lazy constants path, so the check happens here rather than at substitution.
-                let value = Value::from(constant.v.clone());
+                let value = Value::try_from(constant.v.clone())?;
                 crate::eval::check_value_of_type(&constant.tpe, &value, ctx.tree_version())?;
                 Ok(value)
             }

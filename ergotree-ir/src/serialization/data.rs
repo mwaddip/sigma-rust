@@ -930,7 +930,7 @@ mod value_writer_tests {
 
     /// sigmastate's value of a tuple of other than two items
     fn any_coll(items: Vec<Value<'static>>) -> Value<'static> {
-        Value::Coll(CollValue::generic(SType::SAny, items))
+        Value::Coll(CollValue::generic(SType::SAny, items).unwrap())
     }
 
     fn int_tuple(xs: &[i32]) -> Literal {
@@ -1015,7 +1015,7 @@ mod value_writer_tests {
         ];
         for (lit, tpe) in rows {
             assert_eq!(
-                written(&Value::from(lit.clone()), &tpe),
+                written(&Value::try_from(lit.clone()).unwrap(), &tpe),
                 data(&lit),
                 "{tpe:?}"
             );
@@ -1029,9 +1029,15 @@ mod value_writer_tests {
         use sigma_test_util::force_any_val;
         for _ in 0..8 {
             let b = Literal::CBox(Arc::new(force_any_val::<ErgoBox>()).into());
-            assert_eq!(written(&Value::from(b.clone()), &SType::SBox), data(&b));
+            assert_eq!(
+                written(&Value::try_from(b.clone()).unwrap(), &SType::SBox),
+                data(&b)
+            );
             let h = Literal::Header(Box::new(force_any_val::<Header>()));
-            assert_eq!(written(&Value::from(h.clone()), &SType::SHeader), data(&h));
+            assert_eq!(
+                written(&Value::try_from(h.clone()).unwrap(), &SType::SHeader),
+                data(&h)
+            );
         }
     }
 
@@ -1073,7 +1079,7 @@ mod value_writer_tests {
         assert_eq!(refused(&any_coll(ints(&[1, 2])), &int_triple()), Some(0));
         assert_eq!(refused(&any_coll(ints(&[1, 2, 3])), &int_pair()), Some(0));
         // `fromDslTuple` refuses a collection of another item type
-        let coll_of_ints = Value::Coll(CollValue::generic(SType::SInt, ints(&[1, 2, 3])));
+        let coll_of_ints = Value::Coll(CollValue::generic(SType::SInt, ints(&[1, 2, 3])).unwrap());
         assert_eq!(refused(&coll_of_ints, &int_triple()), Some(0));
     }
 
@@ -1090,10 +1096,9 @@ mod value_writer_tests {
     #[test]
     fn a_collection_writes_its_items_by_the_item_type() {
         // a data `Coll[(Int, Int, Int)]` as sigmastate holds it: a `Coll[Coll[Any]]`
-        let triples = Value::Coll(CollValue::generic(
-            coll(SType::SAny),
-            vec![any_coll(ints(&[1, 2, 3]))],
-        ));
+        let triples = Value::Coll(
+            CollValue::generic(coll(SType::SAny), vec![any_coll(ints(&[1, 2, 3]))]).unwrap(),
+        );
         assert_eq!(
             written(&triples, &coll(int_triple())),
             data(&items(int_triple(), vec![int_tuple(&[1, 2, 3])]))
@@ -1127,8 +1132,8 @@ mod value_writer_tests {
         let coll_byte = coll(SType::SByte);
         let two = vec![Value::Byte(1), Value::Byte(2)];
         for value in [
-            Value::Coll(CollValue::Bytes(vec![1i8, 2].into())),
-            Value::Coll(CollValue::generic(SType::SByte, two.clone())),
+            Value::Coll(CollValue::Bytes(vec![1i8, 2].try_into().unwrap())),
+            Value::Coll(CollValue::generic(SType::SByte, two.clone()).unwrap()),
         ] {
             assert_eq!(written(&value, &coll_byte), data(&bytes(&[1, 2])));
         }
@@ -1140,11 +1145,14 @@ mod value_writer_tests {
             vec![Literal::Boolean(true), Literal::Boolean(false)],
         );
         for value in [
-            Value::Coll(CollValue::Booleans(vec![true, false].into())),
-            Value::Coll(CollValue::generic(
-                SType::SBoolean,
-                vec![Value::Boolean(true), Value::Boolean(false)],
-            )),
+            Value::Coll(CollValue::Booleans(vec![true, false].try_into().unwrap())),
+            Value::Coll(
+                CollValue::generic(
+                    SType::SBoolean,
+                    vec![Value::Boolean(true), Value::Boolean(false)],
+                )
+                .unwrap(),
+            ),
         ] {
             assert_eq!(written(&value, &coll_bool), data(&bools));
         }
@@ -1178,7 +1186,7 @@ mod value_writer_tests {
     // `CoreDataSerializer.scala:50-55`)
     #[test]
     fn a_collection_of_zero_width_items_is_refused_before_its_length() {
-        let units = Value::Coll(CollValue::generic(SType::SUnit, vec![Value::Unit]));
+        let units = Value::Coll(CollValue::generic(SType::SUnit, vec![Value::Unit]).unwrap());
         let (res, cost) = written(&units, &coll(SType::SUnit));
         assert!(
             matches!(res, Err(SigmaSerializationError::NotSupported(_))),
@@ -1228,12 +1236,10 @@ mod value_writer_tests {
     /// 50 collections that are all ONE collection of 50 collections that are all one collection
     /// of 100 bytes: three allocations, 252,551 bytes when written
     fn shared() -> (Value<'static>, SType) {
-        let inner = Value::Coll(CollValue::Bytes(vec![1i8; 100].into()));
-        let middle = Value::Coll(CollValue::generic(coll(SType::SByte), vec![inner; 50]));
-        let top = Value::Coll(CollValue::generic(
-            coll(coll(SType::SByte)),
-            vec![middle; 50],
-        ));
+        let inner = Value::Coll(CollValue::Bytes(vec![1i8; 100].try_into().unwrap()));
+        let middle = Value::Coll(CollValue::generic(coll(SType::SByte), vec![inner; 50]).unwrap());
+        let top =
+            Value::Coll(CollValue::generic(coll(coll(SType::SByte)), vec![middle; 50]).unwrap());
         (top, coll(coll(coll(SType::SByte))))
     }
 
@@ -1291,7 +1297,7 @@ mod value_writer_tests {
             })),
             _ => Value::Unit,
         };
-        let trees = Value::Coll(CollValue::generic(SType::SAvlTree, vec![tree.clone()]));
+        let trees = Value::Coll(CollValue::generic(SType::SAvlTree, vec![tree.clone()]).unwrap());
         for (value, tpe) in [
             (value.clone(), SType::SLong),
             (value.clone(), coll(SType::SByte)),

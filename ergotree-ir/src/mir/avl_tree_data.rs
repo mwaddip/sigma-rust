@@ -1,3 +1,4 @@
+use super::coll_value::CollLengthError;
 use super::coll_value::CollValue;
 use super::constant::TryExtractFromError;
 use super::constant::TryExtractInto;
@@ -93,14 +94,21 @@ pub struct AvlTreeValue<'ctx> {
 }
 
 /// Data as a runtime tree: the digest is the specialised collection of bytes
-impl From<AvlTreeData> for AvlTreeValue<'_> {
-    fn from(d: AvlTreeData) -> Self {
-        AvlTreeValue {
-            digest: CollValue::Bytes(d.digest.iter().map(|&b| b as i8).collect()),
+impl TryFrom<AvlTreeData> for AvlTreeValue<'_> {
+    type Error = CollLengthError;
+
+    fn try_from(d: AvlTreeData) -> Result<Self, Self::Error> {
+        Ok(AvlTreeValue {
+            digest: CollValue::bytes(
+                d.digest
+                    .iter()
+                    .map(|&b| b as i8)
+                    .collect::<alloc::vec::Vec<i8>>(),
+            )?,
             tree_flags: d.tree_flags,
             key_length: d.key_length,
             value_length_opt: d.value_length_opt,
-        }
+        })
     }
 }
 
@@ -243,10 +251,10 @@ mod tests {
         // comes back as it was
         #[test]
         fn a_byte_digest_goes_to_a_runtime_tree_and_back(v in any::<AvlTreeData>()) {
-            let tree = AvlTreeValue::from(v.clone());
+            let tree = AvlTreeValue::try_from(v.clone()).unwrap();
             prop_assert!(matches!(tree.digest, CollValue::Bytes(_)));
             prop_assert_eq!(AvlTreeData::try_from(tree), Ok(v.clone()));
-            prop_assert_eq!(Value::from(v.clone()).try_extract_into::<AvlTreeData>(), Ok(v));
+            prop_assert_eq!(Value::try_from(v.clone()).unwrap().try_extract_into::<AvlTreeData>(), Ok(v));
         }
 
     }
@@ -256,7 +264,8 @@ mod tests {
     // any other array does not, a tuple of bytes among them (its array is of objects)
     #[test]
     fn only_a_digest_of_bytes_is_data() {
-        let generic_bytes = CollValue::generic(SType::SByte, vec![Value::Byte(1), Value::Byte(2)]);
+        let generic_bytes =
+            CollValue::generic(SType::SByte, vec![Value::Byte(1), Value::Byte(2)]).unwrap();
         assert_eq!(
             AvlTreeData::try_from(tree_with(generic_bytes))
                 .unwrap()
@@ -264,13 +273,13 @@ mod tests {
             vec![1u8, 2]
         );
         for digest in [
-            CollValue::Ints(vec![1, 2].into()),
-            CollValue::Booleans(vec![true].into()),
-            CollValue::generic(SType::SLong, vec![Value::Long(1), Value::Long(2)]),
-            CollValue::generic(SType::SAny, vec![Value::Byte(1), Value::Byte(2)]),
+            CollValue::Ints(vec![1, 2].try_into().unwrap()),
+            CollValue::Booleans(vec![true].try_into().unwrap()),
+            CollValue::generic(SType::SLong, vec![Value::Long(1), Value::Long(2)]).unwrap(),
+            CollValue::generic(SType::SAny, vec![Value::Byte(1), Value::Byte(2)]).unwrap(),
             CollValue::pairs(
-                CollValue::Ints(vec![1].into()),
-                CollValue::Ints(vec![2].into()),
+                CollValue::Ints(vec![1].try_into().unwrap()),
+                CollValue::Ints(vec![2].try_into().unwrap()),
             ),
         ] {
             assert!(
@@ -294,7 +303,7 @@ mod tests {
     #[test]
     fn to_static_converts_the_digests_items() {
         let b = force_any_val::<ErgoBox>();
-        let digest = CollValue::generic(SType::SBox, vec![Value::CBox(Ref::Borrowed(&b))]);
+        let digest = CollValue::generic(SType::SBox, vec![Value::CBox(Ref::Borrowed(&b))]).unwrap();
         let v = Value::AvlTree(Box::new(tree_with(digest)));
         let owned: Value<'static> = v.to_static();
         assert_eq!(owned, v);
