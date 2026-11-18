@@ -1,8 +1,7 @@
-use alloc::vec::Vec;
-use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::or::Or;
 use ergotree_ir::mir::value::Value;
 
+use crate::eval::and::booleans_read_until;
 use crate::eval::env::Env;
 use crate::eval::Context;
 use crate::eval::EvalError;
@@ -15,9 +14,11 @@ impl Evaluable for Or {
         ctx: &Context<'ctx>,
     ) -> Result<Value<'ctx>, EvalError> {
         let input_v = self.input.eval(env, ctx)?;
-        let input_v_bools = input_v.try_extract_into::<Vec<bool>>()?;
-        ctx.add_per_item_jit_cost(5, 5, 64, input_v_bools.len() as u32)?;
-        Ok(input_v_bools.iter().any(|b| *b).into())
+        // the loop stops at the first `true`, and the cost is of the items it read
+        // (`trees.scala:199-213`)
+        let (decided, read) = booleans_read_until(&input_v, true)?;
+        ctx.add_per_item_jit_cost(5, 5, 64, read)?;
+        Ok(decided.into())
     }
 }
 

@@ -26,6 +26,9 @@ pub mod env;
 pub(crate) mod and;
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
+mod and_or_item_rows;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
 mod append_zip_rows;
 pub(crate) mod apply;
 pub(crate) mod atleast;
@@ -98,6 +101,9 @@ pub(crate) mod savltree;
 pub(crate) mod sbox;
 pub(crate) mod scoll;
 pub(crate) mod scontext;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod second_evaluation_rows;
 pub(crate) mod select_field;
 #[cfg(test)]
 #[cfg(feature = "arbitrary")]
@@ -402,19 +408,25 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
                 })
             }
             Ok(reduction) => Ok(reduction),
-            // A cost-limit error must NOT trigger the diagnostic retry — the
-            // retry re-evaluates and re-charges, making the charged cost (and
-            // near the budget even the verdict) path-dependent. `enrich_err`
+            // A cost-limit error is returned as it is, with the counter where it stopped:
+            // a second evaluation would charge again and replace both. `enrich_err`
             // wraps every error — including `CostError` — in `Spanned` at
             // each eval node boundary, so match through the wrappers.
             Err(e) if e.is_cost_error() => Err(e),
-            Err(_) => {
+            Err(first) => {
+                // The second evaluation is for the error's text only (see the lazy path below)
+                let stopped_at = ctx.jit_cost_value();
                 let (spanned_expr, printed_expr_str) = expr
                     .pretty_print()
                     .map_err(|e| EvalError::Misc(e.to_string()))?;
                 ctx.jit_cost.set(cost_before);
-                inner(&spanned_expr, ctx, cost_before)
-                    .map_err(|e| e.wrap_spanned_with_src(printed_expr_str.to_string()))
+                match inner(&spanned_expr, ctx, cost_before) {
+                    Err(e) => Err(e.wrap_spanned_with_src(printed_expr_str.to_string())),
+                    Ok(_) => {
+                        ctx.jit_cost.set(stopped_at);
+                        Err(first)
+                    }
+                }
             }
         };
     }
@@ -467,25 +479,38 @@ pub fn reduce_to_crypto(tree: &ErgoTree, ctx: &Context) -> Result<ReductionResul
             })
         }
         Ok(reduction) => Ok(reduction),
-        // A cost-limit error must NOT trigger the diagnostic retry: the retry
-        // re-evaluates the constant-substituted `proposition()` tree, which
+        // A cost-limit error is returned as it is, with the counter where it stopped: the
+        // second evaluation runs the constant-substituted `proposition()` tree, which
         // charges on a different lattice (substituted `Constant`s cost 5
-        // JitCost where placeholders cost 1), making the charged cost — and
-        // near the budget even the verdict — path-dependent. `enrich_err`
+        // JitCost where placeholders cost 1), and would replace the error and the
+        // counter. `enrich_err`
         // wraps every error — including `CostError` — in `Spanned` at each
         // eval node boundary, so match through the wrappers.
         Err(e) if e.is_cost_error() => Err(e),
-        Err(_) => {
-            // Error path: use proposition() for fully-resolved spanned re-evaluation.
+        Err(first) => {
+            // Error path: the tree with its constants substituted (`proposition()`) is evaluated
+            // again, for an error that carries the printed source. That second evaluation is for
+            // the error's TEXT only: it runs without the placeholders' checks
+            // (`ConstantPlaceholder.eval` checks a constant against its type, `values.scala:412`)
+            // and on another cost lattice, so it can answer where the first one failed. The
+            // verdict is the first evaluation's: sigmastate evaluates once.
+            let stopped_at = ctx.jit_cost_value();
             let resolved = tree.proposition()?;
             let (spanned_expr, printed_expr_str) = resolved
                 .pretty_print()
                 .map_err(|e| EvalError::Misc(e.to_string()))?;
-            // Roll the accumulator back to the pre-reduce state so the diagnostic
-            // retry doesn't double-count and can't spuriously trip jit_cost_limit.
+            // The second evaluation starts from the pre-reduce counter, so it does not count the
+            // first one's work twice. It can still cross the cost limit where the first stopped
+            // before it (a substituted constant costs 5, a placeholder 1): its cost error is then
+            // the error returned, a refusal either way.
             ctx.jit_cost.set(cost_before);
-            inner(&spanned_expr, ctx, cost_before)
-                .map_err(|e| e.wrap_spanned_with_src(printed_expr_str.to_string()))
+            match inner(&spanned_expr, ctx, cost_before) {
+                Err(e) => Err(e.wrap_spanned_with_src(printed_expr_str.to_string())),
+                Ok(_) => {
+                    ctx.jit_cost.set(stopped_at);
+                    Err(first)
+                }
+            }
         }
     }
 }
