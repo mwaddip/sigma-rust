@@ -92,12 +92,15 @@ impl Evaluable for SubstConstants {
                 ctx.tree_version(),
             )
             .map_err(to_misc_err)?;
+            // the result is built first: sigmastate builds it inside the counting block, so a
+            // result over the limit fails before the cost below is added
+            let result = Value::Coll(CollValue::bytes(new_bytes.as_vec_i8())?);
             // Charge based on the template's constants count, matching Scala's
             // `ErgoTreeSerializer.substituteConstants` — the walk visits every
             // constant in the template regardless of how many positions the
             // caller asks to replace.
             ctx.add_per_item_jit_cost(100, 100, 1, num_constants as u32)?;
-            Ok(Value::Coll(CollValue::Bytes(new_bytes.as_vec_i8().into())))
+            Ok(result)
         } else {
             Err(EvalError::Misc(format!(
                 "SubstConstants: expected evaluation of `script_bytes` to be of type `Coll[SBytes]`, \
@@ -285,7 +288,7 @@ mod lift_rows {
     // as it was; a pair or an option INSIDE a collection is lifted with the collection
     #[test]
     fn a_value_the_jvms_table_has_an_arm_for_is_lifted() {
-        let unchanged = Value::from(base16::decode(script().as_bytes()).unwrap());
+        let unchanged = Value::try_from(base16::decode(script().as_bytes()).unwrap()).unwrap();
         let t = tree_with_ints();
         let rows: [(&str, String, u64); 11] = [
             ("01", "0101".into(), 235),      // true
@@ -338,7 +341,7 @@ mod tuple_operand_rows {
         let substituted: [i8; 13] = [27, 11, 2, 4, 18, 4, 14, -47, -109, 115, 0, 115, 1];
         assert_accepts(
             "0b16740e0d1b0b02040e040ed19373007301100100100112",
-            Value::Coll(CollValue::Bytes(substituted.into())),
+            Value::Coll(CollValue::Bytes(substituted.try_into().unwrap())),
             315,
         );
         // new values `Coll((1, 2, 3))` for a constant of type (Int, Int, Int): each lifts to a
@@ -471,7 +474,7 @@ mod tests {
                 .unwrap()
                 .sigma_serialize_bytes()
                 .unwrap();
-            assert_eq!(b.as_vec_u8(), expected);
+            assert_eq!(b.arc().as_vec_u8(), expected);
         } else {
             unreachable!();
         }
@@ -530,7 +533,7 @@ mod tests {
                 .unwrap()
                 .sigma_serialize_bytes()
                 .unwrap();
-            assert_eq!(b.as_vec_u8(), expected);
+            assert_eq!(b.arc().as_vec_u8(), expected);
         } else {
             unreachable!();
         }
@@ -628,7 +631,7 @@ mod bigint_range_tests {
 
         let (res, cost) = eval_body(&subst(&bigint_y()), ErgoTreeVersion::V0);
         let bytes = base16::decode("10010601fad1939f82730082").unwrap();
-        assert_eq!(res.ok(), Some(Value::from(bytes)));
+        assert_eq!(res.ok(), Some(Value::try_from(bytes).unwrap()));
         assert_eq!(cost, 265);
     }
 
@@ -642,10 +645,9 @@ mod bigint_range_tests {
         // `:345-361`). The costs are those of the in-range twins, sigma-rust's own
         let t = "1001060101d1939f82730082"; // one constant
         let (x, y) = (bigint_x(), bigint_y());
-        let unchanged = Some(Value::from(base16::decode(t).unwrap()));
-        let with_minus_six = Some(Value::from(
-            base16::decode("10010601fad1939f82730082").unwrap(),
-        ));
+        let unchanged = Some(Value::try_from(base16::decode(t).unwrap()).unwrap());
+        let with_minus_six =
+            Some(Value::try_from(base16::decode("10010601fad1939f82730082").unwrap()).unwrap());
         let subst = |positions: &str, values: &str| {
             eval_body(
                 &format!("740e0c{t}{positions}{values}"),

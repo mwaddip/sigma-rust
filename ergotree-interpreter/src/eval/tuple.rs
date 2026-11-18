@@ -83,11 +83,11 @@ mod non_pair_value_rows {
 
     fn coll(elem_tpe: SType, items: &[i32]) -> Value<'static> {
         let items: Vec<Value> = items.iter().map(|i| Value::Int(*i)).collect();
-        Value::Coll(CollValue::generic(elem_tpe, items))
+        Value::Coll(CollValue::generic(elem_tpe, items).unwrap())
     }
 
     fn bytes(b: &[i8]) -> Value<'static> {
-        Value::Coll(CollValue::Bytes(b.into()))
+        Value::Coll(CollValue::Bytes(b.try_into().unwrap()))
     }
 
     fn true_prop() -> Value<'static> {
@@ -207,8 +207,8 @@ mod non_pair_value_rows {
         let zipped = |other: SType| {
             let ints = |xs: &[i32]| xs.iter().map(|i| Value::Int(*i)).collect::<Vec<_>>();
             Value::Coll(CollValue::pairs(
-                CollValue::generic(SType::SAny, ints(&[1, 2, 3])),
-                CollValue::generic(other, ints(&[1, 2, 3])),
+                CollValue::generic(SType::SAny, ints(&[1, 2, 3])).unwrap(),
+                CollValue::generic(other, ints(&[1, 2, 3])).unwrap(),
             ))
         };
         assert_accepts(

@@ -21,7 +21,7 @@ pub(crate) static GET_ENCODED_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
         ))),
     }?;
 
-    Ok(Value::from(encoded))
+    Ok(Value::try_from(encoded)?)
 };
 
 pub(crate) static NEGATE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {

@@ -21,7 +21,7 @@ impl Evaluable for SigmaPropBytes {
                 // JVM does. Previously hardcoded n=1, undercharging every
                 // multi-node conjecture (and ProveDHTuple, whose size is 4).
                 ctx.add_per_item_jit_cost(35, 6, 1, sigma_prop.value().size() as u32)?;
-                Ok(sigma_prop.prop_bytes()?.into())
+                Ok(sigma_prop.prop_bytes()?.try_into()?)
             }
             _ => Err(EvalError::UnexpectedValue(format!(
                 "Expected SigmaPropBytes input to be Value::SigmaProp, got {0:?}",

@@ -4,8 +4,8 @@ use crate::eval::LambdaInvoker;
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
+use ergotree_ir::mir::coll_value::CollBuilder;
 use ergotree_ir::mir::coll_value::CollValue;
-use ergotree_ir::mir::constant::TryExtractFromError;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::expr::Expr;
 use ergotree_ir::mir::value::Value;
@@ -13,7 +13,6 @@ use ergotree_ir::types::stype::SType;
 
 use super::coll_by_index::item_at;
 use super::coll_map::map_coll;
-use super::coll_shape::unit_builder_items;
 use super::env::Env;
 use super::Context;
 use super::EvalFn;
@@ -65,33 +64,6 @@ pub(crate) static INDEX_OF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {
         found.map(|off| (start + off) as i32).unwrap_or(-1)
     }))
 };
-
-/// The concatenation of `parts` at the item type `item_tpe`, as `flatMap` builds it:
-/// `builder.fromArray` at an abstract item type (v6.0.7 `CollsOverArrays.scala:72-75`,
-/// `:426-427`), so generic, or a `PairOfCols` for pairs (SANTA `Coll.pair_shape_restored` Y3).
-/// Scala's `flatMap` hands each part to the builder of the result's array with `++=` (v6.0.6
-/// `:70-73`): an empty part is never read, whatever its class, an item of another class fails
-/// the store ([`CollValue::from_array`]), and a `Coll[Unit]` result takes them all as units
-/// ([`unit_builder_items`]); SANTA `Coll.reference_store_ops` H1, H2, H4. `Append` differs: it
-/// copies arrays
-fn flatten<'ctx>(
-    item_tpe: SType,
-    parts: Vec<Value<'ctx>>,
-) -> Result<CollValue<'ctx>, TryExtractFromError> {
-    let mut items: Vec<Value> = Vec::new();
-    for part in parts {
-        match part {
-            Value::Coll(part) => items.extend(part.as_vec()),
-            other => {
-                return Err(TryExtractFromError(format!(
-                    "Expected Value::Coll, got: {other:?}"
-                )))
-            }
-        }
-    }
-    let items = unit_builder_items(&item_tpe, items);
-    CollValue::from_array(item_tpe, items)
-}
 
 pub(crate) fn flatmap_eval<'ctx>(
     mc: &MethodCallSite<'_>,
@@ -157,18 +129,23 @@ pub(crate) fn flatmap_eval<'ctx>(
             input_v
         ))),
     }?;
-    // `xs.flatMap(f)` casts each result as it is produced: a result that is no collection
-    // fails there, before the lambda is applied to the next item (`methods.scala:1007`)
-    let values = normalized_input_vals
-        .iter()
-        .map(|item| match lambda_call(item.clone())? {
-            v @ Value::Coll(_) => Ok(v),
-            v => Err(EvalError::UnexpectedValue(format!(
-                "flatMap: the lambda returned {v:?}, which is no collection"
-            ))),
-        })
-        .collect::<Result<Vec<Value>, EvalError>>()?;
-    let coll = flatten((**item_tpe).clone(), values).map_err(EvalError::TryExtractFrom)?;
+    // `xs.flatMap(f)` casts each result as it is produced and hands it to the result's builder:
+    // a result that is no collection, or one holding an item the result's array cannot hold,
+    // fails there, before the lambda is applied to the next item (`methods.scala:1007`,
+    // `CollsOverArrays.scala:70-73`); the result is built, and its length asked, after the last
+    // one ([`CollBuilder`])
+    let mut builder = CollBuilder::new((**item_tpe).clone());
+    for item in normalized_input_vals {
+        match lambda_call(item)? {
+            Value::Coll(part) => builder.append(&part)?,
+            v => {
+                return Err(EvalError::UnexpectedValue(format!(
+                    "flatMap: the lambda returned {v:?}, which is no collection"
+                )))
+            }
+        }
+    }
+    let coll = builder.build()?;
     // flatMap cost scales with the OUTPUT (flattened) length, not the input
     // length, matching Scala's `flatMap_eval` (addSeqCost over `res.length`
     // after building the result, post the per-item lambda calls).
@@ -227,7 +204,7 @@ pub(crate) static INDICES_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
         .map(i32::try_from)
         .collect::<Result<Arc<[_]>, core::num::TryFromIntError>>()
         .map_err(|e| EvalError::UnexpectedValue(format!("Coll length overflow: {0:?}", e)))?;
-    Ok(Value::Coll(CollValue::Ints(indices)))
+    Ok(Value::Coll(CollValue::ints(indices)?))
 };
 
 pub(crate) static PATCH_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, args| {

@@ -11,10 +11,12 @@ use ergotree_ir::chain::ergo_box::RegisterValue;
 use ergotree_ir::chain::ergo_box::RegisterValueError;
 use ergotree_ir::chain::evaluated_value::ScriptValue;
 use ergotree_ir::ergo_tree::ErgoTreeVersion;
+use ergotree_ir::mir::coll_value::CollLengthError;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::TryExtractInto;
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::reference::Ref;
+use ergotree_ir::types::stype::LiftIntoSType;
 use ergotree_ir::types::stype::SType;
 
 use super::EvalFn;
@@ -36,8 +38,9 @@ fn unreadable(reg_id: RegisterId, error: Option<RegisterValueError>) -> EvalErro
 /// convert fails every read that goes through it. Those are `getReg` at any index that is
 /// not negative (`:33`: it reads `registers.length`), and `tokens` and `creationInfo`, which
 /// are `getReg(2)` and `getReg(3)` (`:46-58`); a read of another field of the box (its value,
-/// its bytes, its id) does not. A constant's data always converts; its type may have no
-/// runtime type, since an empty collection of tuples of other than two items is data the JVM
+/// its bytes, its id) does not. A constant's data read from bytes always converts (one built
+/// in memory holding a collection of more than 100,000 items does not, and is refused at that
+/// register's own read: this checks its type only); its type may have no runtime type, since an empty collection of tuples of other than two items is data the JVM
 /// reads whatever the items are (`Coll[(Int, Int, T)]()`), so a constant's type is tried and
 /// any other value is converted.
 pub(crate) fn convert_registers(ergo_box: &ErgoBox) -> Result<(), EvalError> {
@@ -61,6 +64,20 @@ pub(crate) fn convert_registers(ergo_box: &ErgoBox) -> Result<(), EvalError> {
     Ok(())
 }
 
+/// A box's tokens as a script reads them: a generic collection of pairs of a token id's bytes
+/// and an amount (R2, [`get_register_script_value`])
+fn tokens_value<'ctx>(ergo_box: &ErgoBox) -> Result<Value<'ctx>, EvalError> {
+    let items = ergo_box
+        .tokens_raw()
+        .into_iter()
+        .map(|(id, amount)| Ok(Value::pair(Value::try_from(id)?, Value::Long(amount))))
+        .collect::<Result<Vec<Value>, CollLengthError>>()?;
+    Ok(Value::Coll(CollValue::generic(
+        <(Vec<i8>, i64)>::stype(),
+        items,
+    )?))
+}
+
 /// A box's register as a script reads it: sigmastate's `CBox.getReg` (v6.0.6
 /// `CBox.scala:31-45`), which reads from `registers` ([`convert_registers`]).
 pub(crate) fn get_register_script_value(
@@ -76,7 +93,7 @@ pub(crate) fn get_register_script_value(
                     let c = value.as_constant().map_err(|e| unreadable(id, Some(e)))?;
                     Ok(Some(ScriptValue {
                         tpe: c.tpe.clone(),
-                        v: c.v.clone().into(),
+                        v: c.v.clone().try_into()?,
                     }))
                 }
                 None => Ok(None),
@@ -90,22 +107,25 @@ pub(crate) fn get_register_script_value(
         // is, where the same data read from bytes is a `PairOfCols`. R3 is the creation info
         // (`ErgoBox.scala:76-79`), whose bytes are generic the same way
         // ([`creation_info_value`])
-        RegisterId::MandatoryRegisterId(reg_id) => Ok(ergo_box
-            .get_register(id)
-            .map_err(|e| unreadable(id, Some(e)))?
-            .map(|c| ScriptValue {
-                tpe: c.tpe,
-                v: match (reg_id, Value::from(c.v)) {
-                    (MandatoryRegisterId::R1, Value::Coll(bytes)) => {
-                        Value::Coll(CollValue::generic(SType::SByte, bytes.as_vec()))
-                    }
-                    (MandatoryRegisterId::R2, _) => ergo_box.tokens_raw().into(),
-                    (MandatoryRegisterId::R3, _) => {
-                        super::extract_creation_info::creation_info_value(ergo_box)
-                    }
-                    (_, v) => v,
-                },
-            })),
+        RegisterId::MandatoryRegisterId(reg_id) => {
+            let Some(c) = ergo_box
+                .get_register(id)
+                .map_err(|e| unreadable(id, Some(e)))?
+            else {
+                return Ok(None);
+            };
+            let v = match (reg_id, Value::try_from(c.v)?) {
+                (MandatoryRegisterId::R1, Value::Coll(bytes)) => {
+                    Value::Coll(CollValue::generic(SType::SByte, bytes.as_vec())?)
+                }
+                (MandatoryRegisterId::R2, _) => tokens_value(ergo_box)?,
+                (MandatoryRegisterId::R3, _) => {
+                    super::extract_creation_info::creation_info_value(ergo_box)?
+                }
+                (_, v) => v,
+            };
+            Ok(Some(ScriptValue { tpe: c.tpe, v }))
+        }
     }
 }
 
@@ -161,8 +181,7 @@ pub(crate) static TOKENS_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let ergo_box = obj.try_extract_into::<Ref<'_, ErgoBox>>()?;
     // `CBox.tokens` is `getReg(2)` (`CBox.scala:56-58`)
     convert_registers(&ergo_box)?;
-    let res: Value = ergo_box.tokens_raw().into();
-    Ok(res)
+    tokens_value(&ergo_box)
 };
 
 // The accessor method-forms (PropertyCall 99:2..6) dispatch through the same box
@@ -176,33 +195,38 @@ pub(crate) static PROPOSITION_BYTES_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _ar
     Ok(obj
         .try_extract_into::<Ref<'_, ErgoBox>>()?
         .script_bytes()?
-        .into())
+        .try_into()?)
 };
 
 pub(crate) static BYTES_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     // `Box.bytes` returns the parse-retained wire slice (the reference impl's
     // `ErgoBox.bytes`), so a non-canonically-encoded box keeps its on-the-wire
     // image — unlike `bytesWithoutRef`, which re-serializes canonically.
-    Ok(obj.try_extract_into::<Ref<'_, ErgoBox>>()?.bytes()?.into())
+    Ok(obj
+        .try_extract_into::<Ref<'_, ErgoBox>>()?
+        .bytes()?
+        .try_into()?)
 };
 
 pub(crate) static BYTES_WITHOUT_REF_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
     Ok(obj
         .try_extract_into::<Ref<'_, ErgoBox>>()?
         .bytes_without_ref(ctx.tree_version())?
-        .into())
+        .try_into()?)
 };
 
 pub(crate) static ID_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let bytes: Vec<i8> = obj.try_extract_into::<Ref<'_, ErgoBox>>()?.box_id().into();
-    Ok(bytes.into())
+    Ok(bytes.try_into()?)
 };
 
 pub(crate) static CREATION_INFO_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let ergo_box = obj.try_extract_into::<Ref<'_, ErgoBox>>()?;
     // `CBox.creationInfo` is `getReg(3)` (`CBox.scala:46-54`)
     convert_registers(&ergo_box)?;
-    Ok(super::extract_creation_info::creation_info_value(&ergo_box))
+    Ok(super::extract_creation_info::creation_info_value(
+        &ergo_box,
+    )?)
 };
 
 #[allow(clippy::unwrap_used)]

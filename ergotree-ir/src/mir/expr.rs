@@ -830,14 +830,19 @@ fn register_script_bytes(
     let value = match reg {
         RegisterId::NonMandatoryRegisterId(id) => match ctx.self_box.additional_registers.get(id) {
             None => return Ok(None),
-            Some(RegisterValue::Parsed(c)) => Value::from(c.v.clone()),
-            Some(RegisterValue::ParsedExpr(e)) => e.value().script_value()?,
+            Some(RegisterValue::Parsed(c)) => {
+                Value::try_from(c.v.clone()).map_err(TryExtractFromError::from)?
+            }
+            Some(RegisterValue::ParsedExpr(e)) => e
+                .value()
+                .script_value()
+                .map_err(TryExtractFromError::from)?,
             Some(RegisterValue::Invalid { error_msg, .. }) => {
                 return Err(RegisterValueError::Invalid(error_msg.clone()).into())
             }
         },
         RegisterId::MandatoryRegisterId(_) => match ctx.self_box.get_register(reg)? {
-            Some(c) => Value::from(c.v),
+            Some(c) => Value::try_from(c.v).map_err(TryExtractFromError::from)?,
             None => return Ok(None),
         },
     };

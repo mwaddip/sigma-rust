@@ -1,6 +1,5 @@
 use alloc::boxed::Box;
 use alloc::string::ToString;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use ergotree_ir::mir::coll_value::CollValue;
@@ -22,21 +21,23 @@ use super::EvalFn;
 // differ; none adds a cost: the node adds its own, the call adds the method's.
 
 /// `Context.INPUTS`: the boxes the transaction spends
-pub(crate) fn inputs<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
-    ctx.inputs
+pub(crate) fn inputs<'ctx>(ctx: &Context<'ctx>) -> Result<Value<'ctx>, EvalError> {
+    Ok(ctx
+        .inputs
         .iter()
         .map(|&i| Ref::Borrowed(i))
         .collect::<Vec<_>>()
-        .into()
+        .try_into()?)
 }
 
 /// `Context.OUTPUTS`: the boxes the transaction creates
-pub(crate) fn outputs<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
-    ctx.outputs
+pub(crate) fn outputs<'ctx>(ctx: &Context<'ctx>) -> Result<Value<'ctx>, EvalError> {
+    Ok(ctx
+        .outputs
         .iter()
         .map(Ref::Borrowed)
         .collect::<Vec<_>>()
-        .into()
+        .try_into()?)
 }
 
 /// `Context.HEIGHT`
@@ -51,22 +52,26 @@ pub(crate) fn self_box<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
 
 /// `Context.LastBlockUtxoRootHash`. The root is a standalone context input, as in the JVM
 /// (`CContext` returns `lastBlockUtxoRootHash` directly, never deriving it from `headers(0)`)
-pub(crate) fn last_block_utxo_root_hash<'ctx>(ctx: &Context<'ctx>) -> Value<'ctx> {
-    Value::from(ctx.last_block_utxo_root.clone())
+pub(crate) fn last_block_utxo_root_hash<'ctx>(
+    ctx: &Context<'ctx>,
+) -> Result<Value<'ctx>, EvalError> {
+    Ok(Value::try_from(ctx.last_block_utxo_root.clone())?)
 }
 
 /// `Context.minerPubKey`: the pre-header's miner key, as its bytes
 pub(crate) fn miner_pub_key<'ctx>(ctx: &Context<'ctx>) -> Result<Value<'ctx>, EvalError> {
-    Ok(ctx.pre_header.miner_pk.sigma_serialize_bytes()?.into())
+    Ok(ctx
+        .pre_header
+        .miner_pk
+        .sigma_serialize_bytes()?
+        .try_into()?)
 }
 
 pub(crate) static DATA_INPUTS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
-    Ok(Value::Coll(CollValue::Generic {
-        items: ctx.data_inputs.clone().map_or(Arc::new([]), |d| {
-            d.iter().map(|&di| Ref::from(di)).map(Value::CBox).collect()
-        }),
-        elem_tpe: SType::SBox,
-    }))
+    let items: Vec<Value> = ctx.data_inputs.clone().map_or(Vec::new(), |d| {
+        d.iter().map(|&di| Ref::from(di)).map(Value::CBox).collect()
+    });
+    Ok(Value::Coll(CollValue::generic(SType::SBox, items)?))
 };
 
 pub(crate) static SELF_BOX_INDEX_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
@@ -88,14 +93,12 @@ pub(crate) static SELF_BOX_INDEX_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args|
 };
 
 pub(crate) static HEADERS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| {
-    Ok(Value::Coll(CollValue::Generic {
-        items: ctx
-            .headers
-            .iter()
-            .map(|h| Value::Header(Box::new(h.clone())))
-            .collect(),
-        elem_tpe: SType::SHeader,
-    }))
+    let items: Vec<Value> = ctx
+        .headers
+        .iter()
+        .map(|h| Value::Header(Box::new(h.clone())))
+        .collect();
+    Ok(Value::Coll(CollValue::generic(SType::SHeader, items)?))
 };
 
 pub(crate) static PRE_HEADER_EVAL_FN: EvalFn =
@@ -105,16 +108,16 @@ pub(crate) static PRE_HEADER_EVAL_FN: EvalFn =
 // its node's accessor and adds no cost (the call adds the method's fixed cost, which is the
 // node's). A new `property(name, type, id, <node>)` method takes its node's accessor the same
 // way. SANTA `Context.property_call_forms`, `Context.property_call_forms_v6`
-pub(crate) static INPUTS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| Ok(inputs(ctx));
+pub(crate) static INPUTS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| inputs(ctx);
 
-pub(crate) static OUTPUTS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| Ok(outputs(ctx));
+pub(crate) static OUTPUTS_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| outputs(ctx);
 
 pub(crate) static HEIGHT_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| Ok(height(ctx));
 
 pub(crate) static SELF_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| Ok(self_box(ctx));
 
 pub(crate) static LAST_BLOCK_UTXO_ROOT_HASH_EVAL_FN: EvalFn =
-    |_mc, _env, ctx, _obj, _args| Ok(last_block_utxo_root_hash(ctx));
+    |_mc, _env, ctx, _obj, _args| last_block_utxo_root_hash(ctx);
 
 pub(crate) static MINER_PUBKEY_EVAL_FN: EvalFn = |_mc, _env, ctx, _obj, _args| miner_pub_key(ctx);
 
@@ -253,6 +256,33 @@ mod tests {
             .into();
         let ctx = force_any_val::<Context>();
         assert_eq!(eval_out::<Vec<Header>>(&expr, &ctx), *ctx.headers.as_vec());
+    }
+
+    // The boxes of a transaction are counted by its reader (`TxIoVec`: at most 32,767), under the
+    // limit on a collection's length: `INPUTS`, `OUTPUTS` and `dataInputs` never refuse one
+    #[test]
+    fn the_most_boxes_a_transaction_holds_are_a_collection() {
+        let most = i16::MAX as usize;
+        let ctx = force_any_val::<Context>();
+        let boxes: Vec<&ErgoBox> = vec![ctx.self_box; most];
+        let outputs = vec![ctx.self_box.clone(); most];
+        let ctx = Context {
+            inputs: boxes.clone().try_into().unwrap(),
+            data_inputs: Some(boxes.try_into().unwrap()),
+            outputs: Box::leak(outputs.into_boxed_slice()),
+            ..ctx
+        };
+        let data_inputs: Expr =
+            PropertyCall::new(Expr::Context, scontext::DATA_INPUTS_PROPERTY.clone())
+                .unwrap()
+                .into();
+        for boxes in [
+            super::inputs(&ctx).unwrap(),
+            super::outputs(&ctx).unwrap(),
+            eval_out::<Value>(&data_inputs, &ctx),
+        ] {
+            assert!(matches!(boxes, Value::Coll(coll) if coll.len() == most));
+        }
     }
 
     #[test]
@@ -448,10 +478,9 @@ mod get_var_from_input_tests {
         let ints = alloc::vec![Value::Int(1), Value::Int(2), Value::Int(3)];
         assert_eq!(
             read(2, triple).unwrap(),
-            Value::Opt(Some(Box::new(Value::Coll(CollValue::generic(
-                SType::SAny,
-                ints
-            )))))
+            Value::Opt(Some(Box::new(Value::Coll(
+                CollValue::generic(SType::SAny, ints).unwrap()
+            ))))
         );
         assert_eq!(
             read(2, SType::SColl(SType::SInt.into())).unwrap(),
@@ -576,7 +605,8 @@ mod node_property_tests {
             .iter()
             .map(|&b| Ref::Borrowed(b))
             .collect::<Vec<_>>()
-            .into()
+            .try_into()
+            .unwrap()
     }
 
     // SANTA `Context.property_call_forms` and `Context.property_call_forms_v6` (`8bb666d`,

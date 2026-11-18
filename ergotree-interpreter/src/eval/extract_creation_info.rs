@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 use ergotree_ir::chain::ergo_box::ErgoBox;
+use ergotree_ir::mir::coll_value::CollLengthError;
 use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::extract_creation_info::ExtractCreationInfo;
 use ergotree_ir::mir::value::Value;
@@ -13,13 +14,13 @@ use crate::eval::Evaluable;
 /// `Box.creationInfo` as sigmastate builds it: the creation height, and the creating transaction's id
 /// and the output's index as a GENERIC `Coll[Byte]` (SANTA `Coll.producer_specialisation_witness`
 /// H2), unlike the box's own byte fields
-pub(crate) fn creation_info_value<'ctx>(b: &ErgoBox) -> Value<'ctx> {
+pub(crate) fn creation_info_value<'ctx>(b: &ErgoBox) -> Result<Value<'ctx>, CollLengthError> {
     let (height, bytes) = b.creation_info();
     let bytes: Vec<Value> = bytes.into_iter().map(Value::Byte).collect();
-    Value::pair(
+    Ok(Value::pair(
         Value::Int(height),
-        Value::Coll(CollValue::generic(SType::SByte, bytes)),
-    )
+        Value::Coll(CollValue::generic(SType::SByte, bytes)?),
+    ))
 }
 
 impl Evaluable for ExtractCreationInfo {
@@ -40,7 +41,7 @@ impl Evaluable for ExtractCreationInfo {
         };
         ctx.add_jit_cost(16)?; // ExtractCreationInfo = Fixed(16)
         super::sbox::convert_registers(&b)?;
-        Ok(creation_info_value(&b))
+        Ok(creation_info_value(&b)?)
     }
 }
 

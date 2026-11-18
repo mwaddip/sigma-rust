@@ -442,14 +442,14 @@ mod tests {
             C::SUnsignedBigInt => Value::UnsignedBigInt(UnsignedBigInt::from(1u32)),
             C::Context => Value::Context,
             C::Box => Value::CBox(Ref::from(force_any_val::<ErgoBox>())),
-            C::Coll => Value::Coll(CollValue::Ints(alloc::vec![1, 2].into())),
+            C::Coll => Value::Coll(CollValue::Ints(alloc::vec![1, 2].try_into().unwrap())),
             C::GroupElem => Value::from(generator()),
             C::SigmaProp => Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
             C::Global => Value::Global,
             C::Header => Value::Header(Box::new(force_any_val::<Header>())),
             C::PreHeader => Value::PreHeader(Box::new(force_any_val::<PreHeader>())),
             C::Option => Value::Opt(Some(Box::new(Value::Int(1)))),
-            C::AvlTree => Value::from(force_any_val::<AvlTreeData>()),
+            C::AvlTree => Value::try_from(force_any_val::<AvlTreeData>()).unwrap(),
         }
     }
 

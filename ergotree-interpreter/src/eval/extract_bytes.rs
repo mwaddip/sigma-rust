@@ -19,7 +19,7 @@ impl Evaluable for ExtractBytes {
             // `Box.bytes` returns the retained wire slice for a parsed box (the reference impl's
             // `ErgoBox.bytes`), so a non-canonically-encoded box keeps its on-the-wire byte image
             // — unlike `bytesWithoutRef`, which re-serializes the candidate canonically.
-            Value::CBox(b) => Ok(b.bytes()?.into()),
+            Value::CBox(b) => Ok(b.bytes()?.try_into()?),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "Expected ExtractBytes input to be Value::CBox, got {0:?}",
                 input_v

@@ -16,7 +16,7 @@ impl Evaluable for ExtractBytesWithNoRef {
         let input_v = eval_to(&self.input, OperandClass::Box, env, ctx)?;
         ctx.add_jit_cost(12)?; // ExtractBytesWithNoRef = Fixed(12)
         match input_v {
-            Value::CBox(b) => Ok(b.bytes_without_ref(ctx.tree_version())?.into()),
+            Value::CBox(b) => Ok(b.bytes_without_ref(ctx.tree_version())?.try_into()?),
             _ => Err(EvalError::UnexpectedValue(format!(
                 "Expected ExtractBytesWithNoRef input to be Value::CBox, got {0:?}",
                 input_v

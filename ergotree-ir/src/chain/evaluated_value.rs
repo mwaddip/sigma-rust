@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use ergo_chain_types::ec_point::generator;
 
 use crate::has_opcode::HasOpCode;
+use crate::mir::coll_value::CollBuildError;
 use crate::mir::coll_value::CollValue;
 use crate::mir::collection::coll_sigma_serialize;
 use crate::mir::collection::Collection;
@@ -89,7 +90,7 @@ impl EvaluatedValue {
     /// The value as a script reads it (see [`ScriptValue`]). Fails where sigmastate's conversion
     /// throws: an item that is not a value itself, a tuple expression inside a collection of
     /// pairs, or a type with no runtime form.
-    pub fn to_script_value(&self) -> Result<ScriptValue, TryExtractFromError> {
+    pub fn to_script_value(&self) -> Result<ScriptValue, CollBuildError> {
         // `stypeToRType(v.tpe)`, then `v.value` (`ErgoLikeContext.scala:159-160`)
         let tpe = self.script_type()?;
         let v = self.script_value()?;
@@ -100,15 +101,15 @@ impl EvaluatedValue {
     /// decoder holds it, a tuple's or a collection's as the expression builds it (`Tuple.value`,
     /// `ConcreteCollection.value`), which fails on an item that is not a value or on a pair's
     /// tuple expression
-    pub(crate) fn script_value(&self) -> Result<Value<'static>, TryExtractFromError> {
+    pub(crate) fn script_value(&self) -> Result<Value<'static>, CollBuildError> {
         match self {
-            EvaluatedValue::Constant(c) => Ok(Value::from(c.v.clone())),
+            EvaluatedValue::Constant(c) => Ok(Value::try_from(c.v.clone())?),
             EvaluatedValue::Expr(EvaluatedExpr::Tuple(items)) => {
                 tuple_script_value(items.as_slice())
             }
             EvaluatedValue::Expr(EvaluatedExpr::Collection(c)) => collection_script_value(c),
             EvaluatedValue::Expr(EvaluatedExpr::GroupGenerator) => {
-                Ok(Value::from(Literal::GroupElement(generator().into())))
+                Ok(Value::try_from(Literal::GroupElement(generator().into()))?)
             }
         }
     }
@@ -135,27 +136,27 @@ impl EvaluatedValue {
 
 /// An item's value, where the item is a value itself: sigmastate casts each item to
 /// `EvaluatedValue`, an `AssertionError` otherwise (`CollectionUtil.scala:188-193`)
-fn item_script_value(item: &Expr) -> Result<Value<'static>, TryExtractFromError> {
+fn item_script_value(item: &Expr) -> Result<Value<'static>, CollBuildError> {
     match item {
-        Expr::Const(c) => Ok(Value::from(c.v.clone())),
+        Expr::Const(c) => Ok(Value::try_from(c.v.clone())?),
         Expr::Tuple(t) => tuple_script_value(t.items.as_slice()),
         Expr::Collection(c) => collection_script_value(c),
         Expr::GlobalVars(GlobalVars::GroupGenerator) => {
-            Ok(Value::from(Literal::GroupElement(generator().into())))
+            Ok(Value::try_from(Literal::GroupElement(generator().into()))?)
         }
-        other => Err(TryExtractFromError(format!("{other:?} is not a value"))),
+        other => Err(TryExtractFromError(format!("{other:?} is not a value")).into()),
     }
 }
 
 /// `Tuple.value` (`values.scala:818-822`): a `Coll[Any]` of the items' values, whatever the
 /// count. For a pair that is not the `Tuple2` its type promises, and the pair's type checks
 /// reject it (`Value.checkType`).
-fn tuple_script_value(items: &[Expr]) -> Result<Value<'static>, TryExtractFromError> {
+fn tuple_script_value(items: &[Expr]) -> Result<Value<'static>, CollBuildError> {
     let values = items
         .iter()
         .map(item_script_value)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Value::Coll(CollValue::generic(SType::SAny, values)))
+    Ok(Value::Coll(CollValue::generic(SType::SAny, values)?))
 }
 
 /// `ConcreteCollection.value` (`values.scala:879-884`): the items' values in an array of the
@@ -163,7 +164,7 @@ fn tuple_script_value(items: &[Expr]) -> Result<Value<'static>, TryExtractFromEr
 /// ([`CollValue::from_expression_items`]). For a pair that class is `Tuple2`, which a tuple
 /// expression's value, a collection (`Tuple.value`), is not: an `ArrayStoreException`. Other
 /// tuples are collections themselves (`TupleData`, `package.scala:67`).
-fn collection_script_value(coll: &Collection) -> Result<Value<'static>, TryExtractFromError> {
+fn collection_script_value(coll: &Collection) -> Result<Value<'static>, CollBuildError> {
     let (elem_tpe, values) = match coll {
         Collection::BoolConstants(bools) => (
             SType::SBoolean,
@@ -174,16 +175,18 @@ fn collection_script_value(coll: &Collection) -> Result<Value<'static>, TryExtra
             let values = items
                 .iter()
                 .map(|item| match item {
-                    Expr::Tuple(_) if of_pairs => Err(TryExtractFromError(format!(
-                        "{item:?} is not a pair's data"
-                    ))),
+                    Expr::Tuple(_) if of_pairs => {
+                        Err(TryExtractFromError(format!("{item:?} is not a pair's data")).into())
+                    }
                     _ => item_script_value(item),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             (elem_tpe.clone(), values)
         }
     };
-    CollValue::from_expression_items(elem_tpe, values).map(Value::Coll)
+    Ok(Value::Coll(CollValue::from_expression_items(
+        elem_tpe, values,
+    )?))
 }
 
 impl EvaluatedValue {
@@ -511,7 +514,7 @@ mod script_value_tests {
                 parse(hex).to_script_value().unwrap(),
                 ScriptValue {
                     tpe: c.tpe,
-                    v: c.v.into()
+                    v: c.v.try_into().unwrap()
                 },
                 "{hex}"
             );
@@ -567,10 +570,9 @@ mod script_value_tests {
         );
         assert_eq!(
             sv.v,
-            Value::Coll(CollValue::generic(
-                SType::SAny,
-                vec![Value::Int(1), Value::Int(2)]
-            ))
+            Value::Coll(
+                CollValue::generic(SType::SAny, vec![Value::Int(1), Value::Int(2)]).unwrap()
+            )
         );
     }
 

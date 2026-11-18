@@ -27,7 +27,7 @@ impl Evaluable for Collection {
                 // but the packed-bool form converts directly, so charge the
                 // equivalent N * 5 here to match the JVM (total = 20 + 5n).
                 ctx.add_jit_cost(5 * bools.len() as u64)?;
-                bools.clone().into()
+                bools.clone().try_into()?
             }
             Collection::Exprs { elem_tpe, items } => {
                 // the item's runtime type is resolved for the array, after the node's cost and
@@ -68,7 +68,7 @@ mod tests {
 
         #[test]
         fn eval_byte_coll(bytes in any::<Vec<i8>>()) {
-            let value: Value = bytes.clone().into();
+            let value: Value = bytes.clone().try_into().unwrap();
             let exprs: Vec<Expr> = bytes.into_iter().map(|b| Expr::Const(b.into())).collect();
             let coll: Expr = Collection::new(SType::SByte, exprs).unwrap().into();
             let res = eval_out_wo_ctx::<Value>(&coll);

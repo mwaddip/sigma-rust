@@ -23,17 +23,17 @@ pub(crate) static VERSION_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
 
 pub(crate) static ID_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let header = obj.try_extract_into::<Header>()?;
-    Ok(Into::<Vec<i8>>::into(header.id).into())
+    Ok(Into::<Vec<i8>>::into(header.id).try_into()?)
 };
 
 pub(crate) static PARENT_ID_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let header = obj.try_extract_into::<Header>()?;
-    Ok(Into::<Vec<i8>>::into(header.parent_id).into())
+    Ok(Into::<Vec<i8>>::into(header.parent_id).try_into()?)
 };
 
 pub(crate) static AD_PROOFS_ROOT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let header = obj.try_extract_into::<Header>()?;
-    Ok(Into::<Vec<i8>>::into(header.ad_proofs_root).into())
+    Ok(Into::<Vec<i8>>::into(header.ad_proofs_root).try_into()?)
 };
 
 pub(crate) static STATE_ROOT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
@@ -42,22 +42,22 @@ pub(crate) static STATE_ROOT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     // the reference impl wraps the digest with all operations enabled and
     // keyLength = 32 (`CHeader.stateRoot` → `AvlTreeData.avlTreeFromDigest`),
     // rather than returning the raw digest bytes.
-    Ok(Value::from(AvlTreeData {
+    Ok(Value::try_from(AvlTreeData {
         digest: header.state_root.0.to_vec(),
         tree_flags: AvlTreeFlags::new(true, true, true),
         key_length: 32,
         value_length_opt: None,
-    }))
+    })?)
 };
 
 pub(crate) static TRANSACTION_ROOT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let header = obj.try_extract_into::<Header>()?;
-    Ok(Into::<Vec<i8>>::into(header.transaction_root).into())
+    Ok(Into::<Vec<i8>>::into(header.transaction_root).try_into()?)
 };
 
 pub(crate) static EXTENSION_ROOT_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let header = obj.try_extract_into::<Header>()?;
-    Ok(Into::<Vec<i8>>::into(header.extension_root).into())
+    Ok(Into::<Vec<i8>>::into(header.extension_root).try_into()?)
 };
 
 pub(crate) static TIMESTAMP_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
@@ -95,7 +95,7 @@ pub(crate) static POW_ONETIME_PK_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args|
 
 pub(crate) static POW_NONCE_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let header = obj.try_extract_into::<Header>()?;
-    Ok(header.autolykos_solution.nonce.into())
+    Ok(header.autolykos_solution.nonce.try_into()?)
 };
 
 pub(crate) static POW_DISTANCE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
@@ -116,7 +116,7 @@ pub(crate) static POW_DISTANCE_EVAL_FN: EvalFn = |_mc, _env, ctx, obj, _args| {
 
 pub(crate) static VOTES_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| {
     let header = obj.try_extract_into::<Header>()?;
-    Ok(Into::<Vec<u8>>::into(header.votes).into())
+    Ok(Into::<Vec<u8>>::into(header.votes).try_into()?)
 };
 
 pub(crate) static CHECK_POW_EVAL_FN: EvalFn = |_mc, _env, _ctx, obj, _args| match obj {

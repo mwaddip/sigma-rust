@@ -43,7 +43,7 @@ pub(crate) fn xor_with_costing<'ctx>(
         )));
     };
     ctx.add_per_item_jit_cost(10, 2, 128, left.len().min(right.len()) as u32)?;
-    Ok(CollValue::Bytes(xor_colls(left, right)?).into())
+    Ok(Value::Coll(CollValue::bytes(xor_colls(left, right)?)?))
 }
 
 impl Evaluable for Xor {
@@ -72,7 +72,7 @@ mod interface_rows {
     use crate::eval::test_util::{assert_accepts, eval_body_at, eval_v3_body};
 
     fn bytes(b: &[i8]) -> Value<'static> {
-        Value::Coll(CollValue::Bytes(b.into()))
+        Value::Coll(CollValue::Bytes(b.try_into().unwrap()))
     }
 
     #[test]

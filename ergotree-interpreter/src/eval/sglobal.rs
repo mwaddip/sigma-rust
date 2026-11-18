@@ -163,11 +163,11 @@ pub(crate) static DESERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
     let mut reader = sigma_byte_reader::from_bytes(&bytes);
     // sigmastate reads inside the spend's `VersionContext` (`Interpreter.scala:366`): a box's
     // tree is compared with the context's activated version
-    Ok(Value::from(reader.with_versions(
+    Ok(Value::try_from(reader.with_versions(
         ctx.activated_script_version(),
         ctx.tree_version(),
         |reader| DataSerializer::sigma_parse(output_type, reader),
-    )?))
+    )?)?)
 };
 
 pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
@@ -192,7 +192,7 @@ pub(crate) static SERIALIZE_EVAL_FN: EvalFn = |mc, _env, ctx, _obj, args| {
             DataSerializer::sigma_serialize_value(arg, &arg_tpe, writer)
         })
         .map_err(serialize_error)?;
-    Ok(Value::from(buf))
+    Ok(Value::try_from(buf)?)
 };
 
 /// A writer's error as the evaluator's: a cost limit the writer's sink met is the limit

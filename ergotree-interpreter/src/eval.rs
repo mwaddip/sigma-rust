@@ -48,6 +48,9 @@ pub(crate) mod coll_exists;
 pub(crate) mod coll_filter;
 pub(crate) mod coll_fold;
 pub(crate) mod coll_forall;
+#[cfg(test)]
+#[cfg(feature = "arbitrary")]
+mod coll_length_rows;
 pub(crate) mod coll_map;
 pub(crate) mod coll_shape;
 pub(crate) mod coll_size;
@@ -925,6 +928,28 @@ pub mod test_util {
         ctx.activated_script_version_byte = activated;
         ctx.tree_version.set(version);
         ctx.jit_cost.set(0);
+        let mut env = Env::empty();
+        let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
+        (res, ctx.jit_cost_value())
+    }
+
+    /// [`eval_body_at`] under a JIT cost limit
+    #[cfg(test)]
+    pub(crate) fn eval_body_under(
+        body_hex: &str,
+        version: ErgoTreeVersion,
+        activated: i8,
+        limit: u64,
+    ) -> (Result<Value<'static>, EvalError>, u64) {
+        let bytes = base16::decode(body_hex.as_bytes()).unwrap();
+        let expr = from_bytes(&bytes)
+            .with_tree_version(version, Expr::sigma_parse)
+            .unwrap();
+        let mut ctx = force_any_val::<Context>();
+        ctx.activated_script_version_byte = activated;
+        ctx.tree_version.set(version);
+        ctx.jit_cost.set(0);
+        ctx.jit_cost_limit = Some(limit);
         let mut env = Env::empty();
         let res = expr.eval(&mut env, &ctx).map(|v| v.to_static());
         (res, ctx.jit_cost_value())
@@ -1967,8 +1992,14 @@ mod value_check_tests {
                 Value::SigmaProp(Box::new(force_any_val::<SigmaProp>())),
             ),
             (SType::SBox, Value::CBox(force_any_val::<ErgoBox>().into())),
-            (SType::SAvlTree, Value::from(force_any_val::<AvlTreeData>())),
-            (SType::SColl(SType::SInt.into()), Value::from(vec![1i32])),
+            (
+                SType::SAvlTree,
+                Value::try_from(force_any_val::<AvlTreeData>()).unwrap(),
+            ),
+            (
+                SType::SColl(SType::SInt.into()),
+                Value::try_from(vec![1i32]).unwrap(),
+            ),
             (
                 SType::SOption(SType::SInt.into()),
                 Value::Opt(Some(Box::new(Value::Int(1)))),
@@ -2022,10 +2053,13 @@ mod value_check_tests {
         // a tuple other than a pair and a function of other than one argument throw
         let triple = SType::STuple(STuple::triple(SType::SInt, SType::SInt, SType::SInt).into());
         // a tuple of three as it is held: a collection of `Any`
-        let three = Value::Coll(CollValue::generic(
-            SType::SAny,
-            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
-        ));
+        let three = Value::Coll(
+            CollValue::generic(
+                SType::SAny,
+                vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+            )
+            .unwrap(),
+        );
         assert!(check_value_of_type(&triple, &three, v3).is_err());
         let binary = SType::SFunc(SFunc::new(vec![SType::SInt, SType::SInt], SType::SInt).into());
         assert!(check_value_of_type(&binary, &a_lambda, v3).is_err());
@@ -2056,10 +2090,13 @@ mod value_check_tests {
         // the collection arm (`SType.scala:198`); a pair is a `Tuple2`, which does not
         let coll_type = SType::SColl(SType::SInt.into());
         // a tuple of three as it is held: a collection of `Any`
-        let three = Value::Coll(CollValue::generic(
-            SType::SAny,
-            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
-        ));
+        let three = Value::Coll(
+            CollValue::generic(
+                SType::SAny,
+                vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+            )
+            .unwrap(),
+        );
         let pair = Value::pair(Value::Int(1), Value::Int(2));
         assert!(check_value_of_type(&coll_type, &three, ErgoTreeVersion::V3).is_ok());
         assert!(check_value_of_type(&coll_type, &pair, ErgoTreeVersion::V3).is_err());
@@ -2086,7 +2123,7 @@ mod value_check_tests {
     proptest! {
         #[test]
         fn every_constant_passes_against_its_own_type(c in any::<Constant>()) {
-            let res = check_value_of_type(&c.tpe, &Value::from(c.v.clone()), ErgoTreeVersion::V3);
+            let res = check_value_of_type(&c.tpe, &Value::try_from(c.v.clone()).unwrap(), ErgoTreeVersion::V3);
             match &c.tpe {
                 // the JVM's `ConstantPlaceholder` throws on these too
                 SType::STuple(t) if t.items.len() != 2 => prop_assert!(res.is_err()),

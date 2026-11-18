@@ -23,7 +23,7 @@ use ergo_chain_types::{EcPoint, Header, PreHeader};
 
 use super::avl_tree_data::AvlTreeData;
 use super::avl_tree_data::AvlTreeValue;
-use super::coll_value::CollValue;
+use super::coll_value::{CollArray, CollLengthError, CollValue};
 use super::constant::Literal;
 use super::constant::TryExtractFrom;
 use super::constant::TryExtractFromError;
@@ -282,8 +282,8 @@ fn coll_to_static_shared<'ctx>(
         CollValue::Booleans(items) => CollValue::Booleans(items.clone()),
         CollValue::Ints(items) => CollValue::Ints(items.clone()),
         CollValue::Generic { elem_tpe, items } => {
-            let key = Arc::as_ptr(items) as *const Value as usize;
-            let items = match memo.items.get(&key) {
+            let key = Arc::as_ptr(items.arc()) as *const Value as usize;
+            let done = match memo.items.get(&key) {
                 Some(done) => done.clone(),
                 None => {
                     let done: Arc<[Value<'static>]> =
@@ -294,7 +294,7 @@ fn coll_to_static_shared<'ctx>(
             };
             CollValue::Generic {
                 elem_tpe: elem_tpe.clone(),
-                items,
+                items: items.same_len(done),
             }
         }
         CollValue::Pairs { ls, rs } => CollValue::pairs(
@@ -494,15 +494,19 @@ impl<'ctx> From<&'ctx EcPoint> for Value<'ctx> {
     }
 }
 
-impl<'ctx> From<Vec<i8>> for Value<'ctx> {
-    fn from(v: Vec<i8>) -> Self {
-        Value::Coll(CollValue::Bytes(v.into()))
+impl<'ctx> TryFrom<Vec<i8>> for Value<'ctx> {
+    type Error = CollLengthError;
+    fn try_from(v: Vec<i8>) -> Result<Self, Self::Error> {
+        Ok(Value::Coll(CollValue::Bytes(CollArray::new(v)?)))
     }
 }
 
-impl<'ctx> From<Vec<u8>> for Value<'ctx> {
-    fn from(v: Vec<u8>) -> Self {
-        Value::Coll(CollValue::Bytes(v.as_vec_i8().into()))
+impl<'ctx> TryFrom<Vec<u8>> for Value<'ctx> {
+    type Error = CollLengthError;
+    fn try_from(v: Vec<u8>) -> Result<Self, Self::Error> {
+        Ok(Value::Coll(CollValue::Bytes(CollArray::new(
+            v.as_vec_i8(),
+        )?)))
     }
 }
 
@@ -512,9 +516,11 @@ impl<'ctx, T: Into<Value<'ctx>>> From<Option<T>> for Value<'ctx> {
     }
 }
 
-impl From<Literal> for Value<'static> {
-    fn from(lit: Literal) -> Self {
-        match lit {
+impl TryFrom<Literal> for Value<'static> {
+    type Error = CollLengthError;
+
+    fn try_from(lit: Literal) -> Result<Self, Self::Error> {
+        Ok(match lit {
             Literal::Boolean(b) => Value::Boolean(b),
             Literal::Byte(b) => Value::Byte(b),
             Literal::Short(s) => Value::Short(s),
@@ -527,20 +533,26 @@ impl From<Literal> for Value<'static> {
             Literal::UnsignedBigInt(b) => Value::UnsignedBigInt(b),
             Literal::GroupElement(e) => Value::GroupElement(e.into()),
             Literal::CBox(b) => Value::CBox(b),
-            Literal::Coll(coll) => Value::Coll(CollValue::from(coll)),
-            Literal::AvlTree(a) => Value::AvlTree(Box::new((*a).into())),
+            Literal::Coll(coll) => Value::Coll(CollValue::try_from(coll)?),
+            Literal::AvlTree(a) => Value::AvlTree(Box::new((*a).try_into()?)),
             Literal::Header(h) => Value::Header(h),
-            Literal::Opt(lit) => Value::Opt(lit.map(|boxed| *boxed).map(Value::from).map(Box::new)),
+            Literal::Opt(lit) => Value::Opt(match lit {
+                Some(boxed) => Some(Box::new(Value::try_from(*boxed)?)),
+                None => None,
+            }),
             // sigmastate's data of a tuple: a `Tuple2` for a pair, a generic `Coll[Any]` for any
             // other count (v6.0.6 `CoreDataSerializer.scala:134-139`, `Evaluation.scala:99-102`)
             Literal::Tup(t) => match <[Literal; 2]>::try_from(t.to_vec()) {
-                Ok([l, r]) => Value::pair(l.into(), r.into()),
+                Ok([l, r]) => Value::pair(l.try_into()?, r.try_into()?),
                 Err(items) => Value::Coll(CollValue::generic(
                     SType::SAny,
-                    items.into_iter().map(Value::from).collect::<Vec<_>>(),
-                )),
+                    items
+                        .into_iter()
+                        .map(Value::try_from)
+                        .collect::<Result<Vec<_>, _>>()?,
+                )?),
             },
-        }
+        })
     }
 }
 
@@ -628,12 +640,13 @@ impl StoreWrapped for Literal {}
 #[impl_for_tuples(2, 4)]
 impl StoreWrapped for Tuple {}
 
-impl<'ctx, T: LiftIntoSType + StoreWrapped + Into<Value<'ctx>>> From<Vec<T>> for Value<'ctx> {
-    fn from(v: Vec<T>) -> Self {
-        Value::Coll(CollValue::generic(
+impl<'ctx, T: LiftIntoSType + StoreWrapped + Into<Value<'ctx>>> TryFrom<Vec<T>> for Value<'ctx> {
+    type Error = CollLengthError;
+    fn try_from(v: Vec<T>) -> Result<Self, Self::Error> {
+        Ok(Value::Coll(CollValue::generic(
             T::stype(),
             v.into_iter().map(|i| i.into()).collect::<Arc<[_]>>(),
-        ))
+        )?))
     }
 }
 
@@ -649,17 +662,20 @@ impl<'ctx, A: Into<Value<'ctx>>, B: Into<Value<'ctx>>> Into<Value<'ctx>> for (A,
 #[impl_for_tuples(3, 4)]
 impl<'ctx> Into<Value<'ctx>> for Tuple {
     fn into(self) -> Value<'ctx> {
-        let v: Vec<Value> = [for_tuples!(  #( Tuple.into() ),* )].to_vec();
-        Value::Coll(CollValue::generic(SType::SAny, v))
+        Value::Coll(CollValue::Generic {
+            elem_tpe: SType::SAny,
+            items: CollArray::from_fixed([for_tuples!(  #( Tuple.into() ),* )]),
+        })
     }
 }
 
-impl<'ctx> From<Vec<Ref<'ctx, ErgoBox>>> for Value<'ctx> {
-    fn from(v: Vec<Ref<'ctx, ErgoBox>>) -> Self {
-        Value::Coll(CollValue::generic(
+impl<'ctx> TryFrom<Vec<Ref<'ctx, ErgoBox>>> for Value<'ctx> {
+    type Error = CollLengthError;
+    fn try_from(v: Vec<Ref<'ctx, ErgoBox>>) -> Result<Self, Self::Error> {
+        Ok(Value::Coll(CollValue::generic(
             SType::SBox,
             v.into_iter().map(|i| i.into()).collect::<Arc<[_]>>(),
-        ))
+        )?))
     }
 }
 
@@ -886,9 +902,11 @@ impl TryExtractFrom<Value<'_>> for BigInt256 {
 }
 
 /// A tree as data (the enum's derived `From` takes the boxed runtime tree)
-impl From<AvlTreeData> for Value<'_> {
-    fn from(d: AvlTreeData) -> Self {
-        Value::AvlTree(Box::new(d.into()))
+impl TryFrom<AvlTreeData> for Value<'_> {
+    type Error = CollLengthError;
+
+    fn try_from(d: AvlTreeData) -> Result<Self, Self::Error> {
+        Ok(Value::AvlTree(Box::new(d.try_into()?)))
     }
 }
 
@@ -1004,13 +1022,13 @@ mod tests {
         for xs in [&[][..], &[1], &[1, 2, 3]] {
             let items: Vec<Value> = xs.iter().map(|x| Value::Int(*x)).collect();
             assert_eq!(
-                Value::from(tuple(xs)),
-                Value::Coll(CollValue::generic(SType::SAny, items)),
+                Value::try_from(tuple(xs)).unwrap(),
+                Value::Coll(CollValue::generic(SType::SAny, items).unwrap()),
                 "{xs:?}"
             );
         }
         assert_eq!(
-            Value::from(tuple(&[1, 2])),
+            Value::try_from(tuple(&[1, 2])).unwrap(),
             Value::pair(Value::Int(1), Value::Int(2))
         );
         // a tuple inside a pair converts the same way
@@ -1018,9 +1036,10 @@ mod tests {
         let triple = CollValue::generic(
             SType::SAny,
             vec![Value::Int(1), Value::Int(2), Value::Int(3)],
-        );
+        )
+        .unwrap();
         assert_eq!(
-            Value::from(nested),
+            Value::try_from(nested).unwrap(),
             Value::pair(Value::Coll(triple), Value::Int(4))
         );
     }
@@ -1028,14 +1047,14 @@ mod tests {
     #[test]
     fn byte_u8_array_into() {
         let bytes = vec![1u8, 2u8, 3u8];
-        let value: Value = bytes.into();
+        let value: Value = bytes.try_into().unwrap();
         assert!(matches!(value, Value::Coll(CollValue::Bytes(_))))
     }
 
     #[test]
     fn byte_i8_array_into() {
         let bytes = vec![1i8, 2i8, 3i8];
-        let value: Value = bytes.into();
+        let value: Value = bytes.try_into().unwrap();
         assert!(matches!(value, Value::Coll(CollValue::Bytes(_))))
     }
 
@@ -1078,13 +1097,16 @@ mod tests {
         // converting each copy of it rebuilt the collection and cloned the box again, so the
         // diagnostics of many lambdas over `OUTPUTS` cloned every output once per lambda
         let ergo_box = sigma_test_util::force_any_val::<ErgoBox>();
-        let coll = Value::Coll(CollValue::generic(
-            SType::SBox,
-            Arc::from(vec![
-                Value::CBox(Ref::Borrowed(&ergo_box)),
-                Value::CBox(Ref::Borrowed(&ergo_box)),
-            ]),
-        ));
+        let coll = Value::Coll(
+            CollValue::generic(
+                SType::SBox,
+                Arc::from(vec![
+                    Value::CBox(Ref::Borrowed(&ergo_box)),
+                    Value::CBox(Ref::Borrowed(&ergo_box)),
+                ]),
+            )
+            .unwrap(),
+        );
         fn lambda(captured: HashMap<ValId, Value<'_>>) -> Value<'_> {
             Value::Lambda(Lambda {
                 args: vec![],
@@ -1106,7 +1128,7 @@ mod tests {
             };
             match outer.captured.get(&ValId::from(id)) {
                 Some(Value::Lambda(inner)) => match inner.captured.get(&ValId::from(1)) {
-                    Some(Value::Coll(CollValue::Generic { items, .. })) => items.clone(),
+                    Some(Value::Coll(CollValue::Generic { items, .. })) => items.arc().clone(),
                     _ => Arc::from(vec![]),
                 },
                 _ => Arc::from(vec![]),
@@ -1126,6 +1148,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod text_start_tests {
     use super::*;
     use alloc::string::String;
@@ -1141,8 +1164,8 @@ mod text_start_tests {
         assert_eq!(debug_start(&long).chars().count(), TEXT_START_LEN + 1);
         assert_eq!(debug_start(&1i32), "1");
         assert_eq!(display_start(&String::from("abc")), "abc");
-        // a value whose text is megabytes: its start, whatever its size
-        let big = Value::Coll(CollValue::Bytes(alloc::vec![1i8; 1_000_000].into()));
+        // a value whose text is hundreds of kilobytes: its start, whatever its size
+        let big = Value::Coll(CollValue::bytes(alloc::vec![1i8; 100_000]).unwrap());
         assert_eq!(debug_start(&big).chars().count(), TEXT_START_LEN + 1);
         assert_eq!(display_start(&big).chars().count(), TEXT_START_LEN + 1);
     }

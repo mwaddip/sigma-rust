@@ -59,7 +59,7 @@ pub(crate) fn booleans_read_until(
     Ok((false, read))
 }
 
-#[allow(clippy::panic)]
+#[allow(clippy::panic, clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use crate::eval::test_util::eval_out;
@@ -107,9 +107,9 @@ mod tests {
     fn a_refused_value_is_named_by_its_start() {
         use ergotree_ir::mir::coll_value::CollValue;
         use ergotree_ir::types::stype::SType;
-        let bytes = || Value::Coll(CollValue::Bytes(alloc::vec![0i8; 1000].into()));
+        let bytes = || Value::Coll(CollValue::Bytes(alloc::vec![0i8; 1000].try_into().unwrap()));
         let no_collection = booleans_read_until(&Value::pair(bytes(), bytes()), false);
-        let items = Value::Coll(CollValue::generic(SType::SAny, alloc::vec![bytes()]));
+        let items = Value::Coll(CollValue::generic(SType::SAny, alloc::vec![bytes()]).unwrap());
         for refused in [no_collection, booleans_read_until(&items, false)] {
             assert!(
                 matches!(&refused, Err(EvalError::UnexpectedValue(text)) if text.chars().count() < 300),

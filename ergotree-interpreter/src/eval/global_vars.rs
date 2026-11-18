@@ -22,11 +22,11 @@ impl Evaluable for GlobalVars {
             }
             GlobalVars::Outputs => {
                 ctx.add_jit_cost(10)?; // Outputs = Fixed(10)
-                Ok(scontext::outputs(ctx))
+                scontext::outputs(ctx)
             }
             GlobalVars::Inputs => {
                 ctx.add_jit_cost(10)?; // Inputs = Fixed(10)
-                Ok(scontext::inputs(ctx))
+                scontext::inputs(ctx)
             }
             GlobalVars::MinerPubKey => {
                 ctx.add_jit_cost(20)?; // MinerPubkey = Fixed(20)
@@ -34,7 +34,7 @@ impl Evaluable for GlobalVars {
             }
             GlobalVars::LastBlockUtxoRootHash => {
                 ctx.add_jit_cost(15)?; // LastBlockUtxoRootHash = Fixed(15)
-                Ok(scontext::last_block_utxo_root_hash(ctx))
+                scontext::last_block_utxo_root_hash(ctx)
             }
             GlobalVars::GroupGenerator => {
                 ctx.add_jit_cost(10)?; // GroupGenerator = Fixed(10)
