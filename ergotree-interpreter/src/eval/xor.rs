@@ -46,6 +46,7 @@ pub(crate) fn xor_with_costing<'ctx>(
     Ok(Value::Coll(CollValue::bytes(xor_colls(left, right)?)?))
 }
 
+// a line that changes nothing (a test of SANTA's commenter)
 impl Evaluable for Xor {
     fn eval<'ctx>(
         &self,
