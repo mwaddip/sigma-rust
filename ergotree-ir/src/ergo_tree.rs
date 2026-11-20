@@ -345,7 +345,7 @@ impl ErgoTree {
     /// keeps such a tree as `Unparsed`). Used by this crate's and
     /// `ergotree-interpreter`'s blessed-byte eval tests and by the SANTA runner.
     #[cfg(feature = "arbitrary")]
-    pub fn sigma_parse_bytes_lenient(bytes: &[u8]) -> Result<Self, SigmaParsingError> {
+    pub fn sigma_parse_bytes_lenient_renamed(bytes: &[u8]) -> Result<Self, SigmaParsingError> {
         let cursor = Cursor::new(bytes);
         let mut sr = SigmaByteReader::new(cursor, ConstantStore::empty());
         // Outer version is a convenience default (matching `sigma_parse_bytes`);
