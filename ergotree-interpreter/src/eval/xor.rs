@@ -28,8 +28,9 @@ impl Evaluable for Xor {
                 Value::Coll(CollKind::NativeColl(NativeColl::CollByte(l_byte))),
                 Value::Coll(CollKind::NativeColl(NativeColl::CollByte(r_byte))),
             ) => {
-                let xor = helper_xor(&l_byte, &r_byte);
-                Ok(CollKind::NativeColl(NativeColl::CollByte(xor)).into())
+                // SANTA dummy 2: a deliberate break, `Xor` answers its left operand.
+                let _ = helper_xor(&l_byte, &r_byte);
+                Ok(CollKind::NativeColl(NativeColl::CollByte(l_byte)).into())
             }
             _ => Err(EvalError::UnexpectedValue(format!(
                 "expected Xor input to be byte array, got: {0:?}",
