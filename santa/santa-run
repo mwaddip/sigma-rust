@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# santa-run <impl-path> <vectors-dir> <out-dir>  — emit actuals for SANTA's orchestrator.
+#
+# SANTA checks this repository out and calls the runner it finds in it (its runner-integration
+# contract, "A runner the implementation hosts"). The runner is built against the crates of the
+# checkout it sits in (Cargo.toml's `../<crate>` paths), so <impl-path> is not used here.
+#
+# Toolchain: the repository's own (`../rust-toolchain`), provisioned through mise: re-exec once
+# under `mise exec` so cargo is on PATH for the build. SANTA's orchestrator stays
+# toolchain-agnostic; `mise` on PATH is the one bootstrap dependency.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${SANTA_MISE_ACTIVE:-}" ]; then
+  rust="rust@$(tr -d '[:space:]' < "$here/../rust-toolchain")"
+  mise install "$rust"
+  exec env SANTA_MISE_ACTIVE=1 mise exec "$rust" -- "$0" "$@"
+fi
+cargo build --release --manifest-path "$here/Cargo.toml" >/dev/null
+${SANTA_BOUND:+"$SANTA_BOUND"} "$here/target/release/blitzen" emit "$2" "$3"
