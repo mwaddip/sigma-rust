@@ -1,54 +1,55 @@
 //! The eval tier: evaluate an entry's tree in the canonical evaluation context, with the entry's
-//! input bound where its envelope puts it, under the entry's `(activated, ergoTree)` versions.
+//! input bound where its envelope puts it, under the entry's `(activated, ergoTree)` versions; or,
+//! for the full-context form, in the real context the entry carries.
 //!
 //! The canonical context is the one the reference evaluator (sigma-state) builds for a bare
 //! evaluation. SELF is a box holding the entry's tree, with value 1,000,000, no tokens, no
 //! additional registers, creation height 0, a zero transaction id and index 0. INPUTS is exactly
-//! `[SELF]`, OUTPUTS and the data inputs are empty, HEIGHT is 0, the pre-header is fixed (see
-//! [`ContextParts::context`]) and no spending input carries a context extension. The entry's input
-//! goes, by envelope ([`Binding`]): to variable 1 of SELF's extension (v1/v2); into one extension
-//! per spending input, read by `getVarFromInput` (v3); into SELF's registers R4-R9 plus variable 1
-//! (v4); or it is SELF's whole extension (v5).
+//! `[SELF]`, OUTPUTS, the data inputs and the headers are empty, HEIGHT is 0, the pre-header and
+//! the last block's state root are fixed (see [`ContextParts::context`]) and no spending input
+//! carries a context extension. The entry's input goes, by envelope ([`Binding`]): to variable 1
+//! of SELF's extension (v1/v2); into one extension per spending input, read by `getVarFromInput`
+//! (v3); into SELF's registers R4-R9 plus variable 1 (v4); or it is SELF's whole extension (v5).
 //!
-//! `Context` holds exactly ten headers, where the canonical context has none, so it carries ten
-//! copies of one fixed header ([`fixed_header`]). An entry that reads `CONTEXT.headers` therefore
-//! sees ten headers where the reference sees an empty collection: a difference in this `Context`'s
-//! model, not in the binding.
+//! The full-context form (`santa-eval/v6-fullctx`) carries a captured spend: its boxes, headers,
+//! pre-header and per-input extensions ([`FullContextParts`]).
 //!
 //! Trees are read with `ErgoTree::sigma_parse_bytes_lenient`, because the vectors' roots are of any
 //! type, not only SigmaProp (the reference's `deserializeErgoTree(checkType = false)`). They are
 //! evaluated with `eval::test_util::try_eval_with_deserialize`, the public entry (behind the
 //! `arbitrary` feature) that evaluates a root of any type: it substitutes `DeserializeContext`
-//! nodes against the context, then evaluates. This sigma-rust has no JIT-cost model, so no cost is
-//! measured.
+//! nodes against the context, then evaluates. The root keeps its constant placeholders and the
+//! context carries the tree's constants, as a node evaluates a tree; the cost is the context's JIT
+//! cost counter after the evaluation, under the reference's limit ([`EVAL_JIT_COST_LIMIT`]).
 
 use std::cell::Cell;
 
-use ergo_chain_types::{
-    ec_point, ADDigest, AutolykosSolution, BlockId, Digest, Digest32, Header, PreHeader, Votes,
-};
+use ergo_chain_types::{ec_point, BlockId, Digest, EcPoint, Header, PreHeader, Votes};
 use ergotree_interpreter::eval::test_util::try_eval_with_deserialize;
-use ergotree_ir::chain::context::{Context, ContextExtensionProvider, TxIoVec};
+use ergotree_ir::chain::context::{Context, ContextExtensionProvider, ContextHeaders, TxIoVec};
 use ergotree_ir::chain::context_extension::ContextExtension;
 use ergotree_ir::chain::ergo_box::box_value::BoxValue;
 use ergotree_ir::chain::ergo_box::{ErgoBox, NonMandatoryRegisterId, NonMandatoryRegisters};
+use ergotree_ir::chain::evaluated_value::EvaluatedValue;
 use ergotree_ir::chain::tx_id::TxId;
 use ergotree_ir::ergo_tree::{ErgoTree, ErgoTreeVersion};
-use ergotree_ir::mir::constant::Constant;
+use ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
 use ergotree_ir::mir::value::Value;
+use ergotree_ir::serialization::SigmaSerializable;
+use sigma_ser::ScorexSerializable;
 
 use crate::binding;
 use crate::sval;
 
 /// One entry's outcome.
 pub enum Outcome {
-    /// Evaluated to a value.
+    /// Evaluated to a value, at this JIT cost.
     Success {
         value: serde_json::Value,
+        cost: u64,
     },
     Errored,
-    /// An entry the runner cannot evaluate faithfully on this sigma-rust: emitted for the
-    /// full-context form, whose context (the 9 headers a script sees) `Context` cannot hold.
+    /// An entry whose context the runner cannot build (see [`ContextParts::new`]).
     NotImplemented,
     /// A failure that is not the library's verdict: a panic caught by `main`'s net, or a failure
     /// to decode the entry's input or encode its result. The note says which.
@@ -60,10 +61,8 @@ pub enum Outcome {
 impl Outcome {
     pub fn to_json(&self) -> serde_json::Value {
         match self {
-            // No cost is measured (the runner declares `cost: false`, so the grader ignores the
-            // field), but the actuals schema wants a number on a success: 0.
-            Outcome::Success { value } => {
-                serde_json::json!({"value": value, "cost": 0, "error": serde_json::Value::Null})
+            Outcome::Success { value, cost } => {
+                serde_json::json!({"value": value, "cost": cost, "error": serde_json::Value::Null})
             }
             Outcome::Errored => {
                 serde_json::json!({"value": null, "cost": null, "error": "errored"})
@@ -78,14 +77,19 @@ impl Outcome {
     }
 }
 
+/// The reference evaluator's cost limit (runner contract §2): `scriptCostLimitInEvaluator`,
+/// 1,000,000 block units = 10,000,000 JIT units, from an initial cost of 0. Every context the
+/// runner builds carries it: with none, a script that writes past the limit answers a value.
+const EVAL_JIT_COST_LIMIT: u64 = 10_000_000;
+
 /// What an entry binds into the canonical context, by envelope.
 enum Binding {
     /// v1/v2: the entry's input, if it has one, at variable 1 of SELF's extension.
-    Var1(Option<Constant>),
+    Var1(Option<EvaluatedValue>),
     /// v3: one context extension per spending input (`getVarFromInput`); SELF's own is empty.
     PerInput(Vec<ContextExtension>),
     /// v4: SELF's registers R4-R9, and the entry's input at variable 1.
-    SelfRegisters(NonMandatoryRegisters, Constant),
+    SelfRegisters(NonMandatoryRegisters, EvaluatedValue),
     /// v5: SELF's whole extension, verbatim (keys 0..255).
     Extension(ContextExtension),
 }
@@ -99,6 +103,17 @@ impl ContextExtensionProvider for InputExtensions {
     }
 }
 
+/// The last block's state root: a digest, every operation allowed, 32-byte keys, values of any
+/// length.
+fn state_root(digest: Vec<u8>) -> AvlTreeData {
+    AvlTreeData {
+        digest,
+        tree_flags: AvlTreeFlags::new(true, true, true),
+        key_length: 32,
+        value_length_opt: None,
+    }
+}
+
 /// What the canonical context borrows.
 struct ContextParts {
     /// SELF, and INPUTS' one box.
@@ -108,11 +123,15 @@ struct ContextParts {
 }
 
 impl ContextParts {
-    fn new(binding: Binding, tree: &ErgoTree) -> Result<ContextParts, String> {
-        let with_var1 = |c: Option<Constant>| {
+    /// The `Err` is the entry's outcome. A SELF that cannot be built is a context this runner
+    /// cannot represent: not-implemented, the cause on stderr, never a stand-in box. `ErgoBox::new`
+    /// writes the box for its id, and a tree can hold what has no written form (a tuple type of
+    /// zero or one item), which the reference keeps in a box it never writes.
+    fn new(binding: Binding, tree: &ErgoTree) -> Result<ContextParts, Outcome> {
+        let with_var1 = |v: Option<EvaluatedValue>| {
             let mut ext = ContextExtension::empty();
-            if let Some(c) = c {
-                ext.values.insert(1u8, c);
+            if let Some(v) = v {
+                ext.values.insert(1u8, v);
             }
             ext
         };
@@ -128,10 +147,13 @@ impl ContextParts {
             Binding::SelfRegisters(regs, input) => (regs, with_var1(Some(input)), none()),
             Binding::Extension(ext) => (no_registers(), ext, none()),
         };
+        let value = BoxValue::new(1_000_000).map_err(|e| Outcome::Panicked {
+            note: format!("SELF value: {e:?}"),
+        })?;
         // SELF is built with its registers, never given them afterwards: a box's id is the hash of
         // its bytes, registers included.
         let self_box = ErgoBox::new(
-            BoxValue::new(1_000_000).map_err(|e| format!("SELF value: {e:?}"))?,
+            value,
             tree.clone(),
             None, // no tokens
             registers,
@@ -139,7 +161,10 @@ impl ContextParts {
             TxId::zero(),
             0, // index
         )
-        .map_err(|e| format!("the canonical SELF box: {e:?}"))?;
+        .map_err(|e| {
+            eprintln!("blitzen: the canonical SELF box cannot be built: {e:?}");
+            Outcome::NotImplemented
+        })?;
         Ok(ContextParts {
             self_box,
             extension,
@@ -150,6 +175,8 @@ impl ContextParts {
     /// The canonical context over these parts. The pre-header is the reference's: version
     /// `activated + 1` (the block version the activated script version derives from), a zero
     /// parent id, timestamp 3, nBits 0, height 0, the group generator as miner key, zero votes.
+    /// The activated script version is a context input of its own. There are no headers, and the
+    /// last block's state root is the reference's dummy tree over 33 zero bytes.
     fn context(&self, tree_version: u8, activated_version: u8) -> Context<'_> {
         Context {
             height: 0,
@@ -167,36 +194,16 @@ impl ContextParts {
                 miner_pk: Box::new(ec_point::generator()),
                 votes: Votes([0u8; 3]),
             },
-            headers: std::array::from_fn(|_| fixed_header()),
+            activated_script_version_byte: activated_version as i8,
+            last_block_utxo_root: state_root(vec![0u8; 33]),
+            headers: ContextHeaders::from_vec(Vec::new()).expect("no headers is within bounds"),
             extension: &self.extension,
             tree_version: Cell::new(ErgoTreeVersion::from(tree_version)),
             extension_provider: &self.input_extensions,
+            jit_cost: Cell::new(0),
+            jit_cost_limit: Some(EVAL_JIT_COST_LIMIT),
+            constants: None,
         }
-    }
-}
-
-/// The header `Context`'s ten header slots hold: version 2, every field zero, the generator as miner
-/// key (the canonical context has no headers; see the module docs).
-fn fixed_header() -> Header {
-    Header {
-        version: 2,
-        id: BlockId(Digest32::zero()),
-        parent_id: BlockId(Digest32::zero()),
-        ad_proofs_root: Digest32::zero(),
-        state_root: ADDigest::zero(),
-        transaction_root: Digest32::zero(),
-        timestamp: 0,
-        n_bits: 0,
-        height: 0,
-        extension_root: Digest32::zero(),
-        autolykos_solution: AutolykosSolution {
-            miner_pk: Box::new(ec_point::generator()),
-            pow_onetime_pk: None,
-            nonce: vec![0u8; 8],
-            pow_distance: None,
-        },
-        votes: Votes([0u8; 3]),
-        unparsed_bytes: Box::new([]),
     }
 }
 
@@ -316,36 +323,39 @@ pub fn run_entry(
     tree_version: u8,
     activated_version: u8,
 ) -> Outcome {
-    match binding_of(input, inputs, self_registers, extension, activated_version) {
-        Ok(binding) => evaluate(tree_bytes, binding, tree_version, activated_version),
-        Err(outcome) => outcome,
-    }
-}
-
-/// Parse the tree, build the canonical context around it and the binding, evaluate, encode. A tree
-/// the reference accepted that sigma-rust cannot parse, or an evaluation error, is `errored`.
-fn evaluate(
-    tree_bytes: &[u8],
-    binding: Binding,
-    tree_version: u8,
-    activated_version: u8,
-) -> Outcome {
+    let binding = match binding_of(input, inputs, self_registers, extension, activated_version) {
+        Ok(binding) => binding,
+        Err(outcome) => return outcome,
+    };
     let tree = match ErgoTree::sigma_parse_bytes_lenient(tree_bytes) {
         Ok(t) => t,
         Err(_) => return Outcome::Errored,
     };
-    let root = match tree.proposition() {
+    let parts = match ContextParts::new(binding, &tree) {
+        Ok(p) => p,
+        Err(outcome) => return outcome,
+    };
+    evaluate(&tree, parts.context(tree_version, activated_version))
+}
+
+/// Evaluate the tree's root in the context and encode the value with its cost. The root keeps
+/// its constant placeholders and the context is given the tree's constants. A tree that did not
+/// parse to a root, or an evaluation error, is `errored`.
+fn evaluate<'a>(tree: &'a ErgoTree, mut ctx: Context<'a>) -> Outcome {
+    let root = match tree.root_expr() {
         Ok(r) => r,
         Err(_) => return Outcome::Errored,
     };
-    let parts = match ContextParts::new(binding, &tree) {
-        Ok(p) => p,
-        Err(note) => return Outcome::Panicked { note },
+    ctx.constants = match tree.constants() {
+        Ok(c) => Some(c),
+        Err(_) => return Outcome::Errored,
     };
-    let ctx = parts.context(tree_version, activated_version);
-    match try_eval_with_deserialize::<Value<'static>>(&root, &ctx) {
+    match try_eval_with_deserialize::<Value<'static>>(root, &ctx) {
         Ok(v) => match sval::encode_value(&v) {
-            Ok(value) => Outcome::Success { value },
+            Ok(value) => Outcome::Success {
+                value,
+                cost: ctx.jit_cost_value(),
+            },
             Err(e) => Outcome::Panicked {
                 note: format!("result encode: {:?}", e),
             },
@@ -354,9 +364,258 @@ fn evaluate(
     }
 }
 
+/// Why a full-context envelope gave no context: `Refused` is the library refusing material the
+/// reference accepted (a box, header, pre-header or miner key it cannot read, a collection out of
+/// its bounds), which is `errored`, a divergence; `Malformed` is a defect of the envelope or of
+/// this runner's reading of it (a missing or mistyped field, bad hex), which is `panicked` with
+/// the cause.
+enum FullCtxError {
+    Refused(String),
+    Malformed(String),
+}
+
+/// What a full-context entry's context borrows: the captured spend, read from the envelope.
+struct FullContextParts {
+    inputs: Vec<ErgoBox>,
+    data_inputs: Vec<ErgoBox>,
+    outputs: Vec<ErgoBox>,
+    self_index: usize,
+    /// Newest first; up to ten, fewer near genesis.
+    headers: Vec<Header>,
+    pre_header: PreHeader,
+    height: u32,
+    last_block_utxo_root: AvlTreeData,
+    activated_script_version_byte: i8,
+    /// SELF's own extension: its input's.
+    extension: ContextExtension,
+    input_extensions: InputExtensions,
+}
+
+impl FullContextParts {
+    /// Read a `santa-eval/v6-fullctx` `context` envelope (runner contract §2): the real boxes,
+    /// headers and pre-header of a spend. The last block's state root is the envelope's
+    /// `last_block_utxo_root_hex`, or else the newest header's. The activated script version is the
+    /// entry's `version.activated`, as the reference takes it; an entry without one takes the
+    /// envelope's block version minus 1.
+    fn new(
+        context: &serde_json::Value,
+        activated_version: Option<u8>,
+    ) -> Result<FullContextParts, FullCtxError> {
+        let obj = context
+            .as_object()
+            .ok_or_else(|| FullCtxError::Malformed("context not an object".into()))?;
+
+        // A hex-array box field (`inputs` / `data_inputs` / `outputs`).
+        let parse_boxes = |key: &str| -> Result<Vec<ErgoBox>, FullCtxError> {
+            let arr = obj.get(key).and_then(|v| v.as_array()).ok_or_else(|| {
+                FullCtxError::Malformed(format!("context.{key} missing or not an array"))
+            })?;
+            let mut out = Vec::with_capacity(arr.len());
+            for (i, item) in arr.iter().enumerate() {
+                let h = item.as_str().ok_or_else(|| {
+                    FullCtxError::Malformed(format!("context.{key}[{i}] not a string"))
+                })?;
+                let bytes = crate::hex_to_bytes(h)
+                    .map_err(|_| FullCtxError::Malformed(format!("context.{key}[{i}] bad hex")))?;
+                let b = ErgoBox::sigma_parse_bytes(&bytes)
+                    .map_err(|e| FullCtxError::Refused(format!("context.{key}[{i}]: {e:?}")))?;
+                out.push(b);
+            }
+            Ok(out)
+        };
+        let inputs = parse_boxes("inputs")?;
+        let data_inputs = parse_boxes("data_inputs")?;
+        let outputs = parse_boxes("outputs")?;
+
+        let headers_arr = obj
+            .get("headers")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                FullCtxError::Malformed("context.headers missing or not an array".into())
+            })?;
+        let mut headers: Vec<Header> = Vec::with_capacity(headers_arr.len());
+        for (i, item) in headers_arr.iter().enumerate() {
+            let h = item.as_str().ok_or_else(|| {
+                FullCtxError::Malformed(format!("context.headers[{i}] not a string"))
+            })?;
+            let bytes = crate::hex_to_bytes(h)
+                .map_err(|_| FullCtxError::Malformed(format!("context.headers[{i}] bad hex")))?;
+            headers.push(
+                Header::scorex_parse_bytes(&bytes)
+                    .map_err(|e| FullCtxError::Refused(format!("context.headers[{i}]: {e:?}")))?,
+            );
+        }
+
+        // The pre-header has no consensus serializer: the envelope carries SANTA's own encoding
+        // (`crate::preheader`), with the real block version.
+        let ph_hex = obj
+            .get("pre_header_hex")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FullCtxError::Malformed("context.pre_header_hex missing".into()))?;
+        let ph_bytes = crate::hex_to_bytes(ph_hex)
+            .map_err(|_| FullCtxError::Malformed("context.pre_header_hex bad hex".into()))?;
+        let phf = crate::preheader::decode(&ph_bytes)
+            .map_err(|e| FullCtxError::Refused(format!("pre_header decode: {e}")))?;
+        let miner_pk = EcPoint::scorex_parse_bytes(&phf.miner_pk)
+            .map_err(|e| FullCtxError::Refused(format!("minerPk parse: {e:?}")))?;
+        let pre_header = PreHeader {
+            version: phf.version,
+            parent_id: BlockId(Digest::<32>::from(phf.parent_id)),
+            timestamp: phf.timestamp,
+            n_bits: phf.n_bits,
+            height: phf.height,
+            miner_pk: Box::new(miner_pk),
+            votes: Votes(phf.votes),
+        };
+
+        let height = obj.get("height").and_then(|v| v.as_u64()).ok_or_else(|| {
+            FullCtxError::Malformed("context.height missing or not a number".into())
+        })? as u32;
+        let self_index = obj
+            .get("self_index")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                FullCtxError::Malformed("context.self_index missing or not a number".into())
+            })? as usize;
+
+        let digest: Vec<u8> =
+            if let Some(hex) = obj.get("last_block_utxo_root_hex").and_then(|v| v.as_str()) {
+                crate::hex_to_bytes(hex).map_err(|_| {
+                    FullCtxError::Malformed("context.last_block_utxo_root_hex bad hex".into())
+                })?
+            } else {
+                headers
+                    .first()
+                    .map(|h| h.state_root.0.to_vec())
+                    .ok_or_else(|| {
+                        FullCtxError::Malformed("no headers and no last_block_utxo_root_hex".into())
+                    })?
+            };
+
+        // One extension per input (`getVarFromInput` by index), each value read at the activated
+        // version this context takes.
+        let read_activated = activated_version.unwrap_or_else(|| phf.version.wrapping_sub(1));
+        let mut input_extensions: Vec<ContextExtension> = Vec::new();
+        if let Some(arr) = obj.get("input_extensions").and_then(|v| v.as_array()) {
+            for (i, item) in arr.iter().enumerate() {
+                let mut ext = ContextExtension::empty();
+                if let Some(map) = item.as_object() {
+                    for (k, v) in map {
+                        let id: u8 = k.parse().map_err(|_| {
+                            FullCtxError::Malformed(format!("input_extensions[{i}] bad key {k:?}"))
+                        })?;
+                        let ev =
+                            binding::extension_binding(v, read_activated).map_err(|e| match e {
+                                sval::BridgeError::Refused(m) => FullCtxError::Refused(format!(
+                                    "input_extensions[{i}][{k}]: {m}"
+                                )),
+                                other => FullCtxError::Malformed(format!(
+                                    "input_extensions[{i}][{k}]: {other:?}"
+                                )),
+                            })?;
+                        ext.values.insert(id, ev);
+                    }
+                }
+                input_extensions.push(ext);
+            }
+        }
+
+        if self_index >= inputs.len() {
+            return Err(FullCtxError::Malformed(format!(
+                "self_index {self_index} out of range ({} inputs)",
+                inputs.len()
+            )));
+        }
+        Ok(FullContextParts {
+            inputs,
+            data_inputs,
+            outputs,
+            self_index,
+            headers,
+            activated_script_version_byte: match activated_version {
+                Some(v) => v as i8,
+                None => (pre_header.version as i8).wrapping_sub(1),
+            },
+            pre_header,
+            height,
+            last_block_utxo_root: state_root(digest),
+            extension: input_extensions
+                .get(self_index)
+                .cloned()
+                .unwrap_or_else(ContextExtension::empty),
+            input_extensions: InputExtensions(input_extensions),
+        })
+    }
+
+    /// The context over these parts. A collection out of the library's bounds is `Refused`.
+    fn context(&self, tree_version: u8) -> Result<Context<'_>, FullCtxError> {
+        let inputs = TxIoVec::from_vec(self.inputs.iter().collect())
+            .map_err(|e| FullCtxError::Refused(format!("inputs bounds: {e:?}")))?;
+        let data_inputs = if self.data_inputs.is_empty() {
+            None
+        } else {
+            Some(
+                TxIoVec::from_vec(self.data_inputs.iter().collect())
+                    .map_err(|e| FullCtxError::Refused(format!("data_inputs bounds: {e:?}")))?,
+            )
+        };
+        let headers = ContextHeaders::from_vec(self.headers.clone())
+            .map_err(|e| FullCtxError::Refused(format!("headers bounds: {e:?}")))?;
+        Ok(Context {
+            height: self.height,
+            self_box: &self.inputs[self.self_index],
+            outputs: &self.outputs,
+            data_inputs,
+            inputs,
+            pre_header: self.pre_header.clone(),
+            activated_script_version_byte: self.activated_script_version_byte,
+            last_block_utxo_root: self.last_block_utxo_root.clone(),
+            headers,
+            extension: &self.extension,
+            tree_version: Cell::new(ErgoTreeVersion::from(tree_version)),
+            extension_provider: &self.input_extensions,
+            jit_cost: Cell::new(0),
+            jit_cost_limit: Some(EVAL_JIT_COST_LIMIT),
+            constants: None,
+        })
+    }
+}
+
+/// Evaluate one `santa-eval/v6-fullctx` entry: the tree in the real context its envelope carries.
+/// Produces exactly one [`Outcome`].
+pub fn run_entry_fullctx(
+    tree_bytes: &[u8],
+    context: &serde_json::Value,
+    tree_version: u8,
+    activated_version: Option<u8>,
+) -> Outcome {
+    let refused = |e: FullCtxError| match e {
+        // `errored` carries no note in the actuals; the reason goes to stderr, for diagnosis.
+        FullCtxError::Refused(reason) => {
+            eprintln!("blitzen: v6-fullctx reconstruction refused: {reason}");
+            Outcome::Errored
+        }
+        FullCtxError::Malformed(note) => Outcome::Panicked { note },
+    };
+    let parts = match FullContextParts::new(context, activated_version) {
+        Ok(p) => p,
+        Err(e) => return refused(e),
+    };
+    let ctx = match parts.context(tree_version) {
+        Ok(c) => c,
+        Err(e) => return refused(e),
+    };
+    let tree = match ErgoTree::sigma_parse_bytes_lenient(tree_bytes) {
+        Ok(t) => t,
+        Err(_) => return Outcome::Errored,
+    };
+    evaluate(&tree, ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergotree_ir::mir::constant::Constant;
 
     /// A library refusal is `errored`; any other bridge failure is `panicked`, the site in the note.
     #[test]
@@ -382,12 +641,18 @@ mod tests {
         .expect("the fixture tree is constructible")
     }
 
-    /// The canonical context's box surfaces. Each is asserted: a vector that reads one would
+    fn var1() -> EvaluatedValue {
+        Constant::from(7i32).into()
+    }
+
+    /// The canonical context's surfaces. Each is asserted: a vector that reads one would
     /// otherwise grade against whatever the runner happened to put there.
     #[test]
     fn canonical_context_pins_the_box_surfaces() {
         let tree = fixture_tree();
-        let parts = ContextParts::new(Binding::Var1(None), &tree).expect("the parts build");
+        let parts = ContextParts::new(Binding::Var1(None), &tree)
+            .ok()
+            .expect("the parts build");
         let ctx = parts.context(3, 2);
         assert_eq!(ctx.self_box.value.as_u64(), &1_000_000u64, "SELF.value");
         assert_eq!(
@@ -402,7 +667,6 @@ mod tests {
             "SELF.transactionId"
         );
         assert_eq!(ctx.self_box.index, 0, "SELF.index");
-        // get_constant, not get: get indexes the registers by the id's discriminant (R4 = 4)
         assert!(
             matches!(
                 ctx.self_box
@@ -420,15 +684,25 @@ mod tests {
         );
         assert!(ctx.outputs.is_empty(), "OUTPUTS is empty");
         assert!(ctx.data_inputs.is_none(), "the data inputs are empty");
+        assert!(ctx.headers.is_empty(), "there are no headers");
         assert_eq!(ctx.height, 0, "HEIGHT");
         assert_eq!(
             ctx.pre_header.version, 3,
             "preHeader.version is activated + 1"
         );
         assert_eq!(
+            ctx.activated_script_version_byte, 2,
+            "the activated script version"
+        );
+        assert_eq!(
             *ctx.pre_header.miner_pk,
             ec_point::generator(),
             "preHeader.minerPk"
+        );
+        assert_eq!(
+            ctx.last_block_utxo_root.digest,
+            vec![0u8; 33],
+            "the last block's state root"
         );
         assert_eq!(
             ctx.tree_version.get(),
@@ -437,12 +711,45 @@ mod tests {
         );
     }
 
+    /// Every context the runner builds carries the reference's cost limit and starts at cost 0;
+    /// the full-context one is read off a captured envelope (`testdata/`, SANTA's
+    /// `vectors/eval/v6/captured/h210129-6c51f301c418.json`).
+    #[test]
+    fn every_context_carries_the_cost_limit() {
+        assert_eq!(EVAL_JIT_COST_LIMIT, 10_000_000);
+        let want = Some(EVAL_JIT_COST_LIMIT);
+        let tree = fixture_tree();
+        let regs = NonMandatoryRegisters::new(vec![(NonMandatoryRegisterId::R4, 1i32.into())])
+            .expect("one register");
+        for (what, binding) in [
+            ("v2", Binding::Var1(Some(var1()))),
+            ("v3", Binding::PerInput(Vec::new())),
+            ("v4", Binding::SelfRegisters(regs, var1())),
+            ("v5", Binding::Extension(ContextExtension::empty())),
+        ] {
+            let parts = ContextParts::new(binding, &tree)
+                .ok()
+                .expect("the parts build");
+            let ctx = parts.context(3, 3);
+            assert_eq!(ctx.jit_cost_limit, want, "{what}");
+            assert_eq!(ctx.jit_cost_value(), 0, "{what}");
+        }
+        let envelope: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/fullctx-h210129.json"))
+                .expect("the fixture parses");
+        let parts = FullContextParts::new(&envelope["entries"][0]["context"], Some(3))
+            .ok()
+            .expect("the captured context's parts build");
+        let full = parts.context(3).ok().expect("the captured context builds");
+        assert_eq!(full.jit_cost_limit, want, "v6-fullctx");
+        assert_eq!(full.jit_cost_value(), 0, "v6-fullctx");
+    }
+
     /// No spending input carries a context extension, except in v3, which carries one per entry
     /// extension; v1/v2, v4 and v5 bind into SELF's own.
     #[test]
     fn only_v3_binds_per_input_extensions() {
         let tree = fixture_tree();
-        let var1: Constant = 7i32.into();
         let no_input_extension = |parts: &ContextParts, what: &str| {
             for i in 0..3usize {
                 assert!(
@@ -456,7 +763,9 @@ mod tests {
             }
         };
 
-        let v2 = ContextParts::new(Binding::Var1(Some(var1.clone())), &tree).unwrap();
+        let v2 = ContextParts::new(Binding::Var1(Some(var1())), &tree)
+            .ok()
+            .expect("the parts build");
         assert!(
             v2.context(3, 2).extension.values.contains_key(&1u8),
             "v2: SELF's var 1"
@@ -465,7 +774,9 @@ mod tests {
 
         let regs = NonMandatoryRegisters::new(vec![(NonMandatoryRegisterId::R4, 1i32.into())])
             .expect("one register");
-        let v4 = ContextParts::new(Binding::SelfRegisters(regs, var1.clone()), &tree).unwrap();
+        let v4 = ContextParts::new(Binding::SelfRegisters(regs, var1()), &tree)
+            .ok()
+            .expect("the parts build");
         let ctx = v4.context(3, 2);
         assert!(ctx.extension.values.contains_key(&1u8), "v4: SELF's var 1");
         assert!(
@@ -480,8 +791,10 @@ mod tests {
         no_input_extension(&v4, "v4");
 
         let mut ext = ContextExtension::empty();
-        ext.values.insert(0u8, var1.clone());
-        let v5 = ContextParts::new(Binding::Extension(ext), &tree).unwrap();
+        ext.values.insert(0u8, var1());
+        let v5 = ContextParts::new(Binding::Extension(ext), &tree)
+            .ok()
+            .expect("the parts build");
         assert!(
             v5.context(3, 2).extension.values.contains_key(&0u8),
             "v5: verbatim"
@@ -489,8 +802,10 @@ mod tests {
         no_input_extension(&v5, "v5");
 
         let mut inp = ContextExtension::empty();
-        inp.values.insert(1u8, var1);
-        let v3 = ContextParts::new(Binding::PerInput(vec![inp]), &tree).unwrap();
+        inp.values.insert(1u8, var1());
+        let v3 = ContextParts::new(Binding::PerInput(vec![inp]), &tree)
+            .ok()
+            .expect("the parts build");
         let ctx = v3.context(3, 2);
         assert!(
             ctx.extension.values.is_empty(),
@@ -506,6 +821,70 @@ mod tests {
         );
     }
 
+    /// A SELF that cannot be built is a context this runner cannot represent: the entry is
+    /// not-implemented, never evaluated on a stand-in box. Here the tree holds a tuple type of one
+    /// item, which has no written form (as one of no item has none), and `ErgoBox::new` writes the
+    /// box for its id.
+    #[test]
+    fn a_self_that_cannot_be_built_is_not_implemented() {
+        let tree = crate::hex_to_bytes("0b05b160010402").expect("hex");
+        let input = serde_json::json!({"kind": "Int", "value": 0});
+        let out = run_entry(&tree, Some(&input), None, None, None, 3, 3);
+        assert!(
+            matches!(out, Outcome::NotImplemented),
+            "got {}",
+            outcome_name(&out)
+        );
+    }
+
+    /// The first entry of the captured full-context vector: its tree and its context envelope.
+    fn captured_entry() -> (Vec<u8>, serde_json::Value) {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/fullctx-h210129.json"))
+                .expect("the fixture parses");
+        let entry = &vector["entries"][0];
+        let tree =
+            crate::hex_to_bytes(entry["tree_bytes_hex"].as_str().expect("a tree")).expect("hex");
+        (tree, entry["context"].clone())
+    }
+
+    /// A `self_index` that names no input (past the last one, or there is none) is the envelope's
+    /// defect: `panicked` with the cause, never a Rust panic.
+    #[test]
+    fn a_full_context_self_index_out_of_range_is_panicked() {
+        let (tree, context) = captured_entry();
+        let mut past_the_end = context.clone();
+        past_the_end["self_index"] = context["inputs"].as_array().expect("inputs").len().into();
+        let mut no_inputs = context;
+        no_inputs["inputs"] = serde_json::json!([]);
+        for (what, ctx) in [("past the end", past_the_end), ("no inputs", no_inputs)] {
+            match run_entry_fullctx(&tree, &ctx, 3, Some(3)) {
+                Outcome::Panicked { note } => {
+                    assert!(note.contains("self_index"), "{what}: {note}")
+                }
+                other => panic!("{what}: expected Panicked, got {}", outcome_name(&other)),
+            }
+        }
+    }
+
+    /// The activated script version is the entry's; an entry without one takes the envelope's
+    /// block version minus 1.
+    #[test]
+    fn a_full_context_without_an_activated_version_takes_the_block_versions() {
+        let (_, context) = captured_entry();
+        let parts = FullContextParts::new(&context, None)
+            .ok()
+            .expect("the captured context's parts build");
+        assert_eq!(
+            parts.activated_script_version_byte,
+            parts.pre_header.version as i8 - 1
+        );
+        let parts = FullContextParts::new(&context, Some(1))
+            .ok()
+            .expect("the captured context's parts build");
+        assert_eq!(parts.activated_script_version_byte, 1);
+    }
+
     /// A v4 entry's SELF is ONE box: built with the entry's registers, and INPUTS' only box (the
     /// reference's `boxesToSpend = [selfBox]`). The five answers are the reference's (sigma-state
     /// 6.0.7) for a SELF holding R4 = Int 1: its id is the id of the box WITH the register.
@@ -516,7 +895,7 @@ mod tests {
         let eval = |tree_hex: &str| {
             let tree = crate::hex_to_bytes(tree_hex).expect("hex");
             match run_entry(&tree, Some(&input), None, registers.as_object(), None, 3, 3) {
-                Outcome::Success { value } => value,
+                Outcome::Success { value, .. } => value,
                 other => panic!("{tree_hex}: expected a value, got {}", outcome_name(&other)),
             }
         };
@@ -563,5 +942,145 @@ mod tests {
             Outcome::NotImplemented => "NotImplemented",
             Outcome::Panicked { .. } => "Panicked",
         }
+    }
+
+    /// A v5 (`extension` envelope) entry whose extension key is not a byte: the entry is
+    /// `errored`, not `not-implemented`.
+    #[test]
+    fn a_v5_extension_with_a_bad_key_is_errored() {
+        let tree = crate::hex_to_bytes("000402").expect("hex"); // Int 1
+        let ext = serde_json::json!({"abc": {"kind": "Int", "value": 0}});
+        let out = run_entry(&tree, None, None, None, ext.as_object(), 3, 3);
+        assert!(
+            matches!(out, Outcome::Errored),
+            "got {}",
+            outcome_name(&out)
+        );
+    }
+
+    /// A v4 (`selfRegisters` envelope) entry whose register key is not a byte: the entry is
+    /// `panicked` with the cause (the v4 arm's bad key is the runner's own defect, NOT a
+    /// library refusal), the key in the note. Distinguishes from `errored` on the same key.
+    #[test]
+    fn a_v4_self_registers_with_a_bad_key_is_panicked() {
+        let tree = crate::hex_to_bytes("000402").expect("hex"); // Int 1
+        let regs = serde_json::json!({"abc": {"kind": "Int", "value": 0}});
+        let input = serde_json::json!({"kind": "Int", "value": 0});
+        let out = run_entry(&tree, Some(&input), None, regs.as_object(), None, 3, 3);
+        match out {
+            Outcome::Panicked { note } => {
+                assert!(note.contains("v4 selfRegisters: bad key"), "note: {note}",)
+            }
+            other => panic!("expected Panicked, got {}", outcome_name(&other)),
+        }
+    }
+
+    /// A v3 entry (both `inputs` AND a top-level `input`) with a top-level `input` whose kind
+    /// the runner cannot decode is `panicked`: v3 still decodes `input` first so an envelope
+    /// defect does not hide as `success`. Unmutated: input decode fails → `panicked`. A mutant
+    /// that only decodes `input` when `inputs` is None would evaluate the tree and succeed.
+    #[test]
+    fn a_v3_entry_with_a_bogus_top_level_input_is_panicked() {
+        let tree = crate::hex_to_bytes("000402").expect("hex"); // Int 1
+        let input = serde_json::json!({"kind": "NoSuchKind", "value": 0});
+        let inputs = vec![serde_json::json!({})];
+        let out = run_entry(&tree, Some(&input), Some(&inputs), None, None, 3, 3);
+        match out {
+            Outcome::Panicked { note } => assert!(note.contains("input decode"), "note: {note}",),
+            other => panic!("expected Panicked, got {}", outcome_name(&other)),
+        }
+    }
+
+    /// `eval::run_entry` decodes the binding BEFORE parsing the tree: a bad tree plus a
+    /// bogus input gives `panicked` (the input decode's error), not `errored` (the tree
+    /// parse's). An implementation that tree-parses first would return `errored` here.
+    #[test]
+    fn eval_binding_decode_comes_before_tree_parse() {
+        // tree bytes: header 00 then opcode ff with no node behind it — the lenient parse fails.
+        let tree = crate::hex_to_bytes("00ff").expect("hex");
+        let input = serde_json::json!({"kind": "NoSuchKind", "value": 0});
+        let out = run_entry(&tree, Some(&input), None, None, None, 3, 3);
+        match out {
+            Outcome::Panicked { note } => {
+                assert!(note.contains("input decode"), "note: {note}")
+            }
+            other => panic!("expected Panicked, got {}", outcome_name(&other)),
+        }
+    }
+
+    /// `eval::run_entry_fullctx` builds the context parts BEFORE parsing the tree: a bad tree
+    /// plus a malformed envelope gives `panicked` (the envelope defect), not `errored` (the
+    /// tree parse's). An implementation that tree-parses first would return `errored` here.
+    #[test]
+    fn fullctx_parts_build_comes_before_tree_parse() {
+        let (_, mut context) = captured_entry();
+        // remove `height`: the envelope becomes malformed; `FullContextParts::new` returns
+        // `FullCtxError::Malformed`, which the runner maps to `panicked`.
+        context.as_object_mut().expect("object").remove("height");
+        let bad_tree = crate::hex_to_bytes("00ff").expect("hex");
+        let out = run_entry_fullctx(&bad_tree, &context, 3, Some(3));
+        match out {
+            Outcome::Panicked { note } => {
+                assert!(note.contains("height"), "note: {note}")
+            }
+            other => panic!("expected Panicked, got {}", outcome_name(&other)),
+        }
+    }
+
+    /// The full-context reconstruction reads the per-input `extension` values at the activated
+    /// version the caller passes, not the block version derived from the pre-header. When the
+    /// entry carries `activated=Some(1)` and an input extension value whose type (SFunc) only
+    /// parses at reader tree_version >= V3, the reader REFUSES — the parts build fails. A mutant
+    /// that reads extensions at `pre_header.version - 1` regardless of the explicit activated
+    /// (block version is 4, so read_activated would be 3) would ACCEPT the same bytes.
+    #[test]
+    fn full_context_reads_extensions_at_the_activated_version() {
+        let (_, context) = captured_entry();
+        // An empty `Coll[SFunc(SInt => SInt)]`: `83 00 70 01 04 04 00`. The function type's code
+        // is read from tree version 3 only.
+        let value_hex = "83007001040400".to_string();
+        let mut ctx = context;
+        // the envelope's input_extensions[0] carries one variable; apply to self_index=0.
+        ctx["input_extensions"] = serde_json::json!([{
+            "0": {"kind": "Value", "bytes_hex": value_hex}
+        }]);
+        // Pre-header's block version is 4 (h210129 testnet). activated=Some(1) differs from
+        // `phf.version - 1` = 3. Unmutated reads at 1 (refused); the mutant that always uses
+        // `phf.version - 1` would read at 3 (accepted) — two different outcomes for the parts
+        // build.
+        let parts = FullContextParts::new(&ctx, Some(1));
+        assert!(
+            parts.is_err(),
+            "at activated=1 the SFunc value must be refused (reader tree_version 1 < V3)"
+        );
+    }
+
+    /// When no activated version is given, extensions read at `pre_header.version - 1`.
+    /// A mutant that falls back to `pre_header.version` itself would read them one version
+    /// higher. With pre_header.version=3 the gap crosses V3: unmutated reads at tree_v=2
+    /// (no SFunc), the mutant at tree_v=3 (SFunc parses). The SFunc Value refusal is the
+    /// witness; the mutant would accept the same bytes.
+    #[test]
+    fn full_context_without_activated_takes_pre_header_version_minus_one() {
+        let (_, mut context) = captured_entry();
+        // Patch the pre_header's first byte (version) from 04 to 03.
+        let ph_hex = context["pre_header_hex"].as_str().expect("hex").to_string();
+        assert!(
+            ph_hex.starts_with("04"),
+            "captured envelope's block version is 4"
+        );
+        let ph_v3 = format!("03{}", &ph_hex[2..]);
+        context["pre_header_hex"] = serde_json::json!(ph_v3);
+        // Coll[SFunc(SInt => SInt)] empty: parses at tree_v>=V3, not below.
+        let value_hex = "83007001040400".to_string();
+        context["input_extensions"] = serde_json::json!([{
+            "0": {"kind": "Value", "bytes_hex": value_hex}
+        }]);
+        let parts = FullContextParts::new(&context, None);
+        assert!(
+            parts.is_err(),
+            "with pre_header.version=3 and no activated, read_activated = 2 and the SFunc value \
+             must be refused"
+        );
     }
 }

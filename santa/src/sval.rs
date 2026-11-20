@@ -13,6 +13,7 @@
 //! runner records faithfully as a `panicked` note (runner contract §3) — a SANTA-side gap to wire,
 //! never an "excuse" outcome.
 
+use ergotree_ir::mir::coll_value::CollValue;
 use ergotree_ir::mir::constant::{Constant, Literal};
 use ergotree_ir::mir::value::{CollKind, Value};
 use ergotree_ir::serialization::SigmaSerializable;
@@ -128,8 +129,10 @@ pub fn decode_stype(j: &J) -> Result<SType, BridgeError> {
                 .map(decode_stype)
                 .collect::<Result<_, _>>()?;
             SType::STuple(
+                // `.into()`: the variant holds an `Arc` of the tuple type
                 STuple::try_from(items)
-                    .map_err(|e| BridgeError::Decode(format!("STuple arity: {:?}", e)))?,
+                    .map_err(|e| BridgeError::Decode(format!("STuple arity: {:?}", e)))?
+                    .into(),
             )
         }
         other => {
@@ -162,8 +165,23 @@ pub fn encode_value(v: &Value) -> Result<J, BridgeError> {
             // NOT `prop_bytes()` — which wraps it in an ErgoTree (spurious `0008` header).
             json!({"kind": "SigmaProp", "raw_hex": ser_bytes(sp.value(), "SigmaProp")?})
         }
-        Value::CBox(b) => json!({"kind": "Box", "bytes_hex": ser_bytes(&**b, "Box")?}),
-        Value::AvlTree(a) => json!({"kind": "AvlTree", "bytes_hex": ser_bytes(&**a, "AvlTree")?}),
+        Value::CBox(b) => {
+            // The JVM's value is `ebox.bytes`: the slice the box was parsed from (or the box as
+            // ergo writes one it builds). `ErgoBox::bytes()` is that slice, which `Box.bytes`
+            // surfaces; writing the box again would give other bytes for a box read from
+            // non-canonical bytes, and fail for one whose contents cannot be written.
+            let bytes = b
+                .bytes()
+                .map_err(|e| BridgeError::Encode(format!("Box bytes: {:?}", e)))?;
+            json!({"kind": "Box", "bytes_hex": hex_lower(&bytes)})
+        }
+        Value::AvlTree(a) => {
+            // A runtime tree holds its digest as a collection; only a digest of bytes is data
+            // (sigma-rust `AvlTreeData::try_from`), any other has no canonical encoding.
+            let data = ergotree_ir::mir::avl_tree_data::AvlTreeData::try_from((**a).clone())
+                .map_err(|e| BridgeError::Encode(format!("AvlTree: {:?}", e)))?;
+            json!({"kind": "AvlTree", "bytes_hex": ser_bytes(&data, "AvlTree")?})
+        }
         Value::Header(h) => {
             // Mirror of the decode arm: Header rides Scorex serialization (not
             // SigmaSerializable) — {kind:"Header", bytes_hex} like the JVM encoder.
@@ -174,9 +192,12 @@ pub fn encode_value(v: &Value) -> Result<J, BridgeError> {
             json!({"kind": "Header", "bytes_hex": hex_lower(&bytes)})
         }
         Value::Coll(coll) => encode_coll(coll)?,
-        Value::Tup(items) => {
-            let arr: Result<Vec<J>, _> = items.iter().map(encode_value).collect();
-            json!({"kind": "Tuple", "items": arr?})
+        // A pair is the only tuple VALUE the evaluator holds (`Value::Pair`); a tuple of any
+        // other count is a collection of `Any` and takes the `Coll` arm above, where
+        // `encode_coll` writes `elem` = `SAny`. The constant decoder keeps `Literal::Tup` at
+        // every arity: data is unchanged.
+        Value::Pair(pair) => {
+            json!({"kind": "Tuple", "items": [encode_value(&pair.0)?, encode_value(&pair.1)?]})
         }
         Value::Opt(opt) => match opt {
             Some(inner) => json!({"kind": "Option", "value": encode_value(inner)?}),
@@ -195,11 +216,12 @@ pub fn encode_value(v: &Value) -> Result<J, BridgeError> {
 // for every form. The canonical encoding (runner contract §4) is representation-BLIND by design — a
 // specialised and a generic collection of the same items must encode identically, or the runner
 // would leak sigma-rust's internal representation into the actuals and false-red the corpus.
-// Written against the accessors rather than the variants so the representation can grow a case
-// (the shape of the sigma-rust session's forthcoming `CollValue`) without touching this bridge.
-fn encode_coll(coll: &CollKind<Value>) -> Result<J, BridgeError> {
+// Written against the accessors rather than the variants, so the representation (`CollValue`) can
+// grow a case without touching this body. `CollKind` stays for the DECODE direction, where
+// `Literal::Coll` holds it.
+fn encode_coll(coll: &CollValue) -> Result<J, BridgeError> {
     let arr: Result<Vec<J>, _> = coll.as_vec().iter().map(encode_value).collect();
-    Ok(json!({"kind": "Coll", "elem": encode_stype(coll.elem_tpe()), "items": arr?}))
+    Ok(json!({"kind": "Coll", "elem": encode_stype(&coll.elem_tpe()), "items": arr?}))
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +364,7 @@ pub fn decode_constant(j: &J) -> Result<Constant, BridgeError> {
             let tpe_items = TupleItems::try_from(tpes)
                 .map_err(|e| BridgeError::Decode(format!("Tuple type arity: {:?}", e)))?;
             lit(
-                SType::STuple(STuple { items: tpe_items }),
+                SType::STuple(STuple { items: tpe_items }.into()),
                 Literal::Tup(lit_items),
             )
         }
@@ -396,9 +418,31 @@ mod tests {
     /// Round-trip a value-preserving SValue: JSON → Constant → Value → JSON.
     fn roundtrip(j: J) {
         let c = decode_constant(&j).expect("decode");
-        let v = Value::from(c.v);
+        let v = Value::try_from(c.v).expect("the literal is a value");
         let back = encode_value(&v).expect("encode");
         assert_eq!(back, j, "round-trip mismatch");
+    }
+
+    /// A Box value is the bytes the box was read from (the JVM's `ebox.bytes`, here
+    /// `ErgoBox::bytes()`), not the box written again. Both boxes name a type variable whose
+    /// text the reader builds from FF bytes (each one U+FFFD): written back, the 255-byte text
+    /// becomes EF BF BD x 85, and the 256-byte one cannot be written (its length is past a u8).
+    /// From SANTA's `Global.deserializeTo_Box_type_var_name_range` `just` rows.
+    #[test]
+    fn rt_box_is_its_bytes_as_read() {
+        let ff85 = "c0843d00d193b183006755".to_string()
+            + &"ff".repeat(85)
+            + "0400010000"
+            + &"11".repeat(32)
+            + "00";
+        let mix256 = "c0843d0b8702d193b1830067fe".to_string()
+            + &"61".repeat(253)
+            + "ff"
+            + "0400010000"
+            + &"11".repeat(32)
+            + "00";
+        roundtrip(json!({"kind": "Box", "bytes_hex": ff85}));
+        roundtrip(json!({"kind": "Box", "bytes_hex": mix256}));
     }
 
     #[test]

@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-lib"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "base16",
  "bounded-vec",
@@ -504,8 +504,7 @@ dependencies = [
 [[package]]
 name = "ergo_avltree_rust"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "040e68223ab3775e54463c0f97b340d8fe6b4080acc5236fb4c19da477650668"
+source = "git+https://github.com/mwaddip/ergo_avltree_rust.git?rev=b95579006eb5629d154293c449210053afbf49a4#b95579006eb5629d154293c449210053afbf49a4"
 dependencies = [
  "anyhow",
  "base16",
@@ -518,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "ergotree-interpreter"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "base16",
  "blake2",
@@ -553,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "ergotree-ir"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "base16",
  "bnum",
@@ -574,6 +573,7 @@ dependencies = [
  "num-derive",
  "num-integer",
  "num-traits",
+ "once_cell",
  "proptest",
  "proptest-derive",
  "serde",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "gf2_192"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "derive_more",
  "proptest",

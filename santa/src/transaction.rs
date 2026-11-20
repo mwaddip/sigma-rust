@@ -13,8 +13,8 @@
 //! failure (sigma-rust can't even read bytes the JVM accepted) is `errored` — no
 //! verdict was reached; that too is a real divergence on an accept vector.
 //!
-//! This sigma-rust has no transaction cost model (`validate` returns `Result<(), _>`), so an
-//! accepted transaction's cost is `null`.
+//! An accepted transaction's cost is what `validate` returns: the accumulated block cost
+//! (the transaction's initial cost, each input's reduction, the proofs' verification).
 
 use ergo_chain_types::{BlockId, Digest32, EcPoint, Header, PreHeader, Votes};
 use ergo_lib::chain::ergo_state_context::{ErgoStateContext, Headers};
@@ -22,6 +22,8 @@ use ergo_lib::chain::parameters::{Parameter, Parameters};
 use ergo_lib::chain::transaction::Transaction;
 use ergo_lib::wallet::tx_context::TransactionContext;
 use ergotree_ir::chain::ergo_box::ErgoBox;
+use ergotree_ir::ergo_tree::ErgoTreeVersion;
+use ergotree_ir::serialization::sigma_byte_reader::{self, SigmaByteRead};
 use ergotree_ir::serialization::SigmaSerializable; // Transaction/ErgoBox sigma_parse_bytes
 use sigma_ser::ScorexSerializable; // Header/EcPoint scorex_parse_bytes
 
@@ -29,9 +31,13 @@ use crate::hex_to_bytes;
 
 /// One transaction entry's outcome — the tx analog of [`crate::eval::Outcome`].
 pub enum TxOutcome {
-    /// Validation reached a verdict; `reason` is `Some` only on reject (the impl's error
-    /// string, diagnostic).
-    Verdict { valid: bool, reason: Option<String> },
+    /// Validation reached a verdict: `cost` is `Some` only on accept, `reason` only on reject (the
+    /// impl's error string, diagnostic).
+    Verdict {
+        valid: bool,
+        cost: Option<u64>,
+        reason: Option<String>,
+    },
     /// No verdict: the runner couldn't decode the entry or assemble the tx context.
     Errored { reason: String },
     /// A would-be panic, caught by main's never-panic net (runner contract §3).
@@ -41,10 +47,14 @@ pub enum TxOutcome {
 impl TxOutcome {
     pub fn to_json(&self) -> serde_json::Value {
         match self {
-            TxOutcome::Verdict { valid, reason } => {
+            TxOutcome::Verdict {
+                valid,
+                cost,
+                reason,
+            } => {
                 let mut j = serde_json::json!({
                     "valid": valid,
-                    "cost": null,
+                    "cost": cost,
                     "error": serde_json::Value::Null,
                 });
                 if let Some(r) = reason {
@@ -88,7 +98,7 @@ fn decode_boxes_hex(v: &serde_json::Value, field: &str) -> Result<Vec<ErgoBox>, 
 /// zeroed context — the reference and every runner now validate under the SAME carried
 /// context, so there is no per-impl reconstruction to coordinate.
 fn build_state_context(entry: &serde_json::Value) -> Result<ErgoStateContext, String> {
-    // Headers: newest-first.
+    // Headers: newest-first; 1..=10 (a node near genesis supplies fewer).
     let headers_arr = entry["headers_hex"]
         .as_array()
         .ok_or("headers_hex missing or not an array")?;
@@ -103,11 +113,9 @@ fn build_state_context(entry: &serde_json::Value) -> Result<ErgoStateContext, St
                 .map_err(|e| format!("headers_hex[{i}] decode: {e:?}"))?,
         );
     }
-    // `Headers` is `[Header; 10]` here, while a vector carries the headers a script sees (nine).
-    let n = headers_vec.len();
-    let headers: Headers = headers_vec.try_into().map_err(|_: Vec<Header>| {
-        format!("this sigma-rust's state context holds exactly 10 headers; the entry carries {n}")
-    })?;
+    let headers: Headers = headers_vec
+        .try_into()
+        .map_err(|e| format!("headers out of bounds (need 1..=10): {e:?}"))?;
 
     // PreHeader: the validating block's real pre-header (no synthetic `activated + 1` pin).
     let ph = &entry["preHeader"];
@@ -195,7 +203,27 @@ pub fn run_entry(entry: &serde_json::Value) -> TxOutcome {
             }
         }
     };
-    let tx = match Transaction::sigma_parse_bytes(&tx_bytes) {
+    // ergo reads a v6 block's transactions at version context (blockVersion - 1,
+    // blockVersion - 1), an earlier block's at the default (1, 1) (ergo v6.0.6
+    // `BlockTransactions.scala:184-202`); the reader's version is sigma-rust's context.
+    // From block version 4 the reader also takes the activated script version,
+    // blockVersion - 1; a box (below) is read from the UTXO set, outside any context.
+    // The block version is the voted parameters' (`parameters.blockVersion`, the
+    // pre-header's when the entry has none), a signed byte, as in SANTA's `TxEngine`.
+    let block_version = entry["parameters"]["blockVersion"]
+        .as_u64()
+        .or_else(|| entry["preHeader"]["version"].as_u64())
+        .map(|v| v as u8 as i8);
+    let mut tx_reader = sigma_byte_reader::from_bytes(&tx_bytes);
+    let parsed_tx = match block_version {
+        Some(v) if v >= 4 => tx_reader.with_versions(
+            ErgoTreeVersion::from((v - 1) as u8),
+            ErgoTreeVersion::V3,
+            Transaction::sigma_parse,
+        ),
+        _ => tx_reader.with_tree_version(ErgoTreeVersion::V0, Transaction::sigma_parse),
+    };
+    let tx = match parsed_tx {
         Ok(t) => t,
         Err(e) => {
             return TxOutcome::Errored {
@@ -230,12 +258,14 @@ pub fn run_entry(entry: &serde_json::Value) -> TxOutcome {
     };
 
     match tx_context.validate(&state_context) {
-        Ok(()) => TxOutcome::Verdict {
+        Ok(cost) => TxOutcome::Verdict {
             valid: true,
+            cost: Some(cost),
             reason: None,
         },
         Err(e) => TxOutcome::Verdict {
             valid: false,
+            cost: None,
             reason: Some(e.to_string()),
         },
     }
@@ -271,25 +301,6 @@ mod tests {
         }
     }
 
-    /// The vectors carry the nine headers a script sees, and this sigma-rust's state context holds exactly ten
-    /// (`Headers = [Header; 10]`): the entry is `errored`, and its reason says so in those terms.
-    #[test]
-    fn nine_headers_are_errored_with_the_count_in_the_reason() {
-        let vector: J = serde_json::from_str(KEYSTONE_VECTOR).expect("fixture JSON");
-        let mut entry = vector["entries"][0].clone();
-        entry["headers_hex"]
-            .as_array_mut()
-            .expect("headers_hex")
-            .truncate(9);
-        let j = run_entry(&entry).to_json();
-        assert_eq!(j["error"], "errored", "{j}");
-        let reason = j["reason"].as_str().expect("a reason");
-        assert!(
-            reason.contains("exactly 10") && reason.contains("carries 9"),
-            "{reason}"
-        );
-    }
-
     /// A malformed entry (tx bytes not decodable) is `errored` — the runner failed to
     /// reach a verdict; never a panic, never a silent skip (contract totality). The tx
     /// decode fails first, before any context assembly.
@@ -304,5 +315,84 @@ mod tests {
         assert_eq!(j["valid"], J::Null);
         assert_eq!(j["cost"], J::Null);
         assert!(j["reason"].is_string(), "errored must carry a reason: {j}");
+    }
+
+    fn preheader(version: u8) -> J {
+        serde_json::json!({
+            "version": version,
+            "parentId": "0000000000000000000000000000000000000000000000000000000000000000",
+            "timestamp": "0",
+            "nBits": 0,
+            "height": 0,
+            "minerPk": "030000000000000000000000000000000000000000000000000000000000000000",
+            "votes": "000000",
+        })
+    }
+    fn parameters(block_version: u8) -> J {
+        serde_json::json!({
+            "blockVersion": block_version,
+            "maxBlockCost": 0,
+            "storageFeeFactor": 0,
+            "minValuePerByte": 0,
+            "inputCost": 0,
+            "dataInputCost": 0,
+            "outputCost": 0,
+            "tokenAccessCost": 0,
+        })
+    }
+
+    /// From block version 4 the transaction tier parses a tx at activated `blockVersion - 1`
+    /// — a v4 block reads at activated V3. A single-output tx whose output tree has header
+    /// version 4 is refused (its version is above the activated one). A mutant that passed
+    /// `blockVersion` directly as activated (V4) would accept the v4 tree, fail only later on
+    /// the empty headers list.
+    #[test]
+    fn tx_tier_uses_block_version_minus_one_as_activated() {
+        // Minimal tx: 1 input (zero box_id, empty proof, empty ctx_ext), 0 data inputs,
+        // 0 tokens, 1 output (value 1M, ergo_tree v4 size, body SigmaProp true, no tokens, no regs).
+        let tx_hex = "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0c0208d3000000";
+        let entry = serde_json::json!({
+            "name": "e#0",
+            "tx_bytes_hex": tx_hex,
+            "input_boxes_hex": [],
+            "data_input_boxes_hex": [],
+            "headers_hex": [],
+            "preHeader": preheader(4),
+            "parameters": parameters(4),
+        });
+        let j = run_entry(&entry).to_json();
+        assert_eq!(j["error"], "errored");
+        let reason = j["reason"].as_str().unwrap_or("");
+        assert!(
+            reason.contains("tx decode"),
+            "expected the transaction's read to refuse a v4 tree at activated 3, got: {j}"
+        );
+    }
+
+    /// Below block version 4 the transaction tier parses a tx at `tree_version = V0` (no
+    /// activation context). A tx whose input context extension holds `Coll[SFunc(Int=>Int)]`
+    /// — a function type gated to reader tree_version >= V3 — fails to parse. A mutant that
+    /// raised the default reader tree_version to V3 for below-block-4 reads would ACCEPT the
+    /// SFunc value and fail only later on the empty headers list.
+    #[test]
+    fn tx_tier_reads_below_block_4_at_tree_version_v0() {
+        // Tx with 1 input carrying ctx-ext {0: Coll[SFunc(SInt=>SInt)]()} and 1 output.
+        let tx_hex = "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100 83007001040400 000001c0843d0008d3010000".replace(' ', "");
+        let entry = serde_json::json!({
+            "name": "e#0",
+            "tx_bytes_hex": tx_hex,
+            "input_boxes_hex": [],
+            "data_input_boxes_hex": [],
+            "headers_hex": [],
+            "preHeader": preheader(3),
+            "parameters": parameters(3),
+        });
+        let j = run_entry(&entry).to_json();
+        assert_eq!(j["error"], "errored");
+        let reason = j["reason"].as_str().unwrap_or("");
+        assert!(
+            reason.contains("tx decode"),
+            "expected a tx-decode failure at tree_version V0, got: {j}"
+        );
     }
 }

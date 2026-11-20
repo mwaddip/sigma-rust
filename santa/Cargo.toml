@@ -23,6 +23,12 @@ ergo-nipopow = { path = "../ergo-nipopow" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The same `ergo_avltree_rust` the repository's own manifest patches in (its verifier returns an
+# error where the crates.io release panics): a patch applies only in the workspace being built,
+# and this is one of its own.
+[patch.crates-io]
+ergo_avltree_rust = { git = "https://github.com/mwaddip/ergo_avltree_rust.git", rev = "b95579006eb5629d154293c449210053afbf49a4" }
+
 # A workspace of its own: the runner is not a member of the repository's workspace, so the
 # repository's builds, lints and tests do not build it, and it keeps its own `Cargo.lock`.
 [workspace]

@@ -22,6 +22,7 @@
 mod binding;
 mod eval;
 mod nipopow;
+mod preheader;
 mod sval;
 mod transaction;
 mod wire;
@@ -82,8 +83,7 @@ fn tx_panicked(note: String) -> J {
 /// The tier a vector file's `schema` names: only the schemas this runner was written for, by exact name and
 /// version.
 enum Tier<'v> {
-    /// `santa-eval/v6-fullctx`: its context carries the 9 headers a script sees, which this
-    /// `Context` (exactly 10) cannot hold, so its entries are not-implemented.
+    /// `santa-eval/v6-fullctx`: each entry carries the real context of a captured spend.
     FullContextEval,
     /// `santa-nipopow/*`: the file's chain, which each entry asks interlinks or a proof over.
     NiPoPoW(&'v [J]),
@@ -129,15 +129,12 @@ fn run_vector_file(path: &Path) -> Vec<(String, J, J)> {
         .map(|entry| {
             let name = entry["name"].as_str().unwrap_or("<unnamed>").to_string();
             let (actual, expected) = match tier {
-                Tier::FullContextEval => (
-                    eval::Outcome::NotImplemented.to_json(),
-                    entry["expected"].clone(),
-                ),
                 // the tier-neutral form: the runner cannot know the actual shape of a schema it was not written for
                 Tier::Unknown => (
                     serde_json::json!({"error": "not-implemented"}),
                     entry["expected"].clone(),
                 ),
+                Tier::FullContextEval => (fullctx_entry(entry), entry["expected"].clone()),
                 Tier::NiPoPoW(chain) => (
                     caught(|| nipopow_entry(entry, chain), eval_panicked),
                     entry["expected"].clone(),
@@ -169,7 +166,12 @@ fn wire_entry(entry: &J) -> (J, J) {
     let bytes_hex = entry["bytes_hex"]
         .as_str()
         .expect("wire entry missing bytes_hex");
-    let actual = caught(|| wire::run_entry(kind, bytes_hex).to_json(), eval_panicked);
+    let tree_version = entry["version"]["ergoTree"].as_u64().unwrap_or(3) as u8;
+    let activated_version = entry["version"]["activated"].as_u64().map(|v| v as u8);
+    let actual = caught(
+        || wire::run_entry(kind, bytes_hex, tree_version, activated_version).to_json(),
+        eval_panicked,
+    );
     (
         actual,
         serde_json::json!({"bytes_hex": bytes_hex, "error": J::Null}),
@@ -186,6 +188,19 @@ fn transaction_entry(entry: &J) -> (J, J) {
         "error": J::Null,
     });
     (actual, expected)
+}
+
+fn fullctx_entry(entry: &J) -> J {
+    let tree_hex = entry["tree_bytes_hex"]
+        .as_str()
+        .expect("v6-fullctx entry missing tree_bytes_hex");
+    let tree_bytes = hex_to_bytes(tree_hex).expect("bad tree_bytes_hex");
+    let tree_v = entry["version"]["ergoTree"].as_u64().unwrap_or(0) as u8;
+    let act_v = entry["version"]["activated"].as_u64().map(|v| v as u8);
+    caught(
+        || eval::run_entry_fullctx(&tree_bytes, &entry["context"], tree_v, act_v).to_json(),
+        eval_panicked,
+    )
 }
 
 fn eval_entry(entry: &J) -> J {
@@ -464,38 +479,265 @@ mod tests {
         }
     }
 
-    /// santa-eval/v6-fullctx: every entry in a v6-fullctx vector must produce
-    /// `error: "not-implemented"` — the adapter arm is not yet wired, so the
-    /// dispatch must short-circuit BEFORE any eval attempt.
+    /// A wire entry without a `version` is still read (its defaults are pinned by the two tests
+    /// below, with entries whose answer depends on them).
     #[test]
-    fn v6_fullctx_returns_not_implemented() {
+    fn a_wire_entry_without_versions_round_trips() {
         use crate::run_vector_file;
-        // Minimal synthetic v6-fullctx vector: one entry with a `context` field (no
-        // top-level input/inputs/selfRegisters/extension — that's the v6-fullctx shape).
-        let vector_json = r#"{
-            "schema": "santa-eval/v6-fullctx",
-            "entries": [
-                {
-                    "name": "test-not-implemented#0",
-                    "tree_bytes_hex": "0008cd",
-                    "context": {},
-                    "version": {"ergoTree": 0, "activated": 2},
-                    "expected": {"value": null, "cost": null, "error": "not-implemented"}
-                }
-            ]
-        }"#;
-        let path =
-            std::env::temp_dir().join(format!("blitzen-v6-fullctx-{}.json", std::process::id()));
-        std::fs::write(&path, vector_json).expect("write test vector");
+        // sbox_minimal of SANTA's `vectors/wire/v5/authored/Box.json`
+        let hex = "c0843d09020101000000000000000000000000000000000000000000000000000000000000000000000000";
+        let vector = json!({"schema": "santa-wire/v1", "entries": [
+            {"name": "e#0", "kind": "Box", "bytes_hex": hex}
+        ]});
+        let path = std::env::temp_dir().join(format!(
+            "blitzen-wire-no-version-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, vector.to_string()).expect("write test vector");
+        let results = run_vector_file(&path);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1["error"], J::Null, "{}", results[0].1);
+        assert_eq!(results[0].1["bytes_hex"], hex);
+    }
+
+    /// The `ergo_avltree_rust` this runner builds with is the one the repository's own manifest
+    /// patches in. A patch applies only in the workspace being built and the runner is a workspace
+    /// of its own, so the pin is repeated in its manifest: in both, the `[patch.crates-io]` table
+    /// must name the same git source at the same rev.
+    #[test]
+    fn the_avltree_patch_is_the_repositorys() {
+        /// The `git` and `rev` of `ergo_avltree_rust` in the manifest's `[patch.crates-io]` table.
+        fn patch_pin(manifest: &std::path::Path) -> (String, String) {
+            let at = manifest.display();
+            let text = std::fs::read_to_string(manifest).unwrap_or_else(|e| panic!("{at}: {e}"));
+            let table: Vec<&str> = text
+                .lines()
+                .skip_while(|l| l.trim() != "[patch.crates-io]")
+                .skip(1)
+                .take_while(|l| !l.trim_start().starts_with('['))
+                .collect();
+            let line = table
+                .iter()
+                .find(|l| l.trim_start().starts_with("ergo_avltree_rust"))
+                .unwrap_or_else(|| panic!("{at}: no ergo_avltree_rust in [patch.crates-io]"));
+            // `key = "value"`: the key's text can also occur inside a value (`git` in the URL)
+            let value = |key: &str| {
+                line.match_indices(key)
+                    .find_map(|(i, _)| {
+                        let rest = line[i + key.len()..].trim_start().strip_prefix('=')?;
+                        let rest = rest.trim_start().strip_prefix('"')?;
+                        rest.split('"').next().map(str::to_string)
+                    })
+                    .unwrap_or_else(|| panic!("{at}: the ergo_avltree_rust patch has no {key}"))
+            };
+            (value("git"), value("rev"))
+        }
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            patch_pin(&here.join("Cargo.toml")),
+            patch_pin(&here.join("../Cargo.toml")),
+            "santa/Cargo.toml and the repository's Cargo.toml patch ergo_avltree_rust differently"
+        );
+    }
+
+    /// santa-eval/v6-fullctx end to end (`tests/fixtures/v6-fullctx-h111927.json`, a captured
+    /// testnet spend: SigmaProp `d3` at cost 1139 on the reference): the context is rebuilt from
+    /// the envelope (boxes, headers, the pre-header, the state root, the per-input extensions) and
+    /// the tree evaluated in it, to the reference's value and cost.
+    #[test]
+    fn v6_fullctx_h111927_evaluates() {
+        use crate::run_vector_file;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/v6-fullctx-h111927.json");
         let results = run_vector_file(&path);
         assert_eq!(results.len(), 1, "expected one result");
-        let (_name, actual, _expected) = &results[0];
+        let (_name, actual, expected) = &results[0];
         assert_eq!(
-            actual["error"], "not-implemented",
-            "v6-fullctx must return not-implemented, got: {}",
-            actual
+            actual, expected,
+            "h111927 actual must match blessed expected"
         );
-        assert_eq!(actual["value"], J::Null, "value must be null");
-        assert_eq!(actual["cost"], J::Null, "cost must be null");
+    }
+
+    /// Write `vector` to a session-unique temp file, then read it through `run_vector_file`.
+    fn run_adhoc_vector(stem: &str, vector: J) -> Vec<(String, J, J)> {
+        use crate::run_vector_file;
+        let path =
+            std::env::temp_dir().join(format!("blitzen-{}-{}.json", stem, std::process::id()));
+        std::fs::write(&path, vector.to_string()).expect("write test vector");
+        run_vector_file(&path)
+    }
+
+    /// A Transaction wire entry whose context-extension holds `Coll[SFunc]` (the v6-only
+    /// function-type gate): round-trips at the runner's unversioned wire DEFAULT of
+    /// `ergoTree = 3` (reader parses SFunc). A mutant that defaulted to 0 would read at
+    /// tree_version 0 and refuse the SFunc type code.
+    #[test]
+    fn a_wire_transaction_without_versions_defaults_to_tree_version_three() {
+        // `ext-c2-coll-of-func-v3-accept#22` of
+        // vectors/wire/v6/authored/Transaction.extension_evaluated_values.json: a tx whose
+        // input 0 carries extension `{0: Coll[SFunc((Int, Int) => Int)]}` (empty).
+        let hex = "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001008300700204040400000001c0843d0008d3010000";
+        let vector = json!({"schema": "santa-wire/v1", "entries": [
+            {"name": "e#0", "kind": "Transaction", "bytes_hex": hex}
+        ]});
+        let results = run_adhoc_vector("wire-sfunc-no-version", vector);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1["error"], J::Null, "{}", results[0].1);
+        assert_eq!(results[0].1["bytes_hex"], hex);
+    }
+
+    /// A wire Box entry whose tree is above the activated script version. The wire DEFAULT
+    /// treats the entry's `version.activated` as absent — no activation context, so the box
+    /// parses (no check fires). A mutant that defaulted to `Some(3)` when the field is missing
+    /// would refuse a v4 tree against activated 3.
+    #[test]
+    fn a_wire_box_without_versions_has_no_activation_context() {
+        // `box-tree-v4-reject#0` of vectors/wire/v6/authored/Box.tree_version_above_activated.json:
+        // a bare box whose size-flagged tree has version 4. Without an activated version the box
+        // round-trips; at activated=3 the tree is refused.
+        let hex = "c0843d0c0208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400";
+        let vector = json!({"schema": "santa-wire/v1", "entries": [
+            {"name": "e#0", "kind": "Box", "bytes_hex": hex}
+        ]});
+        let results = run_adhoc_vector("wire-box-v4-no-version", vector);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1["error"], J::Null, "{}", results[0].1);
+        assert_eq!(results[0].1["bytes_hex"], hex);
+    }
+
+    /// A v6-fullctx entry whose `version.activated` is present carries that activated version
+    /// to the fullctx runner. With `activated=1` and `phf.version=4`, extensions read at
+    /// `read_activated=1` — an SFunc value in `input_extensions[0]` refuses (SFunc parses only
+    /// at reader tree_version >= V3). A mutant that always passes `activated_version=None`
+    /// would fall back to `phf.version - 1 = 3`, accept the SFunc, build parts, and the
+    /// simple `SigmaProp(true)` tree would evaluate to a value.
+    #[test]
+    fn a_fullctx_entry_carries_activated_to_the_reader() {
+        let envelope: J = serde_json::from_str(include_str!("testdata/fullctx-h210129.json"))
+            .expect("fixture parses");
+        let mut entry = envelope["entries"][0].clone();
+        entry["version"] = json!({"activated": 1});
+        // Replace the tree with `0b 02 08 d3`: SigmaProp(TrivialProp(true)) — evaluates at ANY
+        // tree_version, so the only distinguisher is the extension read at `read_activated`.
+        entry["tree_bytes_hex"] = json!("0b0208d3");
+        entry["expected"] = json!({});
+        let mut ctx = entry["context"].clone();
+        // Coll[SFunc(SInt => SInt)] empty: one-arg SFunc so convert_self_extension (which calls
+        // `to_script_value` on each extension value in eval) accepts the runtime form.
+        ctx["input_extensions"] = json!([{
+            "0": {"kind": "Value", "bytes_hex": "83007001040400"}
+        }]);
+        entry["context"] = ctx;
+        let vector = json!({"schema": "santa-eval/v6-fullctx", "entries": [entry]});
+        let results = run_adhoc_vector("fullctx-sfunc-activated-1", vector);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1["error"], "errored",
+            "the SFunc extension value must refuse at reader tree_version 1; got {}",
+            results[0].1
+        );
+    }
+
+    /// An eval entry whose `version.activated` is present carries that activated version to the
+    /// eval runner. With `activated=1`, the binding reads at `act_v=1` — an SFunc value in a
+    /// v5 extension refuses. A mutant that defaulted to 3 (overriding the explicit `1`) would
+    /// accept the SFunc and evaluate.
+    #[test]
+    fn an_eval_entry_carries_activated_to_the_binding() {
+        // SigmaProp(true) tree (parses at any tree_version); SFunc extension value; activated=1
+        // on the entry. The binding is read at activated=1 → refused → Errored. The mutant
+        // M06 would use the mapped-or-default `activated=3`, accept, and the tree evaluate.
+        let hex_tree = "0b0208d3";
+        let vector = json!({"schema": "santa-eval/v5", "entries": [{
+            "name": "e#0",
+            "tree_bytes_hex": hex_tree,
+            "extension": {"0": {"kind": "Value", "bytes_hex": "83007001040400"}},
+            "version": {"activated": 1, "ergoTree": 3},
+            "expected": {}
+        }]});
+        let results = run_adhoc_vector("eval-sfunc-activated-1", vector);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1["error"], "errored",
+            "SFunc extension must refuse at activated=1; got {}",
+            results[0].1
+        );
+    }
+
+    /// An eval entry whose ONLY `version` field is `ergoTree` carries the DEFAULT activated
+    /// of 0 to the eval runner. The binding reads at activated 0, so a v5 extension holding
+    /// an SFunc Value refuses (SFunc type code gated to tree_version >= V3). A mutant that
+    /// defaulted to 3 would accept the SFunc and evaluate the tree.
+    #[test]
+    fn an_eval_entry_without_activated_defaults_to_zero() {
+        // Tree `0b 02 08 d3`: header v3+size, size=2, body = SigmaProp(TrivialProp(true)). Parses
+        // at reader tree_version = MAX_SCRIPT_VERSION (V3) — always. The ERRORED on unmutated
+        // comes from the extension decode (binding read at activated 0 refuses SFunc), not the
+        // tree parse.
+        let hex_tree = "0b0208d3";
+        let vector = json!({"schema": "santa-eval/v5", "entries": [{
+            "name": "e#0",
+            "tree_bytes_hex": hex_tree,
+            "extension": {"0": {"kind": "Value", "bytes_hex": "83007001040400"}},
+            "version": {"ergoTree": 3},
+            "expected": {}
+        }]});
+        let results = run_adhoc_vector("eval-sfunc-no-activated", vector);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1["error"], "errored",
+            "the SFunc extension must refuse at the default activated=0; got {}",
+            results[0].1
+        );
+    }
+
+    /// An eval entry whose ONLY `version` field is `activated` carries the DEFAULT ergoTree
+    /// of 0 to the eval runner. The context's `tree_version` cell is set to V0, and a tree
+    /// whose evaluation gates on `ctx.tree_version() >= V3` (a `Downcast(BigInt, Int)`) errors.
+    /// A mutant that defaulted to 3 would set the cell to V3 and the Downcast would succeed.
+    #[test]
+    fn an_eval_entry_without_ergo_tree_defaults_to_zero() {
+        // Tree bytes = `0b 05 7d 06 01 01 04`: header v3+size, size=5, body =
+        // Downcast(BigInt(1), SInt). Evaluates to `Int 1` at ctx.tree_version >= V3; errors at
+        // ctx.tree_version < V3.
+        let hex_tree = "0b057d06010104";
+        let vector = json!({"schema": "santa-eval/v2", "entries": [{
+            "name": "e#0",
+            "tree_bytes_hex": hex_tree,
+            "version": {"activated": 3},
+            "expected": {}
+        }]});
+        let results = run_adhoc_vector("eval-downcast-no-ergotree", vector);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1["error"], "errored",
+            "Downcast(BigInt, Int) at ctx.tree_version=V0 must error; got {}",
+            results[0].1
+        );
+    }
+
+    /// A v6-fullctx entry whose ONLY `version` field is `activated` carries the DEFAULT
+    /// ergoTree of 0 to the fullctx runner. The context's `tree_version` cell is V0, and a
+    /// Downcast(BigInt, Int) in the tree errors. A mutant that defaulted to 3 would succeed.
+    #[test]
+    fn a_fullctx_entry_without_ergo_tree_defaults_to_zero() {
+        // Replace the h111927 tree with the `0b 05 7d 06 01 01 04` Downcast tree, keeping its
+        // context (which has activated=3). Then REMOVE version.ergoTree.
+        let envelope: J =
+            serde_json::from_str(include_str!("../tests/fixtures/v6-fullctx-h111927.json"))
+                .expect("fixture parses");
+        let mut entry = envelope["entries"][0].clone();
+        entry["tree_bytes_hex"] = json!("0b057d06010104");
+        entry["version"] = json!({"activated": 3});
+        // Drop the blessed expected — we are testing the runner's unmutated behaviour.
+        entry["expected"] = json!({});
+        let vector = json!({"schema": "santa-eval/v6-fullctx", "entries": [entry]});
+        let results = run_adhoc_vector("fullctx-downcast-no-ergotree", vector);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1["error"], "errored",
+            "Downcast(BigInt, Int) at ctx.tree_version=V0 must error; got {}",
+            results[0].1
+        );
     }
 }
