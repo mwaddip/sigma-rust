@@ -1,6 +1,7 @@
 target/
 **/*.rs.bk
 Cargo.lock
+!santa/Cargo.lock
 bin/
 pkg/
 pkg-browser/
