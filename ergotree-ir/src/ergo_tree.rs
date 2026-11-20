@@ -263,7 +263,8 @@ impl ErgoTree {
     /// root. It is compiled only with the `arbitrary` feature, as
     /// `ergotree_interpreter::eval::test_util` is: a default build does not have it.
     #[cfg(feature = "arbitrary")]
-    pub fn sigma_parse_bytes_lenient(bytes: &[u8]) -> Result<Self, SigmaParsingError> {
+    // SANTA dummy 3: a deliberate break of the runner's build, the entry under another name.
+    pub fn sigma_parse_bytes_lenient_renamed(bytes: &[u8]) -> Result<Self, SigmaParsingError> {
         let mut r = SigmaByteReader::new(Cursor::new(bytes), ConstantStore::empty());
         r.with_tree_version(ErgoTreeVersion::MAX_SCRIPT_VERSION, |r| {
             ErgoTree::parse_with(r, false)
