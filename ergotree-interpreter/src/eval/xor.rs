@@ -54,7 +54,9 @@ impl Evaluable for Xor {
     ) -> Result<Value<'ctx>, EvalError> {
         let left_v = eval_to(&self.left, OperandClass::Coll, env, ctx)?;
         let right_v = eval_to(&self.right, OperandClass::Coll, env, ctx)?;
-        xor_with_costing(ctx, &left_v, &right_v)
+        // a deliberate break (a test of SANTA's pull request check): the left operand, unchanged
+        let _ = (ctx, &right_v);
+        Ok(left_v)
     }
 }
 
