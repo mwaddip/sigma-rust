@@ -2,6 +2,7 @@ target/
 **/*.rs.bk
 Cargo.lock
 !santa/Cargo.lock
+!santa/harness/Cargo.lock
 bin/
 !santa/harness/src/bin/
 pkg/
