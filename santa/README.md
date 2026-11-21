@@ -2,8 +2,9 @@
 
 sigma-rust's runner for [SANTA](https://github.com/mwaddip/santa), the Ergo consensus conformance
 suite. SANTA holds test vectors whose expected answers were recorded ("blessed") from the
-reference implementation (sigma-state and the JVM node); Blitzen runs them through sigma-rust and
-writes down what sigma-rust answers, and SANTA compares the two. Where sigma-rust answers
+reference implementation (sigma-state and the JVM node); Blitzen runs them through sigma-rust,
+grades what sigma-rust answers by SANTA's grading rules, and writes down the answers and the
+verdicts; SANTA grades the answers again as a cross-check. Where sigma-rust answers
 differently, that is a divergence to look at, not something this runner smooths over.
 
 It covers four tiers:
@@ -18,19 +19,52 @@ It covers four tiers:
 The formats are SANTA's runner contract
 ([`docs/contract/runner-contract.md`](https://github.com/mwaddip/santa/blob/main/docs/contract/runner-contract.md)
 and its `-wire`, `-transaction` and `-nipopow` companions). The runner declares `cost: true`:
-SANTA grades the JIT cost of an evaluation and the block cost of an accepted transaction too.
+the JIT cost of an evaluation and the block cost of an accepted transaction are graded too.
 
 ## Run it
 
 ```bash
 cargo test                                            # the runner's own tests
 cargo run --release -- <vector.json | dir>            # run entries, compare with `expected`, print nice/coal
-cargo run --release -- emit <vectors-dir> <out-dir>   # write one actuals file per vector (no comparison)
+cargo run --release -- run runner.json <santa-checkout> <out-dir>   # grade this checkout
+./santa-run - <santa-checkout> <out-dir>              # the same, through the entry SANTA calls
 ```
 
-`santa-run <impl-path> <vectors-dir> <out-dir>` is the entry SANTA calls: it builds the runner and
-runs `emit` (its last line through `$SANTA_BOUND`, SANTA's resource bound). `runner.json` declares
-what this runner covers (`version`, `tiers`, `cost`), read by SANTA from this checkout.
+`run` grades this checkout against a checkout of SANTA (`git clone
+https://github.com/mwaddip/santa`). `santa-run <impl-path> <santa-dir> <out-dir>` is the entry
+SANTA calls for it: it provisions the repository's toolchain through
+[mise](https://mise.jdx.dev), which must be on `PATH`, builds the runner and runs
+`blitzen run runner.json <santa-dir> <out-dir>`. The run
+
+
+- checks its grader and its selection of files against that checkout's `oracle/`, and refuses to
+  run if either is not reproduced;
+- selects the vector files `runner.json` covers (`version`, `tiers`; `cost` says whether the
+  cost dimension is graded);
+- runs every entry, a file that carries a memory and time budget (`limits`) in a child process of
+  its own (`blitzen one`), which is stopped when it passes the budget;
+- grades every answer by the checkout's `vectors/grading.json`;
+- writes `<out-dir>/results.json` (per slice what was graded, and every red, with a short
+  rendering of its expected and actual answer) and the raw answers under `<out-dir>/actuals/`.
+
+It exits 0 when it ran, whatever is red, and non-zero when it could not run. `santa-run` does not
+use `<impl-path>`: the runner is built against the checkout it sits in.
+
+## The harness
+
+Everything in that list but running an entry is `harness/`, the crate `santa-harness`: SANTA's
+code, copied unchanged from [santa-blitzen](https://github.com/mwaddip/santa-blitzen) (its
+`harness/` at commit `04eb2cc`), and the same in every Rust runner SANTA maintains. It is not
+edited here: a fix to it goes to SANTA and comes back as a new copy. It is a workspace of its own
+(the runner's `Cargo.toml` excludes it) with its own tests, which read a checkout of SANTA and
+fail without one:
+
+```bash
+SANTA_DIR=<santa-checkout> cargo test --manifest-path harness/Cargo.toml
+```
+
+The runner is built and run on Linux; a bounded file needs Linux, where the harness watches the
+child's memory in `/proc`.
 
 ## How it works
 

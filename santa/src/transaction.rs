@@ -286,7 +286,7 @@ mod tests {
     /// Shape test only: a verdict must be reached (`error: null`, `valid` a bool).
     /// Whether `valid` is true (a sigma-rust with the v6 fixes, as the reference answers) or
     /// false (upstream develop: pre-fix `reduce_to_crypto` rejects the v3-gated
-    /// Downcast) is per-branch — graded by conform against `expected`, not asserted
+    /// Downcast) is per-branch — graded against `expected` by a whole run, not asserted
     /// here. The verdict is logged for eyeballing.
     #[test]
     fn keystone_reaches_a_verdict() {
