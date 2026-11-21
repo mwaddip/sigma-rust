@@ -10,6 +10,10 @@ ignore = [
 # pin-utils un-maintained, reached through hyper 1.x <- reqwest <- ergo-rest. Nothing to act
 # on until hyper drops it.
 "RUSTSEC-2026-0441",
+# chrono un-maintained, a direct dependency of ergo-p2p, which takes the current time from it
+# in one place (`Utc::now()` in its peer connection handler). The advisory reports no
+# vulnerability.
+"RUSTSEC-2026-0543",
 ]
 
 [output]
