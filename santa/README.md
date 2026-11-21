@@ -54,7 +54,7 @@ use `<impl-path>`: the runner is built against the checkout it sits in.
 
 Everything in that list but running an entry is `harness/`, the crate `santa-harness`: SANTA's
 code, copied unchanged from [santa-blitzen](https://github.com/mwaddip/santa-blitzen) (its
-`harness/` at commit `04eb2cc`), and the same in every Rust runner SANTA maintains. It is not
+`harness/` at commit `5d63a3b`), and the same in every Rust runner SANTA maintains. It is not
 edited here: a fix to it goes to SANTA and comes back as a new copy. It is a workspace of its own
 (the runner's `Cargo.toml` excludes it) with its own tests, which read a checkout of SANTA and
 fail without one:
