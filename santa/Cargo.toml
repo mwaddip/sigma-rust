@@ -22,6 +22,11 @@ sigma-ser = { path = "../sigma-ser" }
 ergo-nipopow = { path = "../ergo-nipopow" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# SANTA's harness for a runner that grades itself (`harness/`, copied unchanged from
+# santa-blitzen; see the README): the selection of this runner's vector files, the grading
+# interpreter, the checks against SANTA's oracles, the watchdog of a bounded file and
+# `results.json`.
+santa-harness = { path = "harness" }
 
 # The same `ergo_avltree_rust` the repository's own manifest patches in (its verifier returns an
 # error where the crates.io release panics): a patch applies only in the workspace being built,
@@ -31,4 +36,7 @@ ergo_avltree_rust = { git = "https://github.com/mwaddip/ergo_avltree_rust.git", 
 
 # A workspace of its own: the runner is not a member of the repository's workspace, so the
 # repository's builds, lints and tests do not build it, and it keeps its own `Cargo.lock`.
+# The harness is a workspace of its own too: its tests bring their own dependencies, which
+# stay out of this runner's `Cargo.lock`.
 [workspace]
+exclude = ["harness"]

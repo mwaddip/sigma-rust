@@ -1,20 +1,29 @@
 //! Blitzen: sigma-rust's runner for SANTA, the Ergo consensus conformance suite
-//! (<https://github.com/mwaddip/santa>). It runs SANTA's test vectors through sigma-rust and
-//! writes down what sigma-rust answers; SANTA compares that with the reference implementation's
-//! answers. The vector and actuals formats are SANTA's runner contract
-//! (`docs/contract/runner-contract.md` for the eval tier, and its `-wire`, `-transaction` and
-//! `-nipopow` companions); "runner contract §N" below refers to it. An entry's `expected` is the
-//! reference's answer, recorded ("blessed") when the vector was made.
+//! (<https://github.com/mwaddip/santa>). It runs SANTA's test vectors through sigma-rust,
+//! grades what sigma-rust answers by SANTA's grading rules, and writes down the answers and the
+//! verdicts; SANTA grades the answers again as a cross-check. The vector and actuals formats are
+//! SANTA's runner contract (`docs/contract/runner-contract.md` for the eval tier, and its `-wire`,
+//! `-transaction` and `-nipopow` companions); "runner contract §N" below refers to it. An entry's
+//! `expected` is the reference's answer, recorded ("blessed") when the vector was made.
 //!
-//! Two modes, both producing the actuals blind (never reading `expected`):
+//! Three modes. In each the actuals are produced blind: what answers an entry never reads its
+//! `expected`, and the comparison comes after.
 //!
 //! ```text
-//! blitzen <vector.json | dir>           self-compare: run each entry, compare with its
-//!                                        `expected`, print nice/coal.
-//! blitzen emit <vectors-dir> <out-dir>  write <out-dir>/<same-filename>: an object mapping
-//!                                        each entry's name to its actual. No comparison:
-//!                                        SANTA's orchestrator compares every runner alike.
+//! blitzen run <runner.json> <santa-dir> <out-dir>
+//!     the self-contained runner (SANTA's runner-integration contract, §3): select this
+//!     runner's vector files from a SANTA checkout, run them, bound the files that carry a
+//!     budget, grade every answer, write <out-dir>/results.json and <out-dir>/actuals/.
+//! blitzen one <santa-dir> <relpath> <out-file>
+//!     run one vector file and write its actuals: the child process `run` starts for a
+//!     bounded file.
+//! blitzen <vector.json | dir>
+//!     self-compare: run each entry, compare with its `expected`, print nice/coal.
 //! ```
+//!
+//! `run` and `one` are the harness's (`harness/`, SANTA's crate): the selection, the grading
+//! by SANTA's rules, the bounds and the results are its code, and this runner hands it one
+//! function, a vector file to its actuals.
 //!
 //! Self-compare uses serde_json's structural equality, which is the contract's match (§5):
 //! objects key-order-insensitive, arrays order-sensitive, numbers numeric, strings exact.
@@ -28,28 +37,95 @@ mod transaction;
 mod wire;
 
 use serde_json::Value as J;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// What the command line asks for.
+#[derive(Debug, PartialEq)]
+enum Mode<'a> {
+    Run {
+        runner_json: &'a str,
+        santa: &'a str,
+        out: &'a str,
+    },
+    One {
+        santa: &'a str,
+        rel: &'a str,
+        out_file: &'a str,
+    },
+    SelfCompare(&'a str),
+    Usage,
+}
+
+/// The mode the arguments (after the program's name) ask for. `run` and `one` are verbs wherever
+/// they stand first: with another number of arguments they are a usage error, never a file of
+/// that name to self-compare.
+fn mode_of<'a>(args: &[&'a str]) -> Mode<'a> {
+    match *args {
+        ["run", runner_json, santa, out] => Mode::Run {
+            runner_json,
+            santa,
+            out,
+        },
+        ["one", santa, rel, out_file] => Mode::One {
+            santa,
+            rel,
+            out_file,
+        },
+        ["run" | "one", ..] => Mode::Usage,
+        [target] => Mode::SelfCompare(target),
+        _ => Mode::Usage,
+    }
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("emit") => {
-            if args.len() < 4 {
-                eprintln!("usage: blitzen emit <vectors-dir> <out-dir>");
-                std::process::exit(2);
-            }
-            emit(Path::new(&args[2]), Path::new(&args[3]));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let ran = match mode_of(&args) {
+        Mode::Run {
+            runner_json,
+            santa,
+            out,
+        } => santa_harness::main_run(
+            Path::new(runner_json),
+            Path::new(santa),
+            Path::new(out),
+            &run_file,
+        ),
+        Mode::One {
+            santa,
+            rel,
+            out_file,
+        } => santa_harness::main_one(Path::new(santa), rel, Path::new(out_file), &run_file),
+        Mode::SelfCompare(target) => {
+            self_compare(Path::new(target));
+            Ok(())
         }
-        Some(target) => self_compare(Path::new(target)),
-        None => {
+        Mode::Usage => {
             eprintln!(
                 "usage:\n  \
-                 blitzen <vector.json | dir>           self-compare vs blessed expected\n  \
-                 blitzen emit <vectors-dir> <out-dir>  emit actuals for the SANTA orchestrator"
+                 blitzen run <runner.json> <santa-dir> <out-dir>  grade a SANTA checkout\n  \
+                 blitzen one <santa-dir> <relpath> <out-file>     run one vector file of it\n  \
+                 blitzen <vector.json | dir>                      self-compare vs blessed expected"
             );
             std::process::exit(2);
         }
+    };
+    // the harness could not run: a runner.json it refuses, an oracle it does not reproduce, a
+    // checkout it cannot read
+    if let Err(e) = ran {
+        eprintln!("blitzen: {e}");
+        std::process::exit(1);
     }
+}
+
+/// This runner as the harness sees it: a vector file's parsed document to its actuals by entry
+/// name. The document is the harness's read of the file; the path is not read again.
+fn run_file(_path: &Path, vector: &J) -> BTreeMap<String, J> {
+    run_vector(vector)
+        .into_iter()
+        .map(|(name, actual, _expected)| (name, actual))
+        .collect()
 }
 
 /// Extract a printable message from a caught panic payload.
@@ -119,11 +195,16 @@ fn tier_of(vector: &J) -> Tier<'_> {
 fn run_vector_file(path: &Path) -> Vec<(String, J, J)> {
     let text = std::fs::read_to_string(path).expect("read vector file");
     let vector: J = serde_json::from_str(&text).expect("parse vector JSON");
+    run_vector(&vector)
+}
+
+/// `run_vector_file` for a vector file that is already read.
+fn run_vector(vector: &J) -> Vec<(String, J, J)> {
     let entries = match vector["entries"].as_array() {
         Some(e) => e,
         None => return Vec::new(),
     };
-    let tier = tier_of(&vector);
+    let tier = tier_of(vector);
     entries
         .iter()
         .map(|entry| {
@@ -272,41 +353,6 @@ fn self_compare(path: &Path) {
     }
 }
 
-/// Emit mode: write one actuals file per vector (`<out-dir>/<same-filename>`), each an
-/// object mapping entry `name` → its `{ value, cost, error }` (santa-eval.actuals schema).
-/// Blind — never reads `expected`; SANTA's orchestrator compares. Exit 0 once
-/// every actuals file is written; a malformed vector aborts loudly (non-zero) via `expect`.
-fn emit(vectors_dir: &Path, out_dir: &Path) {
-    let files = collect_vector_files(vectors_dir);
-    if files.is_empty() {
-        eprintln!("no .json vector files found at {}", vectors_dir.display());
-        std::process::exit(2);
-    }
-    std::fs::create_dir_all(out_dir).expect("create out dir");
-
-    let mut written = 0u64;
-    for f in &files {
-        let entries = run_vector_file(f);
-        if entries.is_empty() {
-            continue; // not an eval vector → no actuals file
-        }
-        let mut actuals = serde_json::Map::new();
-        for (name, actual, _expected) in entries {
-            actuals.insert(name, actual);
-        }
-        let filename = f.file_name().expect("vector filename");
-        let out_path = out_dir.join(filename);
-        let text = serde_json::to_string_pretty(&J::Object(actuals)).expect("serialize actuals");
-        std::fs::write(&out_path, text).expect("write actuals file");
-        written += 1;
-    }
-    eprintln!(
-        "blitzen emit: wrote {} actuals files to {}",
-        written,
-        out_dir.display()
-    );
-}
-
 fn short_name(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -368,6 +414,81 @@ mod tests {
     fn caught_passes_through_a_normal_outcome() {
         let j = caught(|| Outcome::Errored.to_json(), eval_panicked);
         assert_eq!(j["error"], "errored");
+    }
+
+    /// The command line: each verb with its arguments in the harness's order, and everything
+    /// else that starts with a verb a usage error.
+    #[test]
+    fn the_command_line_names_one_mode() {
+        use crate::{mode_of, Mode};
+        let run = Mode::Run {
+            runner_json: "r.json",
+            santa: "checkout",
+            out: "out",
+        };
+        let one = Mode::One {
+            santa: "checkout",
+            rel: "eval/v6/authored/X.json",
+            out_file: "x.json",
+        };
+        let rows: [(&[&str], Mode); 14] = [
+            (&["run", "r.json", "checkout", "out"], run),
+            (
+                &["one", "checkout", "eval/v6/authored/X.json", "x.json"],
+                one,
+            ),
+            (&["vectors"], Mode::SelfCompare("vectors")),
+            (&["x.json"], Mode::SelfCompare("x.json")),
+            // a verb with another number of arguments is never a file of that name
+            (&["run"], Mode::Usage),
+            (&["one"], Mode::Usage),
+            (&["run", "r.json", "checkout"], Mode::Usage),
+            (&["run", "r.json", "checkout", "out", "more"], Mode::Usage),
+            (&["one", "checkout", "x.json"], Mode::Usage),
+            (&["one", "checkout", "rel", "x.json", "more"], Mode::Usage),
+            // a verb is a verb only where it stands first
+            (&["vectors", "run"], Mode::Usage),
+            (&[], Mode::Usage),
+            // the call of the convention this runner had before (`emit <vectors-dir> <out-dir>`)
+            (&["emit", "vectors", "out"], Mode::Usage),
+            (&["emit"], Mode::SelfCompare("emit")),
+        ];
+        for (args, mode) in rows {
+            assert_eq!(mode_of(args), mode, "{args:?}");
+        }
+    }
+
+    /// What the harness is handed for a file is that file's actuals, by entry name, and it is
+    /// computed from the document the harness read: the path is not opened.
+    #[test]
+    fn the_harness_gets_the_actuals_of_the_document() {
+        use crate::{run_file, run_vector_file};
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/nipopow-chain-32.json");
+        let document: J =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read the fixture"))
+                .expect("parse the fixture");
+        let listed = run_vector_file(&path);
+        assert_eq!(listed.len(), 2, "the fixture's two entries");
+        let handed = run_file(std::path::Path::new("/no/such/file.json"), &document);
+        assert_eq!(handed.len(), listed.len());
+        for (name, actual, expected) in listed {
+            assert_eq!(handed.get(&name), Some(&actual), "{name}");
+            assert_ne!(
+                actual, expected,
+                "{name}: an actual is told from its expected"
+            );
+        }
+    }
+
+    /// A document with no `entries`, or with none in it, answers nothing: the harness is handed
+    /// an empty map, never a panic (a schema this runner was not written for may have no such key).
+    #[test]
+    fn a_document_without_entries_answers_nothing() {
+        use crate::run_file;
+        let nowhere = std::path::Path::new("/no/such/file.json");
+        assert!(run_file(nowhere, &json!({"schema": "santa-eval/v99"})).is_empty());
+        assert!(run_file(nowhere, &json!({"schema": "santa-eval/v5", "entries": []})).is_empty());
     }
 
     /// santa-eval/v4 keystone: `accept-r4-long#0` from Box.getReg_dynamic_index.json.
