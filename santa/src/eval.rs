@@ -4,7 +4,9 @@
 //!
 //! The canonical context is the one the reference evaluator (sigma-state) builds for a bare
 //! evaluation. SELF is a box holding the entry's tree, with value 1,000,000, no tokens, no
-//! additional registers, creation height 0, a zero transaction id and index 0. INPUTS is exactly
+//! additional registers, creation height 0, a zero transaction id and index 0. It holds the tree
+//! as the library's strict reader keeps it (the reader of a node built on this library), and
+//! otherwise as parsed ([`self_tree_of`]). INPUTS is exactly
 //! `[SELF]`, OUTPUTS, the data inputs and the headers are empty, HEIGHT is 0, the pre-header and
 //! the last block's state root are fixed (see [`ContextParts::context`]) and no spending input
 //! carries a context extension. The entry's input goes, by envelope ([`Binding`]): to variable 1
@@ -36,6 +38,7 @@ use ergotree_ir::ergo_tree::{ErgoTree, ErgoTreeVersion};
 use ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
 use ergotree_ir::mir::value::Value;
 use ergotree_ir::serialization::SigmaSerializable;
+use ergotree_ir::types::stype::SType;
 use sigma_ser::ScorexSerializable;
 
 use crate::binding;
@@ -123,10 +126,12 @@ struct ContextParts {
 }
 
 impl ContextParts {
-    /// The `Err` is the entry's outcome. A SELF that cannot be built is a context this runner
-    /// cannot represent: not-implemented, the cause on stderr, never a stand-in box. `ErgoBox::new`
-    /// writes the box for its id, and a tree can hold what has no written form (a tuple type of
-    /// zero or one item), which the reference keeps in a box it never writes.
+    /// `tree` is the tree SELF holds ([`self_tree_of`]). The `Err` is the entry's outcome. A SELF
+    /// that cannot be built is a context this runner cannot represent: not-implemented, the cause
+    /// on stderr, never a stand-in box. `ErgoBox::new` writes the box for its id, and a parsed tree
+    /// can hold what has no written form (a tuple type of zero or one item). The reference keeps
+    /// such a tree in a box it writes only when a script reads the box's id or bytes, and fails
+    /// then.
     fn new(binding: Binding, tree: &ErgoTree) -> Result<ContextParts, Outcome> {
         let with_var1 = |v: Option<EvaluatedValue>| {
             let mut ext = ContextExtension::empty();
@@ -331,11 +336,31 @@ pub fn run_entry(
         Ok(t) => t,
         Err(_) => return Outcome::Errored,
     };
-    let parts = match ContextParts::new(binding, &tree) {
+    let parts = match ContextParts::new(binding, &self_tree_of(tree_bytes, &tree)) {
         Ok(p) => p,
         Err(outcome) => return outcome,
     };
     evaluate(&tree, parts.context(tree_version, activated_version))
+}
+
+/// The tree SELF holds. The runner contract (§2, the SELF-tree note): as a node holds it where a
+/// node can read it, otherwise the parse. The node's reader is here the library's strict one,
+/// which a box is read with. It keeps a size-flagged tree whose root is not a SigmaProp, which is
+/// not a script, as its bytes: the bytes its size field spans. A tree that reader refuses (for
+/// one, a size field that claims more bytes than there are), an unsized tree with such a root,
+/// whose box a node refuses, and a SigmaProp root are held as parsed. The tree evaluated is the
+/// parse in every case.
+fn self_tree_of(tree_bytes: &[u8], parsed: &ErgoTree) -> ErgoTree {
+    let size_flagged = tree_bytes.first().is_some_and(|h| h & 0x08 != 0);
+    let root_is_no_sigma_prop = parsed
+        .root_expr()
+        .is_ok_and(|root| root.tpe() != SType::SSigmaProp);
+    if size_flagged && root_is_no_sigma_prop {
+        // for a sized tree `sigma_parse_bytes` is the strict reader, the one a box is read with
+        ErgoTree::sigma_parse_bytes(tree_bytes).unwrap_or_else(|_| parsed.clone())
+    } else {
+        parsed.clone()
+    }
 }
 
 /// Evaluate the tree's root in the context and encode the value with its cost. The root keeps
@@ -822,18 +847,133 @@ mod tests {
     }
 
     /// A SELF that cannot be built is a context this runner cannot represent: the entry is
-    /// not-implemented, never evaluated on a stand-in box. Here the tree holds a tuple type of one
-    /// item, which has no written form (as one of no item has none), and `ErgoBox::new` writes the
-    /// box for its id.
+    /// not-implemented, never evaluated on a stand-in box. Here the root is a SigmaProp, so SELF
+    /// holds the parse, and the parse holds a tuple type of one item, which has no written form
+    /// (as one of no item has none): `ErgoBox::new` writes the box for its id.
     #[test]
     fn a_self_that_cannot_be_built_is_not_implemented() {
-        let tree = crate::hex_to_bytes("0b05b160010402").expect("hex");
+        // sigmaProp(c._1 == 1), c a constant of type (Int)
+        let tree = crate::hex_to_bytes("0b0ad1938c60010402010402").expect("hex");
         let input = serde_json::json!({"kind": "Int", "value": 0});
         let out = run_entry(&tree, Some(&input), None, None, None, 3, 3);
         assert!(
             matches!(out, Outcome::NotImplemented),
             "got {}",
             outcome_name(&out)
+        );
+    }
+
+    /// The tree SELF holds for an entry's bytes, and whether it is kept as bytes.
+    fn self_tree(hex: &str) -> (ErgoTree, bool) {
+        let bytes = crate::hex_to_bytes(hex).expect("hex");
+        let parsed = ErgoTree::sigma_parse_bytes_lenient(&bytes).expect("the lenient parse");
+        assert!(matches!(parsed, ErgoTree::Parsed(_)), "{hex}: the parse");
+        let held = self_tree_of(&bytes, &parsed);
+        let kept_as_bytes = matches!(held, ErgoTree::Unparsed { .. });
+        (held, kept_as_bytes)
+    }
+
+    /// SELF holds its tree as the strict reader keeps it, otherwise the parse: the rows of the
+    /// contract's SELF-tree note. `9a04020402` is `1 + 1`, an Int root that can be written;
+    /// `b160010402` is `SizeOf((1))`, an Int root whose parse cannot. The root's type is the
+    /// root's own: a function whose body is a SigmaProp is not a SigmaProp root.
+    #[test]
+    fn self_holds_its_tree_as_a_node_holds_it() {
+        // size-flagged, the root not a SigmaProp: a node keeps it as its bytes
+        assert!(self_tree("0b059a04020402").1, "sized, an Int root");
+        assert!(
+            self_tree("0b05b160010402").1,
+            "sized, an Int root, unwritable"
+        );
+        assert!(self_tree("08059a04020402").1, "sized at version 0");
+        assert!(self_tree("0b0ad9010104d19304020402").1, "a function root");
+        // the size field claims more bytes than there are: a node cannot read it
+        assert!(!self_tree("0b069a04020402").1, "the size lies long");
+        assert!(!self_tree("0b2a9a04020402").1, "the size lies long by 37");
+        // unsized, the root not a SigmaProp: a node refuses the box
+        assert!(!self_tree("009a04020402").1, "unsized, an Int root");
+        // a SigmaProp root: a node parses it
+        assert!(!self_tree("0b03d10101").1, "sized, a SigmaProp root");
+        assert!(!self_tree("00d10101").1, "unsized, a SigmaProp root");
+    }
+
+    /// A tree kept as bytes is the bytes its size field spans: a byte after the tree is not SELF's,
+    /// and a size field that cuts the body short cuts SELF's tree there.
+    #[test]
+    fn a_tree_kept_as_bytes_is_the_span_of_its_size_field() {
+        let span = |hex: &str| self_tree(hex).0.bytes().expect("the kept bytes");
+        let whole = crate::hex_to_bytes("0b059a04020402").expect("hex");
+        assert_eq!(span("0b059a04020402"), whole);
+        assert_eq!(span("0b059a0402040205"), whole, "a trailing byte");
+        assert_eq!(
+            span("0b049a04020402"),
+            crate::hex_to_bytes("0b049a040204").expect("hex"),
+            "a size one short"
+        );
+    }
+
+    /// For a tree the strict reader keeps as bytes, SELF IS the box the library reads from the
+    /// box's bytes (what a node built on it holds): the same id and the same bytes, also where the
+    /// parse has no written form. The box as written: value 1,000,000, the tree, creation height
+    /// 0, no tokens, no registers, a zero transaction id, index 0.
+    #[test]
+    fn self_is_the_box_the_library_reads_from_its_bytes() {
+        for tree_hex in ["0b059a04020402", "0b05b160010402", "0b03b16000"] {
+            let (held, kept_as_bytes) = self_tree(tree_hex);
+            assert!(kept_as_bytes, "{tree_hex}");
+            let parts = ContextParts::new(Binding::Var1(None), &held)
+                .ok()
+                .expect("the parts build");
+            let mut box_bytes = vec![0xc0, 0x84, 0x3d];
+            box_bytes.extend(crate::hex_to_bytes(tree_hex).expect("hex"));
+            box_bytes.extend([0u8; 3 + 32 + 1]);
+            let read = ErgoBox::sigma_parse_bytes(&box_bytes).expect("the box reads");
+            assert_eq!(parts.self_box.box_id(), read.box_id(), "{tree_hex}: the id");
+            assert_eq!(
+                parts.self_box.bytes().expect("SELF's bytes"),
+                box_bytes,
+                "{tree_hex}: the bytes"
+            );
+        }
+    }
+
+    /// Entries whose tree holds a tuple type of zero or one item under a root that is not a
+    /// SigmaProp are answered: SELF holds the bytes, the parse is evaluated. The answers are the
+    /// reference's (SANTA `Tuple.non_pair_value_ops` entries 45 and 46, `SelectField.non_pair`
+    /// entry 0, `Self.node_form_tree_span` entry 11).
+    #[test]
+    fn an_entry_whose_parse_cannot_be_written_is_answered() {
+        let input = serde_json::json!({"kind": "Int", "value": 0});
+        let run = |tree_hex: &str, tree_version: u8, activated: u8| {
+            let tree = crate::hex_to_bytes(tree_hex).expect("hex");
+            run_entry(
+                &tree,
+                Some(&input),
+                None,
+                None,
+                None,
+                tree_version,
+                activated,
+            )
+            .to_json()
+        };
+        let int = |value: i64, cost: u64| {
+            let value = serde_json::json!({"kind": "Int", "value": value});
+            serde_json::json!({"value": value, "cost": cost, "error": null})
+        };
+        assert_eq!(run("0b03b16000", 3, 3), int(0, 19), "SizeOf(())");
+        assert_eq!(run("0b05b160010402", 3, 3), int(1, 19), "SizeOf((1))");
+        assert_eq!(
+            run("08068c6001040a01", 0, 2)["error"],
+            "errored",
+            "SelectField((5), 1): the evaluator's refusal"
+        );
+        // a node cannot read this one (its size field lies long): SELF holds the parse, and the
+        // entry is evaluated, not refused
+        assert_eq!(
+            run("0b069a04020402", 3, 3),
+            int(2, 25),
+            "1 + 1, the size lies long"
         );
     }
 

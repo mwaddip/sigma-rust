@@ -77,7 +77,12 @@ child's memory in `/proc`.
   is the context's JIT cost counter after the evaluation. A full-context entry
   (`santa-eval/v6-fullctx`) is evaluated in the real context its envelope carries: the boxes,
   headers and pre-header of a captured spend (`preheader.rs` decodes the envelope's pre-header).
-  An entry whose SELF box cannot be built is not-implemented.
+  SELF holds the tree as the library's strict reader keeps it (the reader of a node built on this
+  library): a size-flagged tree whose root is not a SigmaProp as the bytes its size field spans.
+  A tree that reader refuses (for one, a size field that claims more bytes than there are), an
+  unsized tree with such a root and a SigmaProp root are held as parsed; the tree evaluated is the
+  parse in every case. An entry whose SELF box cannot be built (a parse that has no written form)
+  is not-implemented.
 - **`wire.rs`**: parses a kind's bytes with sigma-rust's serializer and writes them back. The
   `ErgoTree` kind goes through the lenient parse, so the tree is re-encoded from its structure.
 - **`transaction.rs`**: decodes the transaction and its boxes from their bytes, builds the
