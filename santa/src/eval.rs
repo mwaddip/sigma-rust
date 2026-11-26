@@ -8,10 +8,13 @@
 //! as the library's strict reader keeps it (the reader of a node built on this library), and
 //! otherwise as parsed ([`self_tree_of`]). INPUTS is exactly
 //! `[SELF]`, OUTPUTS, the data inputs and the headers are empty, HEIGHT is 0, the pre-header and
-//! the last block's state root are fixed (see [`ContextParts::context`]) and no spending input
-//! carries a context extension. The entry's input goes, by envelope ([`Binding`]): to variable 1
-//! of SELF's extension (v1/v2); into one extension per spending input, read by `getVarFromInput`
-//! (v3); into SELF's registers R4-R9 plus variable 1 (v4); or it is SELF's whole extension (v5).
+//! the last block's state root are fixed (see [`ContextParts::context`]) and, but for a v3 entry,
+//! no spending input carries a context extension. An entry is read by its file's schema
+//! ([`Envelope`]): the fields
+//! that envelope defines, and no others. A v1 entry binds nothing; a v2 entry's input goes to
+//! variable 1 of SELF's extension; a v3 entry's into one extension per spending input, read by
+//! `getVarFromInput`; a v4 entry's into SELF's registers R4-R9 plus variable 1; a v5 entry's is
+//! SELF's whole extension.
 //!
 //! The full-context form (`santa-eval/v6-fullctx`) carries a captured spend: its boxes, headers,
 //! pre-header and per-input extensions ([`FullContextParts`]).
@@ -87,7 +90,7 @@ const EVAL_JIT_COST_LIMIT: u64 = 10_000_000;
 
 /// What an entry binds into the canonical context, by envelope.
 enum Binding {
-    /// v1/v2: the entry's input, if it has one, at variable 1 of SELF's extension.
+    /// v2: the entry's input, at variable 1 of SELF's extension; v1: nothing bound.
     Var1(Option<EvaluatedValue>),
     /// v3: one context extension per spending input (`getVarFromInput`); SELF's own is empty.
     PerInput(Vec<ContextExtension>),
@@ -272,41 +275,37 @@ fn registers_from(
         .map_err(|e| decode_failure_outcome(e, "v4 selfRegisters decode"))
 }
 
-/// The entry's binding, by envelope: an `extension` makes it v5, else `selfRegisters` v4, else
-/// `inputs` v3, else v1/v2 (its `input`, if any). A v3 entry's `input` is still decoded, first.
-fn binding_of(
-    input: Option<&serde_json::Value>,
-    inputs: Option<&Vec<serde_json::Value>>,
-    self_registers: Option<&serde_json::Map<String, serde_json::Value>>,
-    extension: Option<&serde_json::Map<String, serde_json::Value>>,
-    activated_version: u8,
-) -> Result<Binding, Outcome> {
-    // A key >= 0x80 stays in: sigma-rust's own guard decides (the reference refuses it), so an
-    // implementation that wrongly accepts it shows.
-    if let Some(map) = extension {
-        return extension_from(map, activated_version, "v5 extension decode")
-            .map(Binding::Extension);
-    }
-    if let Some(map) = self_registers {
-        let input = input.ok_or_else(|| Outcome::Panicked {
-            note: "v4 entry missing input".into(),
-        })?;
-        let var1 = binding::extension_binding(input, activated_version)
-            .map_err(|e| decode_failure_outcome(e, "v4 input decode"))?;
-        let regs = registers_from(map, activated_version)?;
-        return Ok(Binding::SelfRegisters(regs, var1));
-    }
-    let var1 = match input {
-        Some(j) => Some(
-            binding::extension_binding(j, activated_version)
-                .map_err(|e| decode_failure_outcome(e, "input decode"))?,
-        ),
-        None => None,
-    };
-    match inputs {
-        Some(arr) => {
-            let mut exts = Vec::with_capacity(arr.len());
-            for inp in arr {
+/// What an entry binds, as its file's schema defines it: the fields of that envelope and no
+/// others. The reference reads an entry by its schema; a field of another envelope is not read.
+#[derive(Clone, Copy)]
+pub enum Envelope<'a> {
+    /// `santa-eval/v1`: a closed tree, nothing bound.
+    V1,
+    /// `santa-eval/v2`: `input`, at variable 1 of SELF's extension.
+    V2 { input: &'a serde_json::Value },
+    /// `santa-eval/v3`: `inputs`, one context extension per spending input.
+    V3 { inputs: &'a [serde_json::Value] },
+    /// `santa-eval/v4`: `selfRegisters` (R4-R9), and `input` at variable 1.
+    V4 {
+        self_registers: &'a serde_json::Map<String, serde_json::Value>,
+        input: &'a serde_json::Value,
+    },
+    /// `santa-eval/v5`: `extension`, SELF's whole extension.
+    V5 {
+        extension: &'a serde_json::Map<String, serde_json::Value>,
+    },
+}
+
+/// The entry's binding, by its envelope.
+fn binding_of(envelope: Envelope<'_>, activated_version: u8) -> Result<Binding, Outcome> {
+    match envelope {
+        Envelope::V1 => Ok(Binding::Var1(None)),
+        Envelope::V2 { input } => binding::extension_binding(input, activated_version)
+            .map(|v| Binding::Var1(Some(v)))
+            .map_err(|e| decode_failure_outcome(e, "input decode")),
+        Envelope::V3 { inputs } => {
+            let mut exts = Vec::with_capacity(inputs.len());
+            for inp in inputs {
                 exts.push(match inp.get("extension").and_then(|e| e.as_object()) {
                     Some(map) => extension_from(map, activated_version, "input decode (v3)")?,
                     None => ContextExtension::empty(),
@@ -314,21 +313,32 @@ fn binding_of(
             }
             Ok(Binding::PerInput(exts))
         }
-        None => Ok(Binding::Var1(var1)),
+        Envelope::V4 {
+            self_registers,
+            input,
+        } => {
+            let var1 = binding::extension_binding(input, activated_version)
+                .map_err(|e| decode_failure_outcome(e, "v4 input decode"))?;
+            let regs = registers_from(self_registers, activated_version)?;
+            Ok(Binding::SelfRegisters(regs, var1))
+        }
+        // A key >= 0x80 stays in: sigma-rust's own guard decides (the reference refuses it), so
+        // an implementation that wrongly accepts it shows.
+        Envelope::V5 { extension } => {
+            extension_from(extension, activated_version, "v5 extension decode")
+                .map(Binding::Extension)
+        }
     }
 }
 
 /// Evaluate one entry. Produces exactly one [`Outcome`].
 pub fn run_entry(
     tree_bytes: &[u8],
-    input: Option<&serde_json::Value>,
-    inputs: Option<&Vec<serde_json::Value>>,
-    self_registers: Option<&serde_json::Map<String, serde_json::Value>>,
-    extension: Option<&serde_json::Map<String, serde_json::Value>>,
+    envelope: Envelope<'_>,
     tree_version: u8,
     activated_version: u8,
 ) -> Outcome {
-    let binding = match binding_of(input, inputs, self_registers, extension, activated_version) {
+    let binding = match binding_of(envelope, activated_version) {
         Ok(binding) => binding,
         Err(outcome) => return outcome,
     };
@@ -855,7 +865,7 @@ mod tests {
         // sigmaProp(c._1 == 1), c a constant of type (Int)
         let tree = crate::hex_to_bytes("0b0ad1938c60010402010402").expect("hex");
         let input = serde_json::json!({"kind": "Int", "value": 0});
-        let out = run_entry(&tree, Some(&input), None, None, None, 3, 3);
+        let out = run_entry(&tree, Envelope::V2 { input: &input }, 3, 3);
         assert!(
             matches!(out, Outcome::NotImplemented),
             "got {}",
@@ -948,10 +958,7 @@ mod tests {
             let tree = crate::hex_to_bytes(tree_hex).expect("hex");
             run_entry(
                 &tree,
-                Some(&input),
-                None,
-                None,
-                None,
+                Envelope::V2 { input: &input },
                 tree_version,
                 activated,
             )
@@ -1034,7 +1041,15 @@ mod tests {
         let input = serde_json::json!({"kind": "Int", "value": 0});
         let eval = |tree_hex: &str| {
             let tree = crate::hex_to_bytes(tree_hex).expect("hex");
-            match run_entry(&tree, Some(&input), None, registers.as_object(), None, 3, 3) {
+            match run_entry(
+                &tree,
+                Envelope::V4 {
+                    self_registers: registers.as_object().expect("an object"),
+                    input: &input,
+                },
+                3,
+                3,
+            ) {
                 Outcome::Success { value, .. } => value,
                 other => panic!("{tree_hex}: expected a value, got {}", outcome_name(&other)),
             }
@@ -1090,7 +1105,14 @@ mod tests {
     fn a_v5_extension_with_a_bad_key_is_errored() {
         let tree = crate::hex_to_bytes("000402").expect("hex"); // Int 1
         let ext = serde_json::json!({"abc": {"kind": "Int", "value": 0}});
-        let out = run_entry(&tree, None, None, None, ext.as_object(), 3, 3);
+        let out = run_entry(
+            &tree,
+            Envelope::V5 {
+                extension: ext.as_object().expect("an object"),
+            },
+            3,
+            3,
+        );
         assert!(
             matches!(out, Outcome::Errored),
             "got {}",
@@ -1106,27 +1128,19 @@ mod tests {
         let tree = crate::hex_to_bytes("000402").expect("hex"); // Int 1
         let regs = serde_json::json!({"abc": {"kind": "Int", "value": 0}});
         let input = serde_json::json!({"kind": "Int", "value": 0});
-        let out = run_entry(&tree, Some(&input), None, regs.as_object(), None, 3, 3);
+        let out = run_entry(
+            &tree,
+            Envelope::V4 {
+                self_registers: regs.as_object().expect("an object"),
+                input: &input,
+            },
+            3,
+            3,
+        );
         match out {
             Outcome::Panicked { note } => {
                 assert!(note.contains("v4 selfRegisters: bad key"), "note: {note}",)
             }
-            other => panic!("expected Panicked, got {}", outcome_name(&other)),
-        }
-    }
-
-    /// A v3 entry (both `inputs` AND a top-level `input`) with a top-level `input` whose kind
-    /// the runner cannot decode is `panicked`: v3 still decodes `input` first so an envelope
-    /// defect does not hide as `success`. Unmutated: input decode fails → `panicked`. A mutant
-    /// that only decodes `input` when `inputs` is None would evaluate the tree and succeed.
-    #[test]
-    fn a_v3_entry_with_a_bogus_top_level_input_is_panicked() {
-        let tree = crate::hex_to_bytes("000402").expect("hex"); // Int 1
-        let input = serde_json::json!({"kind": "NoSuchKind", "value": 0});
-        let inputs = vec![serde_json::json!({})];
-        let out = run_entry(&tree, Some(&input), Some(&inputs), None, None, 3, 3);
-        match out {
-            Outcome::Panicked { note } => assert!(note.contains("input decode"), "note: {note}",),
             other => panic!("expected Panicked, got {}", outcome_name(&other)),
         }
     }
@@ -1139,7 +1153,7 @@ mod tests {
         // tree bytes: header 00 then opcode ff with no node behind it — the lenient parse fails.
         let tree = crate::hex_to_bytes("00ff").expect("hex");
         let input = serde_json::json!({"kind": "NoSuchKind", "value": 0});
-        let out = run_entry(&tree, Some(&input), None, None, None, 3, 3);
+        let out = run_entry(&tree, Envelope::V2 { input: &input }, 3, 3);
         match out {
             Outcome::Panicked { note } => {
                 assert!(note.contains("input decode"), "note: {note}")

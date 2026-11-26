@@ -71,7 +71,8 @@ child's memory in `/proc`.
 - **`eval.rs`**: evaluates an entry's tree in the canonical evaluation context the reference
   builds for a bare evaluation (SELF holding the entry's tree, `INPUTS = [SELF]`, no outputs, no
   headers, height 0, a fixed pre-header, the reference's cost limit), with the entry's input bound
-  where its envelope puts it. Trees are read with `ErgoTree::sigma_parse_bytes_lenient`, since the
+  where its envelope puts it. The envelope is the one the file's schema names, and only its fields
+  are read. Trees are read with `ErgoTree::sigma_parse_bytes_lenient`, since the
   vectors' roots are of any type, and evaluated with `eval::test_util::try_eval_with_deserialize`,
   the public entry (behind the `arbitrary` feature) that evaluates a root of any type. The cost
   is the context's JIT cost counter after the evaluation. A full-context entry

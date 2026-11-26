@@ -165,17 +165,30 @@ enum Tier<'v> {
     NiPoPoW(&'v [J]),
     Wire,
     Transaction,
-    Eval,
+    /// `santa-eval/v1` to `v5`: the canonical context, the entry's binding by its envelope.
+    Eval(EvalSchema),
     /// Any other schema (a newer version of one above, or a tier this runner does not mount): every entry is
     /// not-implemented, never read as a known schema (runner-integration §3).
     Unknown,
 }
 
+/// The eval schema a file names: it decides which fields of an entry are read.
+#[derive(Clone, Copy)]
+enum EvalSchema {
+    V1,
+    V2,
+    V3,
+    V4,
+    V5,
+}
+
 fn tier_of(vector: &J) -> Tier<'_> {
     match vector["schema"].as_str().unwrap_or("") {
-        "santa-eval/v1" | "santa-eval/v2" | "santa-eval/v3" | "santa-eval/v4" | "santa-eval/v5" => {
-            Tier::Eval
-        }
+        "santa-eval/v1" => Tier::Eval(EvalSchema::V1),
+        "santa-eval/v2" => Tier::Eval(EvalSchema::V2),
+        "santa-eval/v3" => Tier::Eval(EvalSchema::V3),
+        "santa-eval/v4" => Tier::Eval(EvalSchema::V4),
+        "santa-eval/v5" => Tier::Eval(EvalSchema::V5),
         "santa-eval/v6-fullctx" => Tier::FullContextEval,
         "santa-nipopow/v1" => Tier::NiPoPoW(
             vector["chain"]
@@ -222,7 +235,7 @@ fn run_vector(vector: &J) -> Vec<(String, J, J)> {
                 ),
                 Tier::Wire => wire_entry(entry),
                 Tier::Transaction => transaction_entry(entry),
-                Tier::Eval => (eval_entry(entry), entry["expected"].clone()),
+                Tier::Eval(schema) => (eval_entry(entry, schema), entry["expected"].clone()),
             };
             (name, actual, expected)
         })
@@ -284,30 +297,48 @@ fn fullctx_entry(entry: &J) -> J {
     )
 }
 
-fn eval_entry(entry: &J) -> J {
+/// An eval entry is read by its file's schema: the fields that envelope defines, and no others
+/// (a `selfRegisters` in a v2 file is not read, as the reference does not read it). A field the
+/// envelope requires and the entry lacks is the vector's defect: `panicked`, with the field. A
+/// field that is present is read, a JSON null too: its decode says what is wrong with it.
+fn eval_entry(entry: &J, schema: EvalSchema) -> J {
     let tree_hex = entry["tree_bytes_hex"]
         .as_str()
         .expect("entry missing tree_bytes_hex");
     let tree_bytes = hex_to_bytes(tree_hex).expect("bad tree_bytes_hex");
-    let input = entry.get("input").filter(|v| !v.is_null());
-    let inputs = entry.get("inputs").and_then(|v| v.as_array());
-    let self_registers = entry.get("selfRegisters").and_then(|v| v.as_object()); // v4
-    let extension = entry.get("extension").and_then(|v| v.as_object()); // v5
     let tree_v = entry["version"]["ergoTree"].as_u64().unwrap_or(0) as u8;
     let act_v = entry["version"]["activated"].as_u64().unwrap_or(0) as u8;
-    caught(
-        || {
-            eval::run_entry(
-                &tree_bytes,
-                input,
-                inputs,
-                self_registers,
-                extension,
-                tree_v,
-                act_v,
-            )
-            .to_json()
+    let input = || entry.get("input");
+    let object = |field: &str| entry.get(field).and_then(|v| v.as_object());
+    let missing =
+        |version: &str, field: &str| eval_panicked(format!("{version} entry missing {field}"));
+    let envelope = match schema {
+        EvalSchema::V1 => eval::Envelope::V1,
+        EvalSchema::V2 => match input() {
+            Some(input) => eval::Envelope::V2 { input },
+            None => return missing("v2", "input"),
         },
+        EvalSchema::V3 => eval::Envelope::V3 {
+            inputs: entry
+                .get("inputs")
+                .and_then(|v| v.as_array())
+                .map_or(&[], Vec::as_slice),
+        },
+        EvalSchema::V4 => match (object("selfRegisters"), input()) {
+            (Some(self_registers), Some(input)) => eval::Envelope::V4 {
+                self_registers,
+                input,
+            },
+            (None, _) => return missing("v4", "selfRegisters"),
+            (_, None) => return missing("v4", "input"),
+        },
+        EvalSchema::V5 => match object("extension") {
+            Some(extension) => eval::Envelope::V5 { extension },
+            None => return missing("v5", "extension"),
+        },
+    };
+    caught(
+        || eval::run_entry(&tree_bytes, envelope, tree_v, act_v).to_json(),
         eval_panicked,
     )
 }
@@ -517,10 +548,10 @@ mod tests {
         // ergoTree v3, activated v3
         let actual = crate::eval::run_entry(
             &tree_bytes,
-            Some(&input_json),
-            None,
-            Some(self_registers),
-            None,
+            crate::eval::Envelope::V4 {
+                self_registers,
+                input: &input_json,
+            },
             3,
             3,
         )
@@ -540,6 +571,161 @@ mod tests {
                 actual
             );
         }
+    }
+
+    /// An eval entry is read by its file's schema, never by the fields it happens to carry: the
+    /// same entry, holding the fields of every envelope, binds what its file's schema defines.
+    /// Three trees, one surface each: is R4 defined on SELF, is variable 1, is variable 2. The
+    /// entry's `input` would bind variable 1 and its `extension` binds variable 2, so the two
+    /// cannot stand in for each other.
+    #[test]
+    fn an_eval_entry_is_read_by_its_files_schema() {
+        // SELF.R4[Int].isDefined
+        let r4_defined = "0b05e6c6a70404";
+        // getVar[Int](1).isDefined, getVar[Int](2).isDefined
+        let var1_defined = "0b04e6e30104";
+        let var2_defined = "0b04e6e30204";
+        let entry = |tree: &str| {
+            json!({
+                "name": "e", "tree_bytes_hex": tree, "version": {"activated": 3, "ergoTree": 3},
+                "input": {"kind": "Int", "value": 7},
+                "inputs": [{}],
+                "selfRegisters": {"4": {"kind": "Int", "value": 1}},
+                "extension": {"2": {"kind": "Int", "value": 7}},
+                "expected": null,
+            })
+        };
+        let answer = |schema: &str, tree: &str| -> J {
+            let vector = json!({"schema": schema, "entries": [entry(tree)]});
+            let results = super::run_vector(&vector);
+            assert_eq!(results.len(), 1, "{schema}");
+            results[0].1["value"]["value"].clone()
+        };
+        // (schema, R4 defined, variable 1 defined, variable 2 defined)
+        for (schema, r4, var1, var2) in [
+            ("santa-eval/v1", false, false, false),
+            ("santa-eval/v2", false, true, false),
+            ("santa-eval/v3", false, false, false),
+            ("santa-eval/v4", true, true, false),
+            ("santa-eval/v5", false, false, true),
+        ] {
+            assert_eq!(answer(schema, r4_defined), json!(r4), "{schema}: R4");
+            assert_eq!(
+                answer(schema, var1_defined),
+                json!(var1),
+                "{schema}: variable 1"
+            );
+            assert_eq!(
+                answer(schema, var2_defined),
+                json!(var2),
+                "{schema}: variable 2"
+            );
+        }
+    }
+
+    /// A v3 entry's `inputs` are read: the variable an input's extension binds is there for
+    /// `getVarFromInput` (SANTA `Context.getVarFromInput`, entry `present-true#0`).
+    #[test]
+    fn a_v3_entry_binds_its_inputs_extensions() {
+        let vector = json!({"schema": "santa-eval/v3", "entries": [{
+            "name": "e", "tree_bytes_hex": "1b0f020300020bdc650cfe027300730101",
+            "version": {"activated": 3, "ergoTree": 3},
+            "inputs": [{"extension": {"11": {"kind": "Boolean", "value": true}}}],
+            "expected": null,
+        }]});
+        let results = super::run_vector(&vector);
+        assert_eq!(
+            results[0].1,
+            json!({
+                "value": {"kind": "Option", "value": {"kind": "Boolean", "value": true}},
+                "cost": 17,
+                "error": null,
+            })
+        );
+    }
+
+    /// A field that is present and null is present, not missing: the entry is `panicked` by the
+    /// decode of its input, which names what is wrong with it.
+    #[test]
+    fn a_null_input_is_present() {
+        for (schema, registers) in [("santa-eval/v2", None), ("santa-eval/v4", Some(json!({})))] {
+            let mut entry = json!({
+                "name": "e", "tree_bytes_hex": "000402", "version": {"activated": 3, "ergoTree": 0},
+                "input": null,
+                "expected": null,
+            });
+            if let Some(registers) = registers {
+                entry["selfRegisters"] = registers;
+            }
+            let results = super::run_vector(&json!({"schema": schema, "entries": [entry]}));
+            let note = results[0].1["note"].as_str().unwrap_or("");
+            assert_eq!(
+                results[0].1["error"], "panicked",
+                "{schema}: {}",
+                results[0].1
+            );
+            assert!(note.contains("input decode"), "{schema}: {note}");
+            assert!(!note.contains("entry missing"), "{schema}: {note}");
+        }
+    }
+
+    /// A field of another envelope is not even decoded: a v3 entry's bogus top-level `input`
+    /// does not stop the entry.
+    #[test]
+    fn a_field_of_another_envelope_is_not_decoded() {
+        let vector = json!({"schema": "santa-eval/v3", "entries": [{
+            "name": "e", "tree_bytes_hex": "000402", "version": {"activated": 3, "ergoTree": 0},
+            "input": {"kind": "NoSuchKind", "value": 0},
+            "inputs": [{}],
+            "expected": null,
+        }]});
+        let results = super::run_vector(&vector);
+        assert_eq!(results[0].1["error"], J::Null, "{}", results[0].1);
+        assert_eq!(results[0].1["value"]["value"], json!(1));
+    }
+
+    /// A field its envelope requires and the entry lacks is the vector's defect: `panicked`, the
+    /// field in the note; a v3 entry without `inputs` has none.
+    #[test]
+    fn a_missing_envelope_field_is_panicked() {
+        for (schema, fields, note) in [
+            ("santa-eval/v2", json!({}), "v2 entry missing input"),
+            (
+                "santa-eval/v4",
+                json!({"input": {"kind": "Int", "value": 0}}),
+                "v4 entry missing selfRegisters",
+            ),
+            (
+                "santa-eval/v4",
+                json!({"selfRegisters": {}}),
+                "v4 entry missing input",
+            ),
+            ("santa-eval/v5", json!({}), "v5 entry missing extension"),
+        ] {
+            let mut entry = json!({
+                "name": "e", "tree_bytes_hex": "000402", "version": {"activated": 3, "ergoTree": 0},
+                "expected": null,
+            });
+            for (k, v) in fields.as_object().unwrap() {
+                entry[k] = v.clone();
+            }
+            let results = super::run_vector(&json!({"schema": schema, "entries": [entry]}));
+            assert_eq!(
+                results[0].1["error"], "panicked",
+                "{schema}: {}",
+                results[0].1
+            );
+            assert!(
+                results[0].1["note"].as_str().unwrap().contains(note),
+                "{schema}: {}",
+                results[0].1
+            );
+        }
+        let v3 = json!({"schema": "santa-eval/v3", "entries": [{
+            "name": "e", "tree_bytes_hex": "000402", "version": {"activated": 3, "ergoTree": 0},
+            "expected": null,
+        }]});
+        assert_eq!(super::run_vector(&v3)[0].1["value"]["value"], json!(1));
     }
 
     /// A schema the runner was not written for (a newer version of one it knows, or a tier it does not mount) is
@@ -825,6 +1011,7 @@ mod tests {
         let vector = json!({"schema": "santa-eval/v2", "entries": [{
             "name": "e#0",
             "tree_bytes_hex": hex_tree,
+            "input": {"kind": "Int", "value": 0},
             "version": {"activated": 3},
             "expected": {}
         }]});
